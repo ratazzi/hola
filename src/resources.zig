@@ -29,6 +29,15 @@ else
     struct {
         pub const ruby_prelude = @embedFile("resources/macos_defaults_resource.rb");
     };
+
+// Linux-only resources
+pub const apt_repository = if (builtin.os.tag == .linux)
+    @import("resources/apt_repository.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/apt_repository_resource.rb");
+    };
+
 // Future resources:
 // pub const package = @import("resources/package.zig");
 // pub const service = @import("resources/service.zig");
@@ -131,6 +140,7 @@ const ResourceGeneric = union(enum) {
     template: template.Resource,
     directory: directory.Resource,
     link: link.Resource,
+    apt_repository: apt_repository.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -140,6 +150,7 @@ const ResourceGeneric = union(enum) {
             .template => |res| res.deinit(allocator),
             .directory => |res| res.deinit(allocator),
             .link => |res| res.deinit(allocator),
+            .apt_repository => |res| res.deinit(allocator),
         }
     }
 
@@ -151,6 +162,7 @@ const ResourceGeneric = union(enum) {
             .template => |res| try res.apply(),
             .directory => |res| try res.apply(),
             .link => |res| try res.apply(),
+            .apt_repository => |res| try res.apply(),
         };
     }
 
@@ -162,6 +174,7 @@ const ResourceGeneric = union(enum) {
             .template => |res| res.path,
             .directory => |res| res.path,
             .link => |res| res.path,
+            .apt_repository => |res| res.name,
         };
     }
 
@@ -173,6 +186,7 @@ const ResourceGeneric = union(enum) {
             .template => |*res| &res.common,
             .directory => |*res| &res.common,
             .link => |*res| &res.common,
+            .apt_repository => |*res| &res.common,
         };
     }
 };

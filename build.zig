@@ -75,16 +75,21 @@ pub fn build(b: *std.Build) void {
     // Link mruby static library
     exe.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libmruby.a", .{mruby_path}) });
     exe.linkLibC();
-    // Link Foundation framework for AppleScript support
-    exe.linkFramework("Foundation");
-    // Add Objective-C bridge file for runtime calls
-    // Note: .m files are compiled as Objective-C
-    exe.addCSourceFile(.{ .file = b.path("src/applescript_bridge.m"), .flags = &.{"-fobjc-arc"} });
+
+    // Platform-specific configuration
+    if (target.result.os.tag == .macos) {
+        // macOS: Link Foundation framework for AppleScript support
+        exe.linkFramework("Foundation");
+        // Add Objective-C bridge file for runtime calls
+        // Note: .m files are compiled as Objective-C
+        exe.addCSourceFile(.{ .file = b.path("src/applescript_bridge.m"), .flags = &.{"-fobjc-arc"} });
+        // Add CFPreferences C wrapper
+        exe.addCSourceFile(.{ .file = b.path("src/cfprefs_wrapper.c"), .flags = &.{} });
+    }
+
     // Add mruby helpers for array handling
     exe.addCSourceFile(.{ .file = b.path("src/mruby_helpers.c"), .flags = &.{} });
-    // Add CFPreferences C wrapper
-    exe.addCSourceFile(.{ .file = b.path("src/cfprefs_wrapper.c"), .flags = &.{} });
-    configureLibGit2(exe, b, libgit2_path);
+    configureLibGit2(exe, b, libgit2_path, target.result.os.tag);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -122,7 +127,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    configureLibGit2(exe_tests, b, libgit2_path);
+    configureLibGit2(exe_tests, b, libgit2_path, target.result.os.tag);
 
     // Run step for the test executable
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -144,14 +149,29 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 }
 
-fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: []const u8) void {
+fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: []const u8, os_tag: std.Target.Os.Tag) void {
     step.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/libssh2"}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
-    step.linkSystemLibrary("z");
-    step.linkSystemLibrary("iconv");
-    step.linkFramework("CoreFoundation");
-    step.linkFramework("Security");
+
+    if (os_tag == .macos) {
+        // macOS: use static libraries from Homebrew
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{libgit2_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/libssh2"}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
+        step.linkSystemLibrary("z");
+        step.linkSystemLibrary("iconv");
+        step.linkFramework("CoreFoundation");
+        step.linkFramework("Security");
+    } else {
+        // Linux: use static libraries (built from source)
+        // Default paths assume libraries are in /usr/local/lib
+        const static_lib_path = if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr/local" else libgit2_path;
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{static_lib_path}) });
+        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{static_lib_path}) });
+    }
 }

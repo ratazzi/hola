@@ -1,15 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mruby = @import("mruby.zig");
 const git = @import("git.zig");
 const dotfiles = @import("dotfiles.zig");
-const plist = @import("plist.zig");
-const applescript = @import("applescript.zig");
+const plist = if (builtin.os.tag == .macos) @import("plist.zig") else struct {};
+const applescript = if (builtin.os.tag == .macos) @import("applescript.zig") else struct {};
 const provision = @import("provision.zig");
 const apply_module = @import("apply.zig");
 const clap = @import("clap");
 const toml = @import("toml");
 const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
+
+const is_macos = builtin.os.tag == .macos;
 
 const main_params = clap.parseParamsComptime(
     \\-h, --help   Print this help and exit
@@ -129,11 +132,19 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         return;
     }
     if (std.mem.eql(u8, command, "dock-apps")) {
-        try runDockAppsCommand(allocator, iter);
+        if (is_macos) {
+            try runDockAppsCommand(allocator, iter);
+        } else {
+            std.debug.print("Error: dock-apps command is only available on macOS\n", .{});
+        }
         return;
     }
     if (std.mem.eql(u8, command, "applescript")) {
-        try runApplescriptCommand(allocator, iter);
+        if (is_macos) {
+            try runApplescriptCommand(allocator, iter);
+        } else {
+            std.debug.print("Error: applescript command is only available on macOS\n", .{});
+        }
         return;
     }
     if (std.mem.eql(u8, command, "provision")) {

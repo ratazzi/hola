@@ -41,10 +41,10 @@ pub fn installPackages(
     const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     defer allocator.free(content);
 
-    var packages = std.ArrayList([]const u8).init(allocator);
+    var packages = std.ArrayList([]const u8).empty;
     defer {
         for (packages.items) |p| allocator.free(p);
-        packages.deinit();
+        packages.deinit(allocator);
     }
 
     var it = std.mem.splitScalar(u8, content, '\n');
@@ -52,7 +52,7 @@ pub fn installPackages(
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
         if (trimmed.len == 0) continue;
         if (trimmed[0] == '#') continue;
-        try packages.append(try allocator.dupe(u8, trimmed));
+        try packages.append(allocator, try allocator.dupe(u8, trimmed));
     }
 
     if (packages.items.len == 0) {
@@ -67,7 +67,8 @@ pub fn installPackages(
 
     // apt-get / apt install -y <packages...>
     try display.showInfo("Installing apt packages...");
-    var args_list = std.ArrayList([]const u8).init(allocator);
+    var args_list = std.ArrayList([]const u8).empty;
+    defer args_list.deinit(allocator);
 
     try args_list.append(allocator, "sudo");
     try args_list.append(allocator, apt_path);

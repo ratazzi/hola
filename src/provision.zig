@@ -8,6 +8,7 @@ const http_utils = @import("http_utils.zig");
 const base = @import("base_resource.zig");
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
+const is_linux = builtin.os.tag == .linux;
 
 pub const Options = struct {
     script_path: []const u8,
@@ -148,6 +149,13 @@ fn buildMacosDefaultsId(allocator: std.mem.Allocator, res: *const resources.maco
 }
 fn wrapMacosDefaults(res: resources.macos_defaults.Resource) resources.Resource {
     return .{ .macos_defaults = res };
+}
+
+fn buildAptRepositoryId(allocator: std.mem.Allocator, res: *const resources.apt_repository.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "apt_repository", res.name);
+}
+fn wrapAptRepository(res: resources.apt_repository.Resource) resources.Resource {
+    return .{ .apt_repository = res };
 }
 
 /// Get a short filename from URL for display
@@ -299,6 +307,22 @@ export fn zig_add_macos_defaults_resource(mrb: *mruby.mrb_state, self: mruby.mrb
     );
 }
 
+// Zig callback for apt_repository resource (Linux only)
+export fn zig_add_apt_repository_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_linux) {
+        return mruby.mrb_nil_value();
+    }
+
+    return addResourceWithMetadata(
+        resources.apt_repository.Resource,
+        mrb,
+        self,
+        resources.apt_repository.zigAddResource,
+        buildAptRepositoryId,
+        wrapAptRepository,
+    );
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -402,6 +426,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         );
     }
 
+    // Register apt_repository resource (Linux only)
+    // Signature: add_apt_repository(name, uri, key_url, key_path, distribution, components, arch, options, repo_type, action, only_if_block=nil, not_if_block=nil, notifications=nil)
+    if (is_linux) {
+        mruby.mrb_define_module_function(
+            mrb_ptr,
+            zig_module,
+            "add_apt_repository",
+            zig_add_apt_repository_resource,
+            mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(3), // 10 required + 3 optional
+        );
+    }
+
     // Future: Register other resources
     // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_package", zig_add_package_resource, ...);
     // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_service", zig_add_service_resource, ...);
@@ -418,6 +454,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.macos_defaults.ruby_prelude);
     try mrb.evalString(resources.directory.ruby_prelude);
     try mrb.evalString(resources.link.ruby_prelude);
+    // Load Linux-specific Ruby DSLs (apt_repository, etc.)
+    // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
+    try mrb.evalString(resources.apt_repository.ruby_prelude);
     // Future: Load other resource preludes
     // try mrb.evalString(resources.package.ruby_prelude);
     // try mrb.evalString(resources.service.ruby_prelude);
