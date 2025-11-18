@@ -5,6 +5,12 @@ const download_manager = @import("download_manager.zig");
 const modern_display = @import("modern_provision_display.zig");
 const logger = @import("logger.zig");
 const http_utils = @import("http_utils.zig");
+const http_client = @import("http_client.zig");
+const json = @import("json.zig");
+const base64 = @import("base64.zig");
+const hola_logger = @import("hola_logger.zig");
+const node_info = @import("node_info.zig");
+const env_access = @import("env_access.zig");
 const base = @import("base_resource.zig");
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
@@ -438,6 +444,144 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         );
     }
 
+
+    // Register HTTP client functions
+    // Initialize HTTP client with allocator
+    http_client.setAllocator(allocator);
+
+    // Signature: http_get(url, headers=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "http_get",
+        http_client.zig_http_get,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1),
+    );
+
+    // Signature: http_post(url, body=nil, content_type=nil, headers=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "http_post",
+        http_client.zig_http_post,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
+    );
+
+    // Register JSON functions
+    json.setAllocator(allocator);
+
+    // Signature: json_encode(obj)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "json_encode",
+        json.zig_json_encode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Signature: json_decode(str)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "json_decode",
+        json.zig_json_decode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Register Base64 functions
+    base64.setAllocator(allocator);
+
+    // Signature: base64_encode(str)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "base64_encode",
+        base64.zig_base64_encode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Signature: base64_decode(str)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "base64_decode",
+        base64.zig_base64_decode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Signature: base64_urlsafe_encode(str)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "base64_urlsafe_encode",
+        base64.zig_base64_urlsafe_encode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Signature: base64_urlsafe_decode(str)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "base64_urlsafe_decode",
+        base64.zig_base64_urlsafe_decode,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Register Hola logging functions
+    // Signature: hola_debug(msg), hola_info(msg), hola_warn(msg), hola_error(msg)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "hola_debug",
+        hola_logger.zig_hola_debug,
+        mruby.MRB_ARGS_REQ(1),
+    );
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "hola_info",
+        hola_logger.zig_hola_info,
+        mruby.MRB_ARGS_REQ(1),
+    );
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "hola_warn",
+        hola_logger.zig_hola_warn,
+        mruby.MRB_ARGS_REQ(1),
+    );
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "hola_error",
+        hola_logger.zig_hola_error,
+        mruby.MRB_ARGS_REQ(1),
+    );
+
+    // Register node info functions
+    node_info.setAllocator(allocator);
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_hostname", node_info.zig_get_node_hostname, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_fqdn", node_info.zig_get_node_fqdn, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform", node_info.zig_get_node_platform, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform_family", node_info.zig_get_node_platform_family, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform_version", node_info.zig_get_node_platform_version, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_os", node_info.zig_get_node_os, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_kernel_name", node_info.zig_get_node_kernel_name, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_kernel_release", node_info.zig_get_node_kernel_release, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_machine", node_info.zig_get_node_machine, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_cpu_arch", node_info.zig_get_node_cpu_arch, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_network_interfaces", node_info.zig_get_node_network_interfaces, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_default_gateway_ip", node_info.zig_get_node_default_gateway_ip, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_default_interface", node_info.zig_get_node_default_interface, mruby.MRB_ARGS_NONE());
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_lsb_info", node_info.zig_get_node_lsb_info, mruby.MRB_ARGS_NONE());
+
+    // Register ENV access functions
+    env_access.setAllocator(allocator);
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_get", env_access.zig_env_get, mruby.MRB_ARGS_REQ(1));
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_set", env_access.zig_env_set, mruby.MRB_ARGS_REQ(2));
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_delete", env_access.zig_env_delete, mruby.MRB_ARGS_REQ(1));
+    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_has_key", env_access.zig_env_has_key, mruby.MRB_ARGS_REQ(1));
+
     // Future: Register other resources
     // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_package", zig_add_package_resource, ...);
     // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_service", zig_add_service_resource, ...);
@@ -457,6 +601,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load Linux-specific Ruby DSLs (apt_repository, etc.)
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
+    // Load JSON module (must be before HTTP client)
+    try mrb.evalString(json.ruby_prelude);
+    // Load HTTP client prelude
+    try mrb.evalString(http_client.ruby_prelude);
+    // Load Base64 module
+    try mrb.evalString(base64.ruby_prelude);
+    // Load Hola logging module
+    try mrb.evalString(hola_logger.ruby_prelude);
+    // Load node info module
+    try mrb.evalString(node_info.ruby_prelude);
+    // Load ENV access module
+    try mrb.evalString(env_access.ruby_prelude);
     // Future: Load other resource preludes
     // try mrb.evalString(resources.package.ruby_prelude);
     // try mrb.evalString(resources.service.ruby_prelude);

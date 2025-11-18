@@ -43,8 +43,9 @@ pub extern fn mrb_gv_get(mrb: *mrb_state, sym: mrb_sym) mrb_value;
 pub extern fn mrb_gv_set(mrb: *mrb_state, sym: mrb_sym, val: mrb_value) void;
 pub extern fn mrb_intern_cstr(mrb: *mrb_state, str: [*c]const u8) mrb_sym;
 
-// Value type checking
-pub extern fn mrb_type(val: mrb_value) u32; // Returns mrb_vtype enum
+// Value type checking (via C helper since mrb_type is a macro)
+pub extern fn zig_mrb_type(val: mrb_value) u32;
+pub const mrb_type = zig_mrb_type;
 
 // Array handling (using C helpers)
 pub extern fn zig_mrb_ary_len(mrb: *mrb_state, arr: mrb_value) mrb_int;
@@ -54,6 +55,17 @@ pub extern fn zig_mrb_float(mrb: *mrb_state, val: mrb_value) f64;
 
 // Value constructors
 pub extern fn zig_mrb_int_value(mrb: *mrb_state, i: mrb_int) mrb_value;
+
+// Array creation and manipulation
+pub extern fn mrb_ary_new_capa(mrb: *mrb_state, capa: mrb_int) mrb_value;
+pub extern fn mrb_ary_push(mrb: *mrb_state, arr: mrb_value, val: mrb_value) void;
+
+// Hash creation and manipulation
+pub extern fn mrb_hash_new(mrb: *mrb_state) mrb_value;
+pub extern fn mrb_hash_set(mrb: *mrb_state, hash: mrb_value, key: mrb_value, val: mrb_value) void;
+
+// String creation
+pub extern fn mrb_str_new(mrb: *mrb_state, ptr: [*c]const u8, len: mrb_int) mrb_value;
 
 // Convenient aliases
 pub const mrb_ary_len = zig_mrb_ary_len;
