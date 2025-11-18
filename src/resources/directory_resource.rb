@@ -5,6 +5,8 @@ class DirectoryResource
   def initialize(path, &block)
     @path = File.expand_path(path)
     @mode = nil
+    @owner = ""
+    @group = ""
     @recursive = false
     @action = "create"
     @only_if_proc = nil
@@ -17,11 +19,19 @@ class DirectoryResource
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     mode_arg = @mode.nil? ? "" : @mode.to_s
     action_arg = @action.nil? ? "create" : @action.to_s
-    ZigBackend.add_directory(@path, mode_arg, @recursive, action_arg, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_directory(@path, mode_arg, @owner, @group, !!@recursive, action_arg, only_if_arg, not_if_arg, notifications_arg)
   end
 
   def mode(value)
     @mode = value.to_s
+  end
+
+  def owner(value)
+    @owner = value.to_s
+  end
+
+  def group(value)
+    @group = value.to_s
   end
 
   def recursive(value)

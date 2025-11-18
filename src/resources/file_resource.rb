@@ -6,6 +6,8 @@ class FileResource
     @path = File.expand_path(path)
     @content = ""
     @mode = ""
+    @owner = ""
+    @group = ""
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -19,7 +21,7 @@ class FileResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_file(@path, @content, @action, @mode, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_file(@path, @content, @action, @mode, @owner, @group, only_if_arg, not_if_arg, notifications_arg)
   end
 
   def content(value)
@@ -28,6 +30,14 @@ class FileResource
 
   def mode(value)
     @mode = value.to_s
+  end
+
+  def owner(value)
+    @owner = value.to_s
+  end
+
+  def group(value)
+    @group = value.to_s
   end
 
   def action(value)

@@ -6,7 +6,7 @@ const base = @import("../base_resource.zig");
 pub const Resource = struct {
     // Resource-specific properties
     path: []const u8,
-    mode: ?u32,
+    attrs: base.FileAttributes,
     recursive: bool,
     action: Action,
 
@@ -20,6 +20,7 @@ pub const Resource = struct {
 
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+        self.attrs.deinit(allocator);
 
         // Deinit common props (handles GC, notifications, etc.)
         var common = self.common;
@@ -85,8 +86,11 @@ pub const Resource = struct {
         };
 
         if (dir_exists) {
-            // Check if mode needs to be updated
-            if (self.mode) |m| {
+            // Check if attributes need to be updated
+            var needs_update = false;
+
+            // Check and update mode
+            if (self.attrs.mode) |m| {
                 var dir = if (is_abs)
                     try std.fs.openDirAbsolute(self.path, .{})
                 else
@@ -95,17 +99,23 @@ pub const Resource = struct {
 
                 const stat = try dir.stat();
                 const current_mode = stat.mode & 0o777;
-                if (current_mode == m) {
-                    return false; // Directory exists with same mode
-                } else {
-                    // Update mode
-                    std.posix.fchmod(dir.fd, @as(std.posix.mode_t, @intCast(m))) catch {
-                        // Ignore permission errors on some systems
-                    };
-                    return true; // Mode was updated
+                if (current_mode != m) {
+                    // Update mode using path-based chmod instead of fd-based fchmod
+                    // This avoids BADF errors on some systems where dir.fd might not be valid
+                    base.setFileMode(self.path, m);
+                    needs_update = true;
                 }
             }
-            return false; // Directory exists
+
+            // Apply owner/group if specified (without mode, as we handled it above)
+            if (self.attrs.owner != null or self.attrs.group != null) {
+                base.setFileOwnerAndGroup(self.path, self.attrs.owner, self.attrs.group) catch |err| {
+                    std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+                };
+                needs_update = true;
+            }
+
+            return needs_update;
         }
 
         // Create directory
@@ -121,15 +131,16 @@ pub const Resource = struct {
         }
 
         // Set mode if specified
-        if (self.mode) |m| {
-            var dir = if (is_abs)
-                try std.fs.openDirAbsolute(self.path, .{})
-            else
-                try std.fs.cwd().openDir(self.path, .{});
-            defer dir.close();
+        if (self.attrs.mode) |m| {
+            // Use path-based chmod instead of fd-based fchmod
+            // This avoids BADF errors on some systems
+            base.setFileMode(self.path, m);
+        }
 
-            std.posix.fchmod(dir.fd, @as(std.posix.mode_t, @intCast(m))) catch {
-                // Ignore permission errors on some systems
+        // Apply owner/group if specified
+        if (self.attrs.owner != null or self.attrs.group != null) {
+            base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
             };
         }
 
@@ -204,62 +215,57 @@ pub fn zigAddResource(
     resources: *std.ArrayList(Resource),
     allocator: std.mem.Allocator,
 ) mruby.mrb_value {
-    // Parse arguments: path, mode, recursive, action, only_if_block, not_if_block, notifications
+    // Parse arguments: path, mode, owner, group, recursive, action, only_if_block, not_if_block, notifications
     var path_val: mruby.mrb_value = undefined;
     var mode_val: mruby.mrb_value = undefined;
+    var owner_val: mruby.mrb_value = undefined;
+    var group_val: mruby.mrb_value = undefined;
     var recursive_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Format: S|obo|oooA
-    // S: required string (path)
-    // |: optional arguments start
-    // o: optional object (mode - can be string or nil)
-    // b: optional boolean (recursive)
-    // o: optional object (action - can be string or nil)
-    // |: optional arguments start
-    // o: optional object (only_if)
-    // o: optional object (not_if)
-    // A: optional array (notifications)
-    _ = mruby.mrb_get_args(mrb, "S|obo|ooA", &path_val, &mode_val, &recursive_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Format: SSSSbS|ooA (path, mode, owner, group, recursive, action, optional blocks, optional array)
+    _ = mruby.mrb_get_args(mrb, "SSSSbS|ooA", &path_val, &mode_val, &owner_val, &group_val, &recursive_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
 
     // Extract path
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const path = allocator.dupe(u8, std.mem.span(path_cstr)) catch return mruby.mrb_nil_value();
 
     // Parse mode (optional)
-    // mode_val can be nil, empty string, or a mode string like "0755"
-    var mode: ?u32 = null;
-    if (mruby.mrb_test(mode_val)) {
-        // Check if it's actually a string (not nil)
-        // In mruby, nil has type 0, string has type 5
-        // We can't use mrb_type directly (linker issue), so we rely on mrb_test
-        // If mrb_test returns true, it's not nil/false, so safe to convert
-        const mode_cstr = mruby.mrb_str_to_cstr(mrb, mode_val);
-        const mode_str = std.mem.span(mode_cstr);
-        if (mode_str.len > 0) {
-            const parsed_mode = std.fmt.parseInt(u32, mode_str, 8) catch null;
-            if (parsed_mode) |m| {
-                mode = m;
-            }
-        }
-    }
+    const mode_cstr = mruby.mrb_str_to_cstr(mrb, mode_val);
+    const mode_str = std.mem.span(mode_cstr);
+    const mode: ?u32 = if (mode_str.len > 0)
+        std.fmt.parseInt(u32, mode_str, 8) catch null
+    else
+        null;
 
-    // Parse recursive (optional, default false)
-    const recursive = if (mruby.mrb_test(recursive_val)) mruby.mrb_test(recursive_val) else false;
+    // Parse owner and group
+    const owner_cstr = mruby.mrb_str_to_cstr(mrb, owner_val);
+    const owner_str = std.mem.span(owner_cstr);
+    const owner: ?[]const u8 = if (owner_str.len > 0)
+        allocator.dupe(u8, owner_str) catch return mruby.mrb_nil_value()
+    else
+        null;
 
-    // Parse action (optional, default create)
-    const action: Resource.Action = if (mruby.mrb_test(action_val)) blk: {
-        // action_val can be nil or a string
-        const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
-        const action_str = std.mem.span(action_cstr);
-        if (std.mem.eql(u8, action_str, "delete")) {
-            break :blk .delete;
-        }
-        break :blk .create;
-    } else .create;
+    const group_cstr = mruby.mrb_str_to_cstr(mrb, group_val);
+    const group_str = std.mem.span(group_cstr);
+    const group: ?[]const u8 = if (group_str.len > 0)
+        allocator.dupe(u8, group_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
+    // Parse recursive (boolean)
+    const recursive = mruby.mrb_test(recursive_val);
+
+    // Parse action (string)
+    const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
+    const action_str = std.mem.span(action_cstr);
+    const action: Resource.Action = if (std.mem.eql(u8, action_str, "delete"))
+        .delete
+    else
+        .create;
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
@@ -267,7 +273,11 @@ pub fn zigAddResource(
 
     resources.append(allocator, .{
         .path = path,
-        .mode = mode,
+        .attrs = .{
+            .mode = mode,
+            .owner = owner,
+            .group = group,
+        },
         .recursive = recursive,
         .action = action,
         .common = common,

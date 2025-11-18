@@ -6,6 +6,8 @@ class TemplateResource
     @path = File.expand_path(path)
     @source = ""
     @mode = ""
+    @owner = ""
+    @group = ""
     @action = "create"
     @variables = {}
     @only_if_proc = nil
@@ -41,7 +43,7 @@ class TemplateResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_template(@path, @source, @mode, variables_arg, @action, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_template(@path, @source, @mode, @owner, @group, variables_arg, @action, only_if_arg, not_if_arg, notifications_arg)
   end
 
   def source(value)
@@ -50,6 +52,14 @@ class TemplateResource
 
   def mode(value)
     @mode = value.to_s
+  end
+
+  def owner(value)
+    @owner = value.to_s
+  end
+
+  def group(value)
+    @group = value.to_s
   end
 
   def action(value)

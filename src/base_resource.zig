@@ -152,6 +152,18 @@ pub fn fillCommonFromRuby(
     common.protectBlocks();
 }
 
+/// File system attributes that can be managed
+pub const FileAttributes = struct {
+    mode: ?u32 = null,
+    owner: ?[]const u8 = null,
+    group: ?[]const u8 = null,
+
+    pub fn deinit(self: FileAttributes, allocator: std.mem.Allocator) void {
+        if (self.owner) |o| allocator.free(o);
+        if (self.group) |g| allocator.free(g);
+    }
+};
+
 /// Set file mode (permissions) for a given file path using POSIX fchmodat
 /// Uses AT_FDCWD to work with the current working directory
 /// Silently ignores errors to maintain backward compatibility
@@ -159,6 +171,121 @@ pub fn setFileMode(file_path: []const u8, mode: u32) void {
     std.posix.fchmodat(std.posix.AT.FDCWD, file_path, @as(std.posix.mode_t, @intCast(mode)), 0) catch {};
 }
 
+/// Set file owner (user) for a given file path
+/// On non-macOS systems, uses chown system call
+/// On macOS, uses chown system call (requires root or matching uid)
+pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
+    const c = @cImport({
+        @cInclude("sys/stat.h");
+        @cInclude("unistd.h");
+    });
+
+    // Get UID from username
+    const uid = try getUserId(owner);
+
+    // Get current GID (we're not changing group) using stat
+    const path_z = try std.posix.toPosixPath(file_path);
+    var stat_buf: c.struct_stat = undefined;
+    if (c.stat(&path_z, &stat_buf) != 0) {
+        return error.StatFailed;
+    }
+    const gid = stat_buf.st_gid;
+
+    // Change ownership
+    if (c.chown(&path_z, uid, gid) != 0) {
+        return error.ChownFailed;
+    }
+}
+
+/// Set file group for a given file path
+pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
+    const c = @cImport({
+        @cInclude("sys/stat.h");
+        @cInclude("unistd.h");
+    });
+
+    // Get GID from group name
+    const gid = try getGroupId(group);
+
+    // Get current UID (we're not changing owner) using stat
+    const path_z = try std.posix.toPosixPath(file_path);
+    var stat_buf: c.struct_stat = undefined;
+    if (c.stat(&path_z, &stat_buf) != 0) {
+        return error.StatFailed;
+    }
+    const uid = stat_buf.st_uid;
+
+    // Change ownership
+    if (c.chown(&path_z, uid, gid) != 0) {
+        return error.ChownFailed;
+    }
+}
+
+/// Set file owner and group together
+pub fn setFileOwnerAndGroup(file_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
+    const c = @cImport({
+        @cInclude("sys/stat.h");
+        @cInclude("unistd.h");
+    });
+
+    const path_z = try std.posix.toPosixPath(file_path);
+    var stat_buf: c.struct_stat = undefined;
+    if (c.stat(&path_z, &stat_buf) != 0) {
+        return error.StatFailed;
+    }
+
+    const uid = if (owner) |o| try getUserId(o) else stat_buf.st_uid;
+    const gid = if (group) |g| try getGroupId(g) else stat_buf.st_gid;
+
+    if (c.chown(&path_z, uid, gid) != 0) {
+        return error.ChownFailed;
+    }
+}
+
+/// Apply file attributes (mode, owner, group) to a file
+pub fn applyFileAttributes(file_path: []const u8, attrs: FileAttributes) !void {
+    // Set mode if specified
+    if (attrs.mode) |m| {
+        setFileMode(file_path, m);
+    }
+
+    // Set owner and/or group if specified
+    if (attrs.owner != null or attrs.group != null) {
+        try setFileOwnerAndGroup(file_path, attrs.owner, attrs.group);
+    }
+}
+
+/// Get UID from username using getpwnam
+fn getUserId(username: []const u8) !std.posix.uid_t {
+    const c = @cImport({
+        @cInclude("pwd.h");
+        @cInclude("string.h");
+    });
+
+    const username_z = try std.posix.toPosixPath(username);
+    const pwd = c.getpwnam(&username_z);
+    if (pwd == null) {
+        return error.UserNotFound;
+    }
+
+    return @intCast(pwd.*.pw_uid);
+}
+
+/// Get GID from group name using getgrnam
+fn getGroupId(groupname: []const u8) !std.posix.gid_t {
+    const c = @cImport({
+        @cInclude("grp.h");
+        @cInclude("string.h");
+    });
+
+    const groupname_z = try std.posix.toPosixPath(groupname);
+    const grp = c.getgrnam(&groupname_z);
+    if (grp == null) {
+        return error.GroupNotFound;
+    }
+
+    return @intCast(grp.*.gr_gid);
+}
 /// Create a backup copy of a file by appending backup_ext to the filename
 /// Returns void and closes the backup file properly to prevent fd leaks
 /// If the original file doesn't exist, returns error.FileNotFound

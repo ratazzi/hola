@@ -9,7 +9,7 @@ pub const Resource = struct {
     // Resource-specific properties
     path: []const u8,
     content: []const u8,
-    mode: ?u32,
+    attrs: base.FileAttributes,
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -23,6 +23,7 @@ pub const Resource = struct {
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
         allocator.free(self.content);
+        self.attrs.deinit(allocator);
 
         // Deinit common props (handles GC, notifications, etc.)
         var common = self.common;
@@ -102,8 +103,8 @@ pub const Resource = struct {
             existing_content = try existing_file.readToEndAlloc(std.heap.c_allocator, std.math.maxInt(usize));
 
             if (std.mem.eql(u8, existing_content.?, self.content)) {
-                // Content matches, check mode if specified
-                if (self.mode) |m| {
+                // Content matches, check attributes if specified
+                if (self.attrs.mode) |m| {
                     const stat = try existing_file.stat();
                     const current_mode = stat.mode & 0o777;
                     if (current_mode == m) {
@@ -141,12 +142,22 @@ pub const Resource = struct {
             try std.fs.createFileAbsolute(self.path, .{ .truncate = true })
         else
             try std.fs.cwd().createFile(self.path, .{ .truncate = true });
-        defer file.close();
 
         try file.writeAll(self.content);
 
-        if (self.mode) |m| {
+        // Apply file mode if specified
+        if (self.attrs.mode) |m| {
             std.posix.fchmod(file.handle, @as(std.posix.mode_t, @intCast(m))) catch {};
+        }
+
+        // Close file before changing ownership (needed for some systems)
+        file.close();
+
+        // Apply owner/group after file is closed
+        if (self.attrs.owner != null or self.attrs.group != null) {
+            base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                logger.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+            };
         }
 
         return true; // File was created or updated
@@ -172,7 +183,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("file_resource.rb");
 
 /// Zig callback: called from Ruby to add a file resource
-/// Format: add_file(path, content, action, mode, only_if_block, not_if_block, notifications_array)
+/// Format: add_file(path, content, action, mode, owner, group, only_if_block, not_if_block, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -185,17 +196,21 @@ pub fn zigAddResource(
     var content_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var mode_val: mruby.mrb_value = undefined;
+    var owner_val: mruby.mrb_value = undefined;
+    var group_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 4 strings + 2 optional blocks + 1 optional array
-    _ = mruby.mrb_get_args(mrb, "SSSS|ooA", &path_val, &content_val, &action_val, &mode_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 6 strings + 2 optional blocks + 1 optional array
+    _ = mruby.mrb_get_args(mrb, "SSSSSS|ooA", &path_val, &content_val, &action_val, &mode_val, &owner_val, &group_val, &only_if_val, &not_if_val, &notifications_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const content_cstr = mruby.mrb_str_to_cstr(mrb, content_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
     const mode_cstr = mruby.mrb_str_to_cstr(mrb, mode_val);
+    const owner_cstr = mruby.mrb_str_to_cstr(mrb, owner_val);
+    const group_cstr = mruby.mrb_str_to_cstr(mrb, group_val);
 
     const path = allocator.dupe(u8, std.mem.span(path_cstr)) catch return mruby.mrb_nil_value();
     const content = allocator.dupe(u8, std.mem.span(content_cstr)) catch return mruby.mrb_nil_value();
@@ -212,6 +227,18 @@ pub fn zigAddResource(
     else
         null;
 
+    const owner_str = std.mem.span(owner_cstr);
+    const owner: ?[]const u8 = if (owner_str.len > 0)
+        allocator.dupe(u8, owner_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
+    const group_str = std.mem.span(group_cstr);
+    const group: ?[]const u8 = if (group_str.len > 0)
+        allocator.dupe(u8, group_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
     base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
@@ -219,7 +246,11 @@ pub fn zigAddResource(
     resources.append(allocator, .{
         .path = path,
         .content = content,
-        .mode = mode,
+        .attrs = .{
+            .mode = mode,
+            .owner = owner,
+            .group = group,
+        },
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();

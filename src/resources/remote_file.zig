@@ -9,9 +9,7 @@ pub const Resource = struct {
     // Resource-specific properties
     path: []const u8, // Local file path where to save the file
     source: []const u8, // URL to download from
-    mode: ?[]const u8 = null, // File permissions (e.g., "0644")
-    owner: ?[]const u8 = null, // File owner (future: user management)
-    group: ?[]const u8 = null, // File group (future: group management)
+    attrs: base.FileAttributes, // File attributes (mode, owner, group)
     checksum: ?[]const u8 = null, // Expected checksum (SHA256, MD5, etc.)
     backup: ?[]const u8 = null, // Backup extension before overwriting
     action: Action,
@@ -29,9 +27,7 @@ pub const Resource = struct {
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
         allocator.free(self.source);
-        if (self.mode) |mode| allocator.free(mode);
-        if (self.owner) |owner| allocator.free(owner);
-        if (self.group) |group| allocator.free(group);
+        self.attrs.deinit(allocator);
         if (self.checksum) |checksum| allocator.free(checksum);
         if (self.backup) |backup| allocator.free(backup);
 
@@ -128,11 +124,10 @@ pub const Resource = struct {
                 // Move from temp to final location
                 try std.fs.cwd().rename(temp_path, self.path);
 
-                // Set file mode if specified
-                if (self.mode) |mode_str| {
-                    const mode = try std.fmt.parseInt(u32, mode_str, 8);
-                    base.setFileMode(self.path, mode);
-                }
+                // Apply file attributes (mode, owner, group)
+                base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                    std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+                };
 
                 // Clean up the temp path string
                 allocator.free(temp_path);
@@ -152,11 +147,10 @@ pub const Resource = struct {
                     // Download the file
                     try downloadFile(self.source, self.path);
 
-                    // Set file mode if specified
-                    if (self.mode) |mode_str| {
-                        const mode = try std.fmt.parseInt(u32, mode_str, 8);
-                        base.setFileMode(self.path, mode);
-                    }
+                    // Apply file attributes (mode, owner, group)
+                    base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                        std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+                    };
 
                     // Verify checksum if provided
                     if (self.checksum) |expected_checksum| {
@@ -299,11 +293,10 @@ pub const Resource = struct {
         // Move to final location
         try std.fs.cwd().rename(temp_path, self.path);
 
-        // Set file mode if specified
-        if (self.mode) |mode_str| {
-            const mode = try std.fmt.parseInt(u32, mode_str, 8);
-            base.setFileMode(self.path, mode);
-        }
+        // Apply file attributes (mode, owner, group)
+        base.applyFileAttributes(self.path, self.attrs) catch |err| {
+            std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+        };
     }
 
     fn downloadFile(url: []const u8, dest_path: []const u8) !void {
@@ -354,12 +347,14 @@ pub fn zigAddResource(
     const path = allocator.dupe(u8, std.mem.span(path_cstr)) catch return mruby.mrb_nil_value();
     const source = allocator.dupe(u8, std.mem.span(source_cstr)) catch return mruby.mrb_nil_value();
 
+    // Parse mode as u32 (octal)
     const mode_str = std.mem.span(mode_cstr);
-    const mode: ?[]const u8 = if (mode_str.len > 0)
-        allocator.dupe(u8, mode_str) catch return mruby.mrb_nil_value()
+    const mode: ?u32 = if (mode_str.len > 0)
+        std.fmt.parseInt(u32, mode_str, 8) catch null
     else
         null;
 
+    // Parse owner and group
     const owner_str = std.mem.span(owner_cstr);
     const owner: ?[]const u8 = if (owner_str.len > 0)
         allocator.dupe(u8, owner_str) catch return mruby.mrb_nil_value()
@@ -401,9 +396,11 @@ pub fn zigAddResource(
     resources.append(allocator, .{
         .path = path,
         .source = source,
-        .mode = mode,
-        .owner = owner,
-        .group = group,
+        .attrs = .{
+            .mode = mode,
+            .owner = owner,
+            .group = group,
+        },
         .checksum = checksum,
         .backup = backup,
         .action = action,

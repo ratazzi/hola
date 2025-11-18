@@ -10,7 +10,8 @@ pub const Resource = struct {
     name: []const u8, // Resource name (for identification)
     command: []const u8,
     cwd: ?[]const u8, // Working directory
-    user: ?[]const u8, // User to run as (future)
+    user: ?[]const u8, // User to run as
+    group: ?[]const u8, // Group to run as
     environment: ?[]const u8, // Environment variables (future)
     action: Action,
 
@@ -27,6 +28,7 @@ pub const Resource = struct {
         allocator.free(self.command);
         if (self.cwd) |cwd| allocator.free(cwd);
         if (self.user) |user| allocator.free(user);
+        if (self.group) |group| allocator.free(group);
         if (self.environment) |env| allocator.free(env);
 
         // Deinit common props
@@ -96,6 +98,47 @@ pub const Resource = struct {
         // Set working directory if specified
         if (self.cwd) |cwd| {
             child.cwd = cwd;
+        }
+
+        // Set user and/or group if specified (requires root privileges)
+        if (self.user != null or self.group != null) {
+            const c = @cImport({
+                @cInclude("pwd.h");
+                @cInclude("grp.h");
+            });
+
+            // Get user info if user is specified
+            if (self.user) |user| {
+                const username_z = std.posix.toPosixPath(user) catch |err| {
+                    std.debug.print("[execute] failed to convert username '{s}': {}\n", .{ user, err });
+                    return error.UserInfoFailed;
+                };
+
+                const pwd = c.getpwnam(&username_z);
+                if (pwd == null) {
+                    std.debug.print("[execute] user '{s}' not found\n", .{user});
+                    return error.UserNotFound;
+                }
+
+                child.uid = @intCast(pwd.*.pw_uid);
+                child.gid = @intCast(pwd.*.pw_gid); // Default to user's primary group
+            }
+
+            // Override with group if specified
+            if (self.group) |group| {
+                const groupname_z = std.posix.toPosixPath(group) catch |err| {
+                    std.debug.print("[execute] failed to convert groupname '{s}': {}\n", .{ group, err });
+                    return error.GroupInfoFailed;
+                };
+
+                const grp = c.getgrnam(&groupname_z);
+                if (grp == null) {
+                    std.debug.print("[execute] group '{s}' not found\n", .{group});
+                    return error.GroupNotFound;
+                }
+
+                child.gid = @intCast(grp.*.gr_gid);
+            }
         }
 
         // Capture output
@@ -186,7 +229,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("execute_resource.rb");
 
 /// Zig callback: called from Ruby to add an execute resource
-/// Format: add_execute(name, command, cwd, action, only_if_block, not_if_block, notifications_array)
+/// Format: add_execute(name, command, cwd, user, group, action, only_if_block, not_if_block, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -198,17 +241,21 @@ pub fn zigAddResource(
     var name_val: mruby.mrb_value = undefined;
     var command_val: mruby.mrb_value = undefined;
     var cwd_val: mruby.mrb_value = undefined;
+    var user_val: mruby.mrb_value = undefined;
+    var group_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 4 strings + 3 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "SSSS|ooA", &name_val, &command_val, &cwd_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 6 strings + 3 optional (blocks + array)
+    _ = mruby.mrb_get_args(mrb, "SSSSSS|ooA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const command_cstr = mruby.mrb_str_to_cstr(mrb, command_val);
     const cwd_cstr = mruby.mrb_str_to_cstr(mrb, cwd_val);
+    const user_cstr = mruby.mrb_str_to_cstr(mrb, user_val);
+    const group_cstr = mruby.mrb_str_to_cstr(mrb, group_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
 
     const name = allocator.dupe(u8, std.mem.span(name_cstr)) catch return mruby.mrb_nil_value();
@@ -217,6 +264,18 @@ pub fn zigAddResource(
     const cwd_str = std.mem.span(cwd_cstr);
     const cwd: ?[]const u8 = if (cwd_str.len > 0)
         allocator.dupe(u8, cwd_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
+    const user_str = std.mem.span(user_cstr);
+    const user: ?[]const u8 = if (user_str.len > 0)
+        allocator.dupe(u8, user_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
+    const group_str = std.mem.span(group_cstr);
+    const group: ?[]const u8 = if (group_str.len > 0)
+        allocator.dupe(u8, group_str) catch return mruby.mrb_nil_value()
     else
         null;
 
@@ -234,7 +293,8 @@ pub fn zigAddResource(
         .name = name,
         .command = command,
         .cwd = cwd,
-        .user = null,
+        .user = user,
+        .group = group,
         .environment = null,
         .action = action,
         .common = common,

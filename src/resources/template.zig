@@ -7,7 +7,7 @@ pub const Resource = struct {
     // Resource-specific properties
     path: []const u8,
     source: []const u8, // Template file path
-    mode: ?u32,
+    attrs: base.FileAttributes,
     variables: std.ArrayList(Variable), // Template variables
     action: Action,
 
@@ -34,6 +34,7 @@ pub const Resource = struct {
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
         allocator.free(self.source);
+        self.attrs.deinit(allocator);
         var variables = self.variables;
         for (variables.items) |var_| {
             var_.deinit(allocator);
@@ -122,8 +123,8 @@ pub const Resource = struct {
             defer std.heap.c_allocator.free(existing_content);
 
             if (std.mem.eql(u8, existing_content, rendered_content)) {
-                // Content matches, check mode if specified
-                if (self.mode) |m| {
+                // Content matches, check attributes if specified
+                if (self.attrs.mode) |m| {
                     const stat = try existing_file.stat();
                     const current_mode = stat.mode & 0o777;
                     if (current_mode == m) {
@@ -141,12 +142,22 @@ pub const Resource = struct {
             try std.fs.createFileAbsolute(self.path, .{ .truncate = true })
         else
             try std.fs.cwd().createFile(self.path, .{ .truncate = true });
-        defer file.close();
 
         try file.writeAll(rendered_content);
 
-        if (self.mode) |m| {
+        // Apply file mode if specified
+        if (self.attrs.mode) |m| {
             std.posix.fchmod(file.handle, @as(std.posix.mode_t, @intCast(m))) catch {};
+        }
+
+        // Close file before changing ownership
+        file.close();
+
+        // Apply owner/group after file is closed
+        if (self.attrs.owner != null or self.attrs.group != null) {
+            base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+            };
         }
 
         return true; // File was created or updated
@@ -491,7 +502,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("template_resource.rb");
 
 /// Zig callback: called from Ruby to add a template resource
-/// Format: add_template(path, source, mode, variables_array, action, only_if_block, not_if_block, notifications_array)
+/// Format: add_template(path, source, mode, owner, group, variables_array, action, only_if_block, not_if_block, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -503,18 +514,22 @@ pub fn zigAddResource(
     var path_val: mruby.mrb_value = undefined;
     var source_val: mruby.mrb_value = undefined;
     var mode_val: mruby.mrb_value = undefined;
+    var owner_val: mruby.mrb_value = undefined;
+    var group_val: mruby.mrb_value = undefined;
     var variables_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 3 strings + 1 array (variables) + 1 string (action) + 2 optional blocks + 1 optional array
-    _ = mruby.mrb_get_args(mrb, "SSSAS|ooA", &path_val, &source_val, &mode_val, &variables_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 5 strings + 1 array (variables) + 1 string (action) + 2 optional blocks + 1 optional array
+    _ = mruby.mrb_get_args(mrb, "SSSSSAS|ooA", &path_val, &source_val, &mode_val, &owner_val, &group_val, &variables_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const source_cstr = mruby.mrb_str_to_cstr(mrb, source_val);
     const mode_cstr = mruby.mrb_str_to_cstr(mrb, mode_val);
+    const owner_cstr = mruby.mrb_str_to_cstr(mrb, owner_val);
+    const group_cstr = mruby.mrb_str_to_cstr(mrb, group_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
 
     const path = allocator.dupe(u8, std.mem.span(path_cstr)) catch return mruby.mrb_nil_value();
@@ -529,6 +544,18 @@ pub fn zigAddResource(
     const mode_str = std.mem.span(mode_cstr);
     const mode: ?u32 = if (mode_str.len > 0)
         std.fmt.parseInt(u32, mode_str, 8) catch null
+    else
+        null;
+
+    const owner_str = std.mem.span(owner_cstr);
+    const owner: ?[]const u8 = if (owner_str.len > 0)
+        allocator.dupe(u8, owner_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
+    const group_str = std.mem.span(group_cstr);
+    const group: ?[]const u8 = if (group_str.len > 0)
+        allocator.dupe(u8, group_str) catch return mruby.mrb_nil_value()
     else
         null;
 
@@ -580,7 +607,11 @@ pub fn zigAddResource(
     resources.append(allocator, .{
         .path = path,
         .source = source,
-        .mode = mode,
+        .attrs = .{
+            .mode = mode,
+            .owner = owner,
+            .group = group,
+        },
         .variables = variables,
         .action = action,
         .common = common,
