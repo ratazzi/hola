@@ -369,13 +369,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     );
 
     // Register remote_file resource
-    // Signature: add_remote_file(path, source, mode, owner, group, checksum, backup, action, only_if_block=nil, not_if_block=nil, notifications=nil)
+    // Signature: add_remote_file(path, source, mode, owner, group, checksum, backup, headers, action, only_if_block=nil, not_if_block=nil, notifications=nil)
     mruby.mrb_define_module_function(
         mrb_ptr,
         zig_module,
         "add_remote_file",
         zig_add_remote_file_resource,
-        mruby.MRB_ARGS_REQ(8) | mruby.MRB_ARGS_OPT(3), // 8 required + 3 optional
+        mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(3), // 9 required + 3 optional
     );
 
     // Register template resource
@@ -659,6 +659,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                 continue;
             }
 
+            // Skip conditional downloads; they are fetched on-demand to honor conditional requests
+            if (remote_res.use_etag or remote_res.use_last_modified) {
+                continue;
+            }
+
             // Generate slugified version of the final path for unique temp filename
             const path_slug = try http_utils.slugifyPath(allocator, remote_res.path);
             defer allocator.free(path_slug);
@@ -674,9 +679,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                 .url = try allocator.dupe(u8, remote_res.source),
                 .temp_path = temp_path,
                 .final_path = try allocator.dupe(u8, remote_res.path),
-                .mode = if (remote_res.mode) |mode| try allocator.dupe(u8, mode) else null,
+                .mode = if (remote_res.attrs.mode) |mode| try std.fmt.allocPrint(allocator, "{o}", .{mode}) else null,
                 .checksum = if (remote_res.checksum) |checksum| try allocator.dupe(u8, checksum) else null,
                 .backup = if (remote_res.backup) |backup| try allocator.dupe(u8, backup) else null,
+                .headers = if (remote_res.headers) |headers| try allocator.dupe(u8, headers) else null,
                 .resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name }),
                 .display_name = try allocator.dupe(u8, display_name),
             };
@@ -684,6 +690,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             try download_mgr.addTask(task);
         }
     }
+
 
     if (download_mgr.tasks.items.len > 0) {
         // Show download section header

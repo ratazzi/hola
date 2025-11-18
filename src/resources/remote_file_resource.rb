@@ -10,6 +10,10 @@ class RemoteFileResource
     @group = ""
     @checksum = ""
     @backup = ""
+    @headers = {}
+    @use_etag = false
+    @use_last_modified = false
+    @force_unlink = false
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -23,7 +27,9 @@ class RemoteFileResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @action, only_if_arg, not_if_arg, notifications_arg)
+
+    # Pass headers hash directly to Zig
+    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, notifications_arg)
   end
 
   def source(value)
@@ -52,6 +58,22 @@ class RemoteFileResource
 
   def backup(value)
     @backup = value.to_s
+  end
+
+  def use_etag(value)
+    @use_etag = !!value
+  end
+
+  def use_last_modified(value)
+    @use_last_modified = !!value
+  end
+
+  def force_unlink(value)
+    @force_unlink = !!value
+  end
+
+  def headers(value)
+    @headers = value
   end
 
   def action(value)

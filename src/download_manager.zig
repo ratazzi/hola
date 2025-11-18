@@ -14,6 +14,7 @@ pub const DownloadTask = struct {
     mode: ?[]const u8,
     checksum: ?[]const u8,
     backup: ?[]const u8,
+    headers: ?[]const u8, // JSON-encoded HTTP headers
     resource_id: []const u8,
     display_name: []const u8, // Short name for display
     board_line_id: ?usize = null,
@@ -29,6 +30,7 @@ pub const DownloadTask = struct {
         if (self.mode) |mode| allocator.free(mode);
         if (self.checksum) |checksum| allocator.free(checksum);
         if (self.backup) |backup| allocator.free(backup);
+        if (self.headers) |headers| allocator.free(headers);
         allocator.free(self.resource_id);
         allocator.free(self.display_name);
         if (self.error_message.load(.acquire)) |msg_ptr| {
@@ -56,7 +58,7 @@ pub const DownloadManager = struct {
     next_task_index: usize, // Index of next task to process
 
     pub const Config = struct {
-        max_concurrent: usize = 4,
+        max_concurrent: usize = 2,
     };
 
     pub fn init(allocator: std.mem.Allocator, show_progress: bool) !Self {
@@ -72,7 +74,7 @@ pub const DownloadManager = struct {
             .allocator = allocator,
             .show_progress = show_progress,
             .workers = &.{},
-            .max_concurrent = 4,
+            .max_concurrent = 2,
             .mutex = .{},
             .condition = .{},
             .shutdown = false,
@@ -241,8 +243,42 @@ pub const DownloadManager = struct {
 
         const uri = try std.Uri.parse(task.url);
 
+        // Parse headers if provided
+        var headers_list = std.ArrayList(std.http.Header).empty;
+        defer {
+            for (headers_list.items) |header| {
+                allocator.free(header.name);
+                allocator.free(header.value);
+            }
+            headers_list.deinit(allocator);
+        }
+
+        if (task.headers) |headers_json| {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, headers_json, .{}) catch |err| {
+                std.log.warn("Failed to parse headers JSON: {}", .{err});
+                return err;
+            };
+            defer parsed.deinit();
+
+            if (parsed.value == .object) {
+                var it = parsed.value.object.iterator();
+                while (it.next()) |entry| {
+                    const name_copy = try allocator.dupe(u8, entry.key_ptr.*);
+                    const value_str = if (entry.value_ptr.* == .string) entry.value_ptr.*.string else "";
+                    const value_copy = try allocator.dupe(u8, value_str);
+
+                    const header = std.http.Header{
+                        .name = name_copy,
+                        .value = value_copy,
+                    };
+                    try headers_list.append(allocator, header);
+                }
+            }
+        }
+
         var req = try client.request(.GET, uri, .{
             .redirect_behavior = @enumFromInt(5),
+            .extra_headers = headers_list.items,
         });
         defer req.deinit();
 
@@ -283,8 +319,8 @@ pub const DownloadManager = struct {
             const current_time = std.time.nanoTimestamp();
             const display_total = if (content_length) |cl| cl else total_bytes_downloaded;
             const should_update = current_time - last_update_time >= update_interval_ns or
-                                 (content_length != null and total_bytes_downloaded == content_length.?) or
-                                 (content_length == null and total_bytes_downloaded > 0);
+                (content_length != null and total_bytes_downloaded == content_length.?) or
+                (content_length == null and total_bytes_downloaded > 0);
             if (should_update) {
                 download_mgr.updateDownloadProgress(task_index, total_bytes_downloaded, display_total, 0);
                 last_update_time = current_time;

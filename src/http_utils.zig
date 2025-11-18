@@ -57,9 +57,27 @@ pub fn formatSizeRange(bytes_downloaded: u64, total_bytes: u64, buf: []u8) []con
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ current, total }) catch buf[0..0];
 }
 
+pub const DownloadStatus = enum {
+    downloaded,
+    not_modified,
+};
+
+pub const DownloadOptions = struct {
+    headers: ?[]const u8 = null, // JSON encoded headers
+    if_none_match: ?[]const u8 = null,
+    if_modified_since: ?[]const u8 = null,
+};
+
+pub const DownloadResult = struct {
+    status: DownloadStatus,
+    etag: ?[]const u8 = null,
+    last_modified: ?[]const u8 = null,
+};
+
 /// Simple HTTP download utility - similar to Python requests.get()
 /// Downloads a file from URL to destination path with streaming
-pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8) !void {
+/// Returns status (downloaded / not_modified) and the ETag/Last-Modified (if present)
+pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, options: DownloadOptions) !DownloadResult {
     // Create HTTP client
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -67,11 +85,74 @@ pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []
     // Parse URI
     const uri = try std.Uri.parse(url);
 
+    // Parse headers if provided
+    var headers_list = std.ArrayList(std.http.Header).empty;
+    defer {
+        for (headers_list.items) |*header| {
+            allocator.free(header.name);
+            allocator.free(header.value);
+        }
+        headers_list.deinit(allocator);
+    }
+
+    if (options.headers) |headers_json| {
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, headers_json, .{}) catch |err| {
+            std.log.warn("Failed to parse headers JSON: {}", .{err});
+            return err;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value == .object) {
+            var it = parsed.value.object.iterator();
+            while (it.next()) |entry| {
+                const name_copy = try allocator.dupe(u8, entry.key_ptr.*);
+                const value_str = if (entry.value_ptr.* == .string) entry.value_ptr.*.string else "";
+                const value_copy = try allocator.dupe(u8, value_str);
+
+                const header = std.http.Header{
+                    .name = name_copy,
+                    .value = value_copy,
+                };
+                try headers_list.append(allocator, header);
+            }
+        }
+    }
+
+    if (options.if_none_match) |etag| {
+        const name_copy = try allocator.dupe(u8, "If-None-Match");
+        const value_copy = try allocator.dupe(u8, etag);
+        try headers_list.append(allocator, .{
+            .name = name_copy,
+            .value = value_copy,
+        });
+    }
+
+    if (options.if_modified_since) |lm| {
+        const name_copy = try allocator.dupe(u8, "If-Modified-Since");
+        const value_copy = try allocator.dupe(u8, lm);
+        try headers_list.append(allocator, .{
+            .name = name_copy,
+            .value = value_copy,
+        });
+    }
+
+    // Add Connection: close header only when using conditional requests
+    // to avoid connection pooling issues with 304 responses
+    if (options.if_none_match != null or options.if_modified_since != null) {
+        const connection_name = try allocator.dupe(u8, "Connection");
+        const connection_value = try allocator.dupe(u8, "close");
+        try headers_list.append(allocator, .{
+            .name = connection_name,
+            .value = connection_value,
+        });
+    }
+
     // Create request
     var req = try client.request(.GET, uri, .{
         .redirect_behavior = @enumFromInt(5), // allow up to 5 redirects
+        .extra_headers = headers_list.items,
     });
-    defer req.deinit();
+    errdefer req.deinit();
 
     // Send request
     try req.sendBodiless();
@@ -80,10 +161,26 @@ pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []
     var redirect_buffer: [8192]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
 
+    defer req.deinit();
+
+    // Handle conditional requests
+    // Per HTTP spec, 304 Not Modified MUST NOT contain a message body
+    if (response.head.status == .not_modified) {
+        const etag_header = getHeaderValue(allocator, response, "etag");
+        const last_modified_header = getHeaderValue(allocator, response, "last-modified");
+
+        // With Connection: close header, the server should close the connection immediately
+        // after sending 304 response, allowing req.deinit() to complete cleanly
+        return DownloadResult{ .status = .not_modified, .etag = etag_header, .last_modified = last_modified_header };
+    }
+
     // Check response status
     if (response.head.status.class() != .success) {
         return error.HttpError;
     }
+
+    const etag_header = getHeaderValue(allocator, response, "etag");
+    const last_modified_header = getHeaderValue(allocator, response, "last-modified");
 
     // Create output file
     const dest_file = try std.fs.cwd().createFile(dest_path, .{ .truncate = true });
@@ -108,6 +205,18 @@ pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []
         // safe to exit the loop to avoid invoking the reader again.
         if (bytes_read < buffer.len) break;
     }
+
+    return DownloadResult{ .status = .downloaded, .etag = etag_header, .last_modified = last_modified_header };
+}
+
+fn getHeaderValue(allocator: std.mem.Allocator, response: std.http.Client.Response, name: []const u8) ?[]const u8 {
+    var it = response.head.iterateHeaders();
+    while (it.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) {
+            return allocator.dupe(u8, header.value) catch return null;
+        }
+    }
+    return null;
 }
 
 /// Slugify a file path for use in temporary filenames
