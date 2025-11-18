@@ -111,7 +111,11 @@ pub const Resource = struct {
 
             if (!key_exists) {
                 logger.info("Downloading GPG key from {s} to {s}\n", .{ key_url, key_path });
-                try http_utils.downloadFile(allocator, key_url, key_path);
+                const download_res = try http_utils.downloadFile(allocator, key_url, key_path, .{});
+                defer if (download_res.etag) |etag| allocator.free(etag);
+                if (download_res.status != .downloaded) {
+                    return error.HttpError;
+                }
                 updated = true;
             }
         }
@@ -153,18 +157,36 @@ pub const Resource = struct {
             try line_buf.appendSlice(allocator, " ");
 
             // Add options if specified (e.g., [arch=amd64 signed-by=/path])
-            if (self.arch != null or self.options != null) {
+            // Auto-add signed-by if key_url is specified
+            if (self.arch != null or self.options != null or self.key_url != null) {
                 try line_buf.appendSlice(allocator, "[");
                 var first = true;
+
+                // Add arch if specified
                 if (self.arch) |arch| {
                     try line_buf.appendSlice(allocator, "arch=");
                     try line_buf.appendSlice(allocator, arch);
                     first = false;
                 }
+
+                // Auto-add signed-by if key_url is specified
+                if (self.key_url != null) {
+                    if (!first) try line_buf.appendSlice(allocator, " ");
+                    try line_buf.appendSlice(allocator, "signed-by=");
+                    const key_path = self.key_path orelse blk: {
+                        break :blk try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.gpg", .{self.name});
+                    };
+                    defer if (self.key_path == null) allocator.free(key_path);
+                    try line_buf.appendSlice(allocator, key_path);
+                    first = false;
+                }
+
+                // Add other options if specified
                 if (self.options) |opts| {
                     if (!first) try line_buf.appendSlice(allocator, " ");
                     try line_buf.appendSlice(allocator, opts);
                 }
+
                 try line_buf.appendSlice(allocator, "] ");
             }
 
