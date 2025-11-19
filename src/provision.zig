@@ -164,6 +164,36 @@ fn wrapAptRepository(res: resources.apt_repository.Resource) resources.Resource 
     return .{ .apt_repository = res };
 }
 
+fn buildSystemdUnitId(allocator: std.mem.Allocator, res: *const resources.systemd_unit.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "systemd_unit", res.name);
+}
+fn wrapSystemdUnit(res: resources.systemd_unit.Resource) resources.Resource {
+    return .{ .systemd_unit = res };
+}
+
+fn buildPackageId(allocator: std.mem.Allocator, res: *const resources.package.Resource) !resources.ResourceId {
+    // Use first package name for ID, or join all names if multiple
+    if (res.names.items.len == 1) {
+        return makeResourceId(allocator, "package", res.names.items[0]);
+    } else if (res.names.items.len > 1) {
+        const joined = try std.mem.join(allocator, ", ", res.names.items);
+        defer allocator.free(joined);
+        return makeResourceId(allocator, "package", joined);
+    } else {
+        return makeResourceId(allocator, "package", "unknown");
+    }
+}
+fn wrapPackage(res: resources.package.Resource) resources.Resource {
+    return .{ .package = res };
+}
+
+fn buildRubyBlockId(allocator: std.mem.Allocator, res: *const resources.ruby_block.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "ruby_block", res.name);
+}
+fn wrapRubyBlock(res: resources.ruby_block.Resource) resources.Resource {
+    return .{ .ruby_block = res };
+}
+
 /// Get a short filename from URL for display
 fn getShortFileNameFromUrl(url: []const u8) []const u8 {
     if (std.mem.lastIndexOf(u8, url, "/")) |last_slash| {
@@ -329,6 +359,46 @@ export fn zig_add_apt_repository_resource(mrb: *mruby.mrb_state, self: mruby.mrb
     );
 }
 
+// Zig callback for systemd_unit resource (Linux-only)
+export fn zig_add_systemd_unit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_linux) {
+        return mruby.mrb_nil_value();
+    }
+
+    return addResourceWithMetadata(
+        resources.systemd_unit.Resource,
+        mrb,
+        self,
+        resources.systemd_unit.zigAddResource,
+        buildSystemdUnitId,
+        wrapSystemdUnit,
+    );
+}
+
+// Zig callback for package resource (cross-platform)
+export fn zig_add_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.package.Resource,
+        mrb,
+        self,
+        resources.package.zigAddResource,
+        buildPackageId,
+        wrapPackage,
+    );
+}
+
+// Zig callback for ruby_block resource (cross-platform)
+export fn zig_add_ruby_block_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.ruby_block.Resource,
+        mrb,
+        self,
+        resources.ruby_block.zigAddResource,
+        buildRubyBlockId,
+        wrapRubyBlock,
+    );
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -444,6 +514,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         );
     }
 
+    // Register systemd_unit resource (Linux only)
+    // Signature: add_systemd_unit(name, content, actions, only_if_block=nil, not_if_block=nil, notifications=nil)
+    if (is_linux) {
+        mruby.mrb_define_module_function(
+            mrb_ptr,
+            zig_module,
+            "add_systemd_unit",
+            zig_add_systemd_unit_resource,
+            mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(3), // 3 required + 3 optional
+        );
+    }
 
     // Register HTTP client functions
     // Initialize HTTP client with allocator
@@ -527,6 +608,26 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(1),
     );
 
+    // Register package resource (cross-platform: homebrew on macOS, apt on Linux)
+    // Signature: add_package(name, version, options, action, only_if_block=nil, not_if_block=nil, notifications=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_package",
+        zig_add_package_resource,
+        mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(3), // 4 required + 3 optional
+    );
+
+    // Register ruby_block resource (cross-platform)
+    // Signature: add_ruby_block(name, block_proc, action, only_if_block=nil, not_if_block=nil, notifications=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_ruby_block",
+        zig_add_ruby_block_resource,
+        mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(3), // 3 required + 3 optional
+    );
+
     // Register Hola logging functions
     // Signature: hola_debug(msg), hola_info(msg), hola_warn(msg), hola_error(msg)
     mruby.mrb_define_module_function(
@@ -583,7 +684,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_has_key", env_access.zig_env_has_key, mruby.MRB_ARGS_REQ(1));
 
     // Future: Register other resources
-    // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_package", zig_add_package_resource, ...);
     // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_service", zig_add_service_resource, ...);
 
     // Load Ruby DSL preludes
@@ -598,15 +698,20 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.macos_defaults.ruby_prelude);
     try mrb.evalString(resources.directory.ruby_prelude);
     try mrb.evalString(resources.link.ruby_prelude);
-    // Load Linux-specific Ruby DSLs (apt_repository, etc.)
+    // Load Linux-specific Ruby DSLs (apt_repository, systemd_unit, etc.)
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
+    try mrb.evalString(resources.systemd_unit.ruby_prelude);
     // Load JSON module (must be before HTTP client)
     try mrb.evalString(json.ruby_prelude);
     // Load HTTP client prelude
     try mrb.evalString(http_client.ruby_prelude);
     // Load Base64 module
     try mrb.evalString(base64.ruby_prelude);
+    // Load package resource
+    try mrb.evalString(resources.package.ruby_prelude);
+    // Load ruby_block resource
+    try mrb.evalString(resources.ruby_block.ruby_prelude);
     // Load Hola logging module
     try mrb.evalString(hola_logger.ruby_prelude);
     // Load node info module
@@ -614,7 +719,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load ENV access module
     try mrb.evalString(env_access.ruby_prelude);
     // Future: Load other resource preludes
-    // try mrb.evalString(resources.package.ruby_prelude);
     // try mrb.evalString(resources.service.ruby_prelude);
 
     // Load and execute user's recipe

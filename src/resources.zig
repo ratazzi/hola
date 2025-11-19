@@ -38,8 +38,20 @@ else
         pub const ruby_prelude = @embedFile("resources/apt_repository_resource.rb");
     };
 
+pub const systemd_unit = if (builtin.os.tag == .linux)
+    @import("resources/systemd_unit.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/systemd_unit_resource.rb");
+    };
+
+// Cross-platform package resource (supports homebrew on macOS, apt on Linux)
+pub const package = @import("resources/package.zig");
+
+// Cross-platform ruby_block resource
+pub const ruby_block = @import("resources/ruby_block.zig");
+
 // Future resources:
-// pub const package = @import("resources/package.zig");
 // pub const service = @import("resources/service.zig");
 // pub const user = @import("resources/user.zig");
 
@@ -79,6 +91,8 @@ const ResourceMacOs = union(enum) {
     macos_defaults: macos_defaults.Resource,
     directory: directory.Resource,
     link: link.Resource,
+    package: package.Resource,
+    ruby_block: ruby_block.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -90,6 +104,8 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| res.deinit(allocator),
             .directory => |res| res.deinit(allocator),
             .link => |res| res.deinit(allocator),
+            .package => |res| res.deinit(allocator),
+            .ruby_block => |res| res.deinit(allocator),
         }
     }
 
@@ -103,6 +119,8 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| try res.apply(),
             .directory => |res| try res.apply(),
             .link => |res| try res.apply(),
+            .package => |res| try res.apply(),
+            .ruby_block => |res| try res.apply(),
         };
     }
 
@@ -116,6 +134,8 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| res.key,
             .directory => |res| res.path,
             .link => |res| res.path,
+            .package => |res| res.displayName(),
+            .ruby_block => |res| res.name,
         };
     }
 
@@ -129,6 +149,8 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |*res| &res.common,
             .directory => |*res| &res.common,
             .link => |*res| &res.common,
+            .package => |*res| &res.common,
+            .ruby_block => |*res| &res.common,
         };
     }
 };
@@ -141,6 +163,9 @@ const ResourceGeneric = union(enum) {
     directory: directory.Resource,
     link: link.Resource,
     apt_repository: apt_repository.Resource,
+    systemd_unit: systemd_unit.Resource,
+    package: package.Resource,
+    ruby_block: ruby_block.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -151,6 +176,9 @@ const ResourceGeneric = union(enum) {
             .directory => |res| res.deinit(allocator),
             .link => |res| res.deinit(allocator),
             .apt_repository => |res| res.deinit(allocator),
+            .systemd_unit => |res| res.deinit(allocator),
+            .package => |res| res.deinit(allocator),
+            .ruby_block => |res| res.deinit(allocator),
         }
     }
 
@@ -163,6 +191,9 @@ const ResourceGeneric = union(enum) {
             .directory => |res| try res.apply(),
             .link => |res| try res.apply(),
             .apt_repository => |res| try res.apply(),
+            .systemd_unit => |res| try res.apply(),
+            .package => |res| try res.apply(),
+            .ruby_block => |res| try res.apply(),
         };
     }
 
@@ -175,6 +206,9 @@ const ResourceGeneric = union(enum) {
             .directory => |res| res.path,
             .link => |res| res.path,
             .apt_repository => |res| res.name,
+            .systemd_unit => |res| res.name,
+            .package => |res| res.displayName(),
+            .ruby_block => |res| res.name,
         };
     }
 
@@ -187,6 +221,9 @@ const ResourceGeneric = union(enum) {
             .directory => |*res| &res.common,
             .link => |*res| &res.common,
             .apt_repository => |*res| &res.common,
+            .systemd_unit => |*res| &res.common,
+            .package => |*res| &res.common,
+            .ruby_block => |*res| &res.common,
         };
     }
 };
