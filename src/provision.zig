@@ -148,6 +148,13 @@ fn wrapLink(res: resources.link.Resource) resources.Resource {
     return .{ .link = res };
 }
 
+fn buildRouteId(allocator: std.mem.Allocator, res: *const resources.route.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "route", res.target);
+}
+fn wrapRoute(res: resources.route.Resource) resources.Resource {
+    return .{ .route = res };
+}
+
 fn buildMacosDefaultsId(allocator: std.mem.Allocator, res: *const resources.macos_defaults.Resource) !resources.ResourceId {
     const id_str = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ res.domain, res.key });
     defer allocator.free(id_str);
@@ -327,6 +334,18 @@ export fn zig_add_link_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) ca
     );
 }
 
+// Zig callback for route resource
+export fn zig_add_route_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.route.Resource,
+        mrb,
+        self,
+        resources.route.zigAddResource,
+        buildRouteId,
+        wrapRoute,
+    );
+}
+
 // Zig callback for macos_defaults resource (macOS only)
 export fn zig_add_macos_defaults_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
     if (!is_macos) {
@@ -488,6 +507,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         "add_link",
         zig_add_link_resource,
         mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(4), // 2 required + 4 optional
+    );
+
+    // Register route resource
+    // Signature: add_route(target, gateway, netmask, device, action, only_if, not_if, notifications)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_route",
+        zig_add_route_resource,
+        mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(3),
     );
 
     // Register macos_defaults resource (macOS only)
@@ -698,6 +727,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.macos_defaults.ruby_prelude);
     try mrb.evalString(resources.directory.ruby_prelude);
     try mrb.evalString(resources.link.ruby_prelude);
+    try mrb.evalString(resources.route.ruby_prelude);
     // Load Linux-specific Ruby DSLs (apt_repository, systemd_unit, etc.)
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);

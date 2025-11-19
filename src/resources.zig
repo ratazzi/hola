@@ -10,6 +10,7 @@ pub const remote_file = @import("resources/remote_file.zig");
 pub const template = @import("resources/template.zig");
 pub const directory = @import("resources/directory.zig");
 pub const link = @import("resources/link.zig");
+pub const route = @import("resources/route.zig");
 
 // macOS-only resources
 pub const macos_dock = if (builtin.os.tag == .macos)
@@ -91,6 +92,7 @@ const ResourceMacOs = union(enum) {
     macos_defaults: macos_defaults.Resource,
     directory: directory.Resource,
     link: link.Resource,
+    route: route.Resource,
     package: package.Resource,
     ruby_block: ruby_block.Resource,
 
@@ -104,6 +106,7 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| res.deinit(allocator),
             .directory => |res| res.deinit(allocator),
             .link => |res| res.deinit(allocator),
+            .route => |res| res.deinit(allocator),
             .package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
         }
@@ -119,6 +122,7 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| try res.apply(),
             .directory => |res| try res.apply(),
             .link => |res| try res.apply(),
+            .route => |res| try res.apply(),
             .package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
         };
@@ -134,6 +138,7 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |res| res.key,
             .directory => |res| res.path,
             .link => |res| res.path,
+            .route => |res| res.target,
             .package => |res| res.displayName(),
             .ruby_block => |res| res.name,
         };
@@ -149,6 +154,7 @@ const ResourceMacOs = union(enum) {
             .macos_defaults => |*res| &res.common,
             .directory => |*res| &res.common,
             .link => |*res| &res.common,
+            .route => |*res| &res.common,
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
         };
@@ -166,6 +172,7 @@ const ResourceGeneric = union(enum) {
     systemd_unit: systemd_unit.Resource,
     package: package.Resource,
     ruby_block: ruby_block.Resource,
+    route: route.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -179,6 +186,7 @@ const ResourceGeneric = union(enum) {
             .systemd_unit => |res| res.deinit(allocator),
             .package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
+            .route => |res| res.deinit(allocator),
         }
     }
 
@@ -194,6 +202,7 @@ const ResourceGeneric = union(enum) {
             .systemd_unit => |res| try res.apply(),
             .package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
+            .route => |res| try res.apply(),
         };
     }
 
@@ -209,6 +218,7 @@ const ResourceGeneric = union(enum) {
             .systemd_unit => |res| res.name,
             .package => |res| res.displayName(),
             .ruby_block => |res| res.name,
+            .route => |res| res.target,
         };
     }
 
@@ -224,6 +234,7 @@ const ResourceGeneric = union(enum) {
             .systemd_unit => |*res| &res.common,
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
+            .route => |*res| &res.common,
         };
     }
 };
