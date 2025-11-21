@@ -2,16 +2,31 @@ module ZigBackend
 end
 
 class MacOSDefaultsResource
-  def initialize(domain, key, &block)
-    @domain = domain.to_s
-    @key = key.to_s
+  def initialize(name, &block)
+    @name = name.to_s
+    @domain = nil
+    @key = nil
     @value = nil
-    @value_type = nil
-    @action = "write"
+    @type = nil
+    @global = false
+    @action = :write
     @only_if_proc = nil
     @not_if_proc = nil
     @notifications = []
     instance_eval(&block) if block
+
+    # Validate required parameters
+    raise "macos_defaults: 'key' is required" if @key.nil? || @key.empty?
+
+    # domain or global must be specified
+    if @domain.nil? && !@global
+      raise "macos_defaults: either 'domain' or 'global true' must be specified"
+    end
+
+    # If global is true, use NSGlobalDomain
+    if @global
+      @domain = "NSGlobalDomain"
+    end
 
     # If the Zig backend for macos_defaults is not available (non-macOS build),
     # act as a no-op so DSL usage like `macos_defaults` does not crash.
@@ -21,39 +36,59 @@ class MacOSDefaultsResource
     not_if_arg = @not_if_proc || nil
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
 
-    # Convert value to appropriate format
-    # Format: [type, value] where type is "string", "integer", "boolean", "float", "array", "dict"
-    value_arg = nil
-    if @value != nil
-      value_arg = [@value_type || "string", @value]
+    # Auto-detect type from value if not explicitly specified
+    if @type.nil? && @value != nil
+      @type = case @value
+      when String
+        "string"
+      when Integer
+        "integer"
+      when TrueClass, FalseClass
+        "boolean"
+      when Float
+        "float"
+      when Array
+        "array"
+      when Hash
+        "dict"
+      else
+        "string" # Default to string
+      end
     end
 
-    action_arg = @action.nil? ? "write" : @action.to_s
+    # Convert value to appropriate format
+    value_arg = nil
+    if @value != nil
+      value_arg = [@type || "string", @value]
+    end
+
+    action_arg = @action.to_s
+
     ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, notifications_arg)
+  end
+
+  def domain(val)
+    @domain = val.to_s
+  end
+
+  def global(val)
+    @global = val
+  end
+
+  def key(val)
+    @key = val.to_s
+  end
+
+  def type(val)
+    @type = val.to_s
   end
 
   def value(val)
     @value = val
-    @value_type = case val
-    when String
-      "string"
-    when Integer
-      "integer"
-    when TrueClass, FalseClass
-      "boolean"
-    when Float
-      "float"
-    when Array
-      "array"
-    when Hash
-      "dict"
-    else
-      "string" # Default to string
-    end
   end
 
   def action(val)
-    @action = val.to_s
+    @action = val.to_sym
   end
 
   def only_if(&block)
@@ -73,6 +108,6 @@ class MacOSDefaultsResource
   end
 end
 
-def macos_defaults(domain, key, &block)
-  MacOSDefaultsResource.new(domain, key, &block)
+def macos_defaults(name, &block)
+  MacOSDefaultsResource.new(name, &block)
 end
