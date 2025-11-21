@@ -29,6 +29,21 @@ pub fn post(allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, co
     return request(allocator, .POST, url, body, content_type);
 }
 
+/// Perform HTTP PUT request
+pub fn put(allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, content_type: ?[]const u8) !Response {
+    return request(allocator, .PUT, url, body, content_type);
+}
+
+/// Perform HTTP DELETE request
+pub fn delete(allocator: std.mem.Allocator, url: []const u8) !Response {
+    return request(allocator, .DELETE, url, null, null);
+}
+
+/// Perform HTTP PATCH request
+pub fn patch(allocator: std.mem.Allocator, url: []const u8, body: ?[]const u8, content_type: ?[]const u8) !Response {
+    return request(allocator, .PATCH, url, body, content_type);
+}
+
 /// Perform HTTP request with method, URL, optional body and content type
 pub fn request(
     allocator: std.mem.Allocator,
@@ -61,7 +76,14 @@ pub fn request(
         @memcpy(body_buf[0..b.len], b);
         try req.sendBodyComplete(body_buf[0..b.len]);
     } else {
-        try req.sendBodiless();
+        // For methods that can have a body (PUT, POST, PATCH), send empty body
+        // For methods that cannot have a body (GET, DELETE), use sendBodiless
+        if (method == .PUT or method == .POST or method == .PATCH) {
+            req.transfer_encoding = .{ .content_length = 0 };
+            try req.sendBodyComplete(&[_]u8{});
+        } else {
+            try req.sendBodiless();
+        }
     }
 
     // Receive response
@@ -210,6 +232,135 @@ pub fn zig_http_post(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mru
     return createResponseArray(mrb, allocator, &response);
 }
 
+/// mruby binding: HTTP PUT request
+/// Args: url, body (optional), content_type (optional), headers_array (optional)
+/// Returns array: [status_code, headers_hash, body_string]
+pub fn zig_http_put(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+
+    var url_ptr: [*c]const u8 = null;
+    var url_len: mruby.mrb_int = 0;
+    var body_ptr: [*c]const u8 = null;
+    var body_len: mruby.mrb_int = 0;
+    var ct_ptr: [*c]const u8 = null;
+    var ct_len: mruby.mrb_int = 0;
+    var headers_arr: mruby.mrb_value = mruby.mrb_nil_value();
+
+    _ = mruby.mrb_get_args(mrb, "s|sso", &url_ptr, &url_len, &body_ptr, &body_len, &ct_ptr, &ct_len, &headers_arr);
+
+    if (url_ptr == null or url_len <= 0) {
+        return mruby.mrb_nil_value();
+    }
+
+    const url = url_ptr[0..@intCast(url_len)];
+    const body: ?[]const u8 = if (body_ptr != null and body_len > 0)
+        body_ptr[0..@intCast(body_len)]
+    else
+        null;
+    const content_type: ?[]const u8 = if (ct_ptr != null and ct_len > 0)
+        ct_ptr[0..@intCast(ct_len)]
+    else
+        null;
+
+    var custom_headers = std.ArrayList([2][]const u8).empty;
+    defer custom_headers.deinit(allocator);
+
+    if (!isNil(headers_arr)) {
+        parseHeadersArray(mrb, allocator, headers_arr, &custom_headers) catch {
+            return mruby.mrb_nil_value();
+        };
+    }
+
+    var response = requestWithHeaders(allocator, .PUT, url, body, content_type, custom_headers.items) catch {
+        return mruby.mrb_nil_value();
+    };
+    defer response.deinit();
+
+    return createResponseArray(mrb, allocator, &response);
+}
+
+/// mruby binding: HTTP DELETE request
+/// Args: url, headers_array (optional)
+/// Returns array: [status_code, headers_hash, body_string]
+pub fn zig_http_delete(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+
+    var url_ptr: [*c]const u8 = null;
+    var url_len: mruby.mrb_int = 0;
+    var headers_arr: mruby.mrb_value = mruby.mrb_nil_value();
+
+    _ = mruby.mrb_get_args(mrb, "s|o", &url_ptr, &url_len, &headers_arr);
+
+    if (url_ptr == null or url_len <= 0) {
+        return mruby.mrb_nil_value();
+    }
+
+    const url = url_ptr[0..@intCast(url_len)];
+
+    var custom_headers = std.ArrayList([2][]const u8).empty;
+    defer custom_headers.deinit(allocator);
+
+    if (!isNil(headers_arr)) {
+        parseHeadersArray(mrb, allocator, headers_arr, &custom_headers) catch {
+            return mruby.mrb_nil_value();
+        };
+    }
+
+    var response = requestWithHeaders(allocator, .DELETE, url, null, null, custom_headers.items) catch {
+        return mruby.mrb_nil_value();
+    };
+    defer response.deinit();
+
+    return createResponseArray(mrb, allocator, &response);
+}
+
+/// mruby binding: HTTP PATCH request
+/// Args: url, body (optional), content_type (optional), headers_array (optional)
+/// Returns array: [status_code, headers_hash, body_string]
+pub fn zig_http_patch(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+
+    var url_ptr: [*c]const u8 = null;
+    var url_len: mruby.mrb_int = 0;
+    var body_ptr: [*c]const u8 = null;
+    var body_len: mruby.mrb_int = 0;
+    var ct_ptr: [*c]const u8 = null;
+    var ct_len: mruby.mrb_int = 0;
+    var headers_arr: mruby.mrb_value = mruby.mrb_nil_value();
+
+    _ = mruby.mrb_get_args(mrb, "s|sso", &url_ptr, &url_len, &body_ptr, &body_len, &ct_ptr, &ct_len, &headers_arr);
+
+    if (url_ptr == null or url_len <= 0) {
+        return mruby.mrb_nil_value();
+    }
+
+    const url = url_ptr[0..@intCast(url_len)];
+    const body: ?[]const u8 = if (body_ptr != null and body_len > 0)
+        body_ptr[0..@intCast(body_len)]
+    else
+        null;
+    const content_type: ?[]const u8 = if (ct_ptr != null and ct_len > 0)
+        ct_ptr[0..@intCast(ct_len)]
+    else
+        null;
+
+    var custom_headers = std.ArrayList([2][]const u8).empty;
+    defer custom_headers.deinit(allocator);
+
+    if (!isNil(headers_arr)) {
+        parseHeadersArray(mrb, allocator, headers_arr, &custom_headers) catch {
+            return mruby.mrb_nil_value();
+        };
+    }
+
+    var response = requestWithHeaders(allocator, .PATCH, url, body, content_type, custom_headers.items) catch {
+        return mruby.mrb_nil_value();
+    };
+    defer response.deinit();
+
+    return createResponseArray(mrb, allocator, &response);
+}
+
 fn isNil(val: mruby.mrb_value) bool {
     return val.w == 0;
 }
@@ -287,7 +438,14 @@ pub fn requestWithHeaders(
         @memcpy(body_buf[0..b.len], b);
         try req.sendBodyComplete(body_buf[0..b.len]);
     } else {
-        try req.sendBodiless();
+        // For methods that can have a body (PUT, POST, PATCH), send empty body
+        // For methods that cannot have a body (GET, DELETE), use sendBodiless
+        if (method == .PUT or method == .POST or method == .PATCH) {
+            req.transfer_encoding = .{ .content_length = 0 };
+            try req.sendBodyComplete(&[_]u8{});
+        } else {
+            try req.sendBodiless();
+        }
     }
 
     // Receive response

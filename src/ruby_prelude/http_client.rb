@@ -37,6 +37,34 @@ class HolaHttp
     Response.new(result[0], result[1], result[2])
   end
 
+  # PUT request with optional body, content_type, and headers
+  def self.put(url, headers = nil, body = nil, content_type = nil)
+    # For PUT requests, often headers come first (especially for authentication)
+    # But we also support the old signature for compatibility
+    if headers.is_a?(String)
+      # Old signature: put(url, body, content_type, headers)
+      body, content_type, headers = headers, body, content_type
+    end
+
+    headers_arr = normalize_headers(headers)
+    result = ZigBackend.http_put(url, body || "", content_type || "application/json", headers_arr)
+    Response.new(result[0], result[1], result[2])
+  end
+
+  # DELETE request with optional headers
+  def self.delete(url, headers = nil)
+    headers_arr = normalize_headers(headers)
+    result = ZigBackend.http_delete(url, headers_arr)
+    Response.new(result[0], result[1], result[2])
+  end
+
+  # PATCH request with optional body, content_type, and headers
+  def self.patch(url, body = nil, content_type = nil, headers = nil)
+    headers_arr = normalize_headers(headers)
+    result = ZigBackend.http_patch(url, body || "", content_type || "application/json", headers_arr)
+    Response.new(result[0], result[1], result[2])
+  end
+
   private
 
   def self.normalize_headers(headers)

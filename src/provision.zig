@@ -577,6 +577,33 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
     );
 
+    // Signature: http_put(url, body=nil, content_type=nil, headers=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "http_put",
+        http_client.zig_http_put,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
+    );
+
+    // Signature: http_delete(url, headers=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "http_delete",
+        http_client.zig_http_delete,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1),
+    );
+
+    // Signature: http_patch(url, body=nil, content_type=nil, headers=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "http_patch",
+        http_client.zig_http_patch,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
+    );
+
     // Register JSON functions
     json.setAllocator(allocator);
 
