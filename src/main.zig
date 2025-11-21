@@ -11,8 +11,10 @@ const clap = @import("clap");
 const toml = @import("toml");
 const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
+const node_info = @import("node_info.zig");
 
 const is_macos = builtin.os.tag == .macos;
+const is_linux = builtin.os.tag == .linux;
 
 const main_params = clap.parseParamsComptime(
     \\-h, --help   Print this help and exit
@@ -80,6 +82,12 @@ const provision_params = clap.parseParamsComptime(
 const provision_parsers = .{
     .path = clap.parsers.string,
 };
+
+const node_info_params = clap.parseParamsComptime(
+    \\-h, --help            Show help for node-info
+    \\
+);
+const node_info_parsers = .{};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -153,6 +161,10 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
     }
     if (std.mem.eql(u8, command, "apply")) {
         try runApplyCommand(allocator, iter);
+        return;
+    }
+    if (std.mem.eql(u8, command, "node-info")) {
+        try runNodeInfoCommand(allocator, iter);
         return;
     }
 
@@ -685,6 +697,54 @@ fn printProvisionHelp(reason: ?[]const u8) !void {
     );
 }
 
+fn runNodeInfoCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &node_info_params, node_info_parsers, iter, .{
+        .allocator = allocator,
+        .diagnostic = &diag,
+    }) catch |err| {
+        try diag.reportToFile(std.fs.File.stderr(), err);
+        return;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) return printNodeInfoHelp(null);
+
+    try printNodeInfo(allocator);
+}
+
+fn printNodeInfo(allocator: std.mem.Allocator) !void {
+    const node = try node_info.getNodeInfo(allocator);
+    defer node.deinit(allocator);
+
+    // Use std.json.fmt for proper JSON serialization
+    const json_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(node, .{ .whitespace = .indent_2 })});
+    defer allocator.free(json_str);
+
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll(json_str);
+    try stdout.writeAll("\n");
+}
+
+fn printNodeInfoHelp(reason: ?[]const u8) !void {
+    const out = std.fs.File.stdout();
+    if (reason) |msg| {
+        try out.writeAll(msg);
+        try out.writeAll("\n\n");
+    }
+    try out.writeAll(
+        \\node-info
+        \\  hola node-info
+        \\
+        \\Display complete node information in JSON format (like Chef Ohai).
+        \\
+        \\Example
+        \\  hola node-info
+        \\
+        \\
+    );
+}
+
 fn printMainHelp(unknown: ?[]const u8) !void {
     const gpa = std.heap.page_allocator;
 
@@ -711,6 +771,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .command = "dock-apps", .description = "List applications in macOS Dock" },
         .{ .command = "applescript", .description = "Execute AppleScript via macOS system API" },
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
+        .{ .command = "node-info", .description = "Display complete node information (like Chef Ohai)" },
         .{ .command = "apply", .description = "Execute full bootstrap sequence" },
         .{ .command = "help", .description = "Show this help menu" },
     };
@@ -726,6 +787,8 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .prefix = "AppleScript:", .command = "applescript \"1 + 1\"" },
         .{ .prefix = "AppleScript file:", .command = "applescript --file script.applescript" },
         .{ .prefix = "Infrastructure:", .command = "provision provision.rb" },
+        .{ .prefix = "Node information:", .command = "node-info" },
+        .{ .prefix = "Node info JSON:", .command = "node-info --json" },
         .{ .prefix = "Full bootstrap:", .command = "apply" },
         .{ .prefix = "Dry run:", .command = "apply --dry-run" },
     };

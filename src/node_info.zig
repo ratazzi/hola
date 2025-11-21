@@ -17,7 +17,77 @@ const c = if (builtin.os.tag == .macos) @cImport({
     @cInclude("ifaddrs.h");
 });
 
-/// Network interface information
+/// Root Node structure matching Chef Ohai JSON
+pub const Node = struct {
+    hostname: []const u8,
+    fqdn: []const u8,
+    platform: []const u8,
+    platform_family: []const u8,
+    platform_version: ?[]const u8,
+    os: []const u8,
+    machine: []const u8,
+    kernel: Kernel,
+    cpu: CPU,
+    network: Network,
+    lsb: ?LsbInfo = null,
+    platform_checks: PlatformChecks,
+
+    /// Free all allocated memory in this Node
+    pub fn deinit(self: Node, allocator: std.mem.Allocator) void {
+        allocator.free(self.hostname);
+        allocator.free(self.fqdn);
+        allocator.free(self.platform);
+        allocator.free(self.platform_family);
+        if (self.platform_version) |v| allocator.free(v);
+        allocator.free(self.machine);
+        allocator.free(self.kernel.release);
+        if (self.network.default_gateway) |v| allocator.free(v);
+        if (self.network.default_interface) |v| allocator.free(v);
+        for (self.network.interfaces) |iface| {
+            allocator.free(iface.name);
+            allocator.free(iface.ip_address);
+        }
+        allocator.free(self.network.interfaces);
+        if (self.lsb) |lsb| {
+            allocator.free(lsb.id);
+            allocator.free(lsb.description);
+            allocator.free(lsb.release);
+            allocator.free(lsb.codename);
+        }
+    }
+};
+
+pub const Kernel = struct {
+    name: []const u8,
+    release: []const u8,
+    machine: []const u8,
+};
+
+pub const CPU = struct {
+    architecture: []const u8,
+};
+
+pub const PlatformChecks = struct {
+    mac_os_x: bool,
+    linux: bool,
+};
+
+pub const Network = struct {
+    default_gateway: ?[]const u8 = null,
+    default_interface: ?[]const u8 = null,
+    interfaces: []Interface,
+};
+
+pub const Interface = struct {
+    name: []const u8,
+    ip_address: []const u8,
+    up: bool,
+    loopback: bool,
+    running: bool,
+    multicast: bool,
+};
+
+/// Network interface information (internal use)
 const NetworkInterface = struct {
     name: []const u8,
     ip_address: []const u8,
@@ -27,8 +97,70 @@ const NetworkInterface = struct {
     is_multicast: bool,
 };
 
+/// Get complete node information
+pub fn getNodeInfo(allocator: std.mem.Allocator) !Node {
+    const hostname = try getHostname(allocator);
+    const fqdn = try getFqdn(allocator);
+    const platform = try getPlatform(allocator);
+    const platform_family = try getPlatformFamily(allocator);
+    const platform_version = try getPlatformVersion(allocator);
+    const machine = try getMachine(allocator);
+    const kernel_release = try getKernelRelease(allocator);
+
+    // Network info
+    var default_gateway: ?[]const u8 = null;
+    var default_interface: ?[]const u8 = null;
+    if (try getDefaultGateway(allocator)) |gw| {
+        default_gateway = gw.ip;
+        default_interface = gw.interface;
+    }
+
+    const raw_interfaces = try getNetworkInterfaces(allocator);
+    var interfaces = try allocator.alloc(Interface, raw_interfaces.len);
+    for (raw_interfaces, 0..) |raw, i| {
+        interfaces[i] = Interface{
+            .name = raw.name,
+            .ip_address = raw.ip_address,
+            .up = raw.is_up,
+            .loopback = raw.is_loopback,
+            .running = raw.is_running,
+            .multicast = raw.is_multicast,
+        };
+    }
+    // Note: raw_interfaces slice itself needs freeing, but contents are moved to Node
+    allocator.free(raw_interfaces);
+
+    return Node{
+        .hostname = hostname,
+        .fqdn = fqdn,
+        .platform = platform,
+        .platform_family = platform_family,
+        .platform_version = platform_version,
+        .os = getOs(),
+        .machine = machine,
+        .kernel = Kernel{
+            .name = getKernelName(),
+            .release = kernel_release,
+            .machine = getCpuArch(),
+        },
+        .cpu = CPU{
+            .architecture = getCpuArch(),
+        },
+        .network = Network{
+            .default_gateway = default_gateway,
+            .default_interface = default_interface,
+            .interfaces = interfaces,
+        },
+        .lsb = try getLsbInfo(allocator),
+        .platform_checks = PlatformChecks{
+            .mac_os_x = builtin.os.tag == .macos,
+            .linux = builtin.os.tag == .linux,
+        },
+    };
+}
+
 /// Get hostname (short hostname, without domain)
-fn getHostname(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getHostname(allocator: std.mem.Allocator) ![]const u8 {
     // Try to get hostname from uname
     const uname_buf = std.posix.uname();
     const nodename = std.mem.sliceTo(&uname_buf.nodename, 0);
@@ -42,7 +174,7 @@ fn getHostname(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get FQDN (fully qualified domain name)
-fn getFqdn(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getFqdn(allocator: std.mem.Allocator) ![]const u8 {
     // Get the original nodename from uname for FQDN
     const uname_buf = std.posix.uname();
     const nodename = std.mem.sliceTo(&uname_buf.nodename, 0);
@@ -50,13 +182,17 @@ fn getFqdn(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get platform (specific distro on Linux, os name otherwise)
-fn getPlatform(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getPlatform(allocator: std.mem.Allocator) ![]const u8 {
     return switch (builtin.os.tag) {
         .macos => try allocator.dupe(u8, "mac_os_x"),
         .linux => blk: {
             // Try to get distro from /etc/os-release
             const lsb_opt = getLsbInfo(allocator) catch null;
             if (lsb_opt) |lsb| {
+                // We don't free lsb contents here because getLsbInfo returns allocated strings
+                // that we might want to reuse or free later.
+                // BUT here we are just using it to determine platform string.
+                // So we should free the LsbInfo parts we don't use.
                 defer {
                     allocator.free(lsb.id);
                     allocator.free(lsb.description);
@@ -76,7 +212,7 @@ fn getPlatform(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get platform family (debian, rhel, arch, etc.)
-fn getPlatformFamily(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getPlatformFamily(allocator: std.mem.Allocator) ![]const u8 {
     return switch (builtin.os.tag) {
         .macos => try allocator.dupe(u8, "mac_os_x"),
         .linux => blk: {
@@ -109,7 +245,7 @@ fn getPlatformFamily(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get platform version (from LSB on Linux)
-fn getPlatformVersion(allocator: std.mem.Allocator) !?[]const u8 {
+pub fn getPlatformVersion(allocator: std.mem.Allocator) !?[]const u8 {
     return switch (builtin.os.tag) {
         .linux => blk: {
             const lsb_opt = getLsbInfo(allocator) catch null;
@@ -131,7 +267,7 @@ fn getPlatformVersion(allocator: std.mem.Allocator) !?[]const u8 {
 }
 
 /// Get OS name
-fn getOs() []const u8 {
+pub fn getOs() []const u8 {
     return switch (builtin.os.tag) {
         .macos => "darwin",
         .linux => "linux",
@@ -144,7 +280,7 @@ fn getOs() []const u8 {
 }
 
 /// Get kernel name
-fn getKernelName() []const u8 {
+pub fn getKernelName() []const u8 {
     return switch (builtin.os.tag) {
         .macos => "Darwin",
         .linux => "Linux",
@@ -154,21 +290,21 @@ fn getKernelName() []const u8 {
 }
 
 /// Get kernel release (version string)
-fn getKernelRelease(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getKernelRelease(allocator: std.mem.Allocator) ![]const u8 {
     const uname_buf = std.posix.uname();
     const release = std.mem.sliceTo(&uname_buf.release, 0);
     return try allocator.dupe(u8, release);
 }
 
 /// Get machine architecture
-fn getMachine(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getMachine(allocator: std.mem.Allocator) ![]const u8 {
     const uname_buf = std.posix.uname();
     const machine = std.mem.sliceTo(&uname_buf.machine, 0);
     return try allocator.dupe(u8, machine);
 }
 
 /// Get CPU architecture in Chef format
-fn getCpuArch() []const u8 {
+pub fn getCpuArch() []const u8 {
     return switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
         .aarch64 => "aarch64",
@@ -179,9 +315,9 @@ fn getCpuArch() []const u8 {
 }
 
 /// Get network interfaces using std.posix.ifaddrs (real API approach)
-fn getNetworkInterfaces(allocator: std.mem.Allocator) ![]NetworkInterface {
+pub fn getNetworkInterfaces(allocator: std.mem.Allocator) ![]NetworkInterface {
     var interfaces = std.ArrayList(NetworkInterface).initCapacity(allocator, 0) catch return error.OutOfMemory;
-    defer interfaces.deinit(allocator);
+    defer interfaces.deinit(allocator); // We return owned slice, so this only frees the list structure if we fail
 
     var ifaddrs_ptr: ?*c.ifaddrs = null;
     defer if (ifaddrs_ptr) |ptr| c.freeifaddrs(ptr);
@@ -235,7 +371,7 @@ const DefaultGateway = struct {
 };
 
 /// LSB (Linux Standard Base) information
-const LsbInfo = struct {
+pub const LsbInfo = struct {
     id: []const u8,
     description: []const u8,
     release: []const u8,
@@ -243,7 +379,7 @@ const LsbInfo = struct {
 };
 
 /// Get default gateway IP address and interface
-fn getDefaultGateway(allocator: std.mem.Allocator) !?DefaultGateway {
+pub fn getDefaultGateway(allocator: std.mem.Allocator) !?DefaultGateway {
     if (builtin.os.tag == .macos) {
         return getDefaultGatewayMacOS(allocator);
     } else if (builtin.os.tag == .linux) {
@@ -253,7 +389,7 @@ fn getDefaultGateway(allocator: std.mem.Allocator) !?DefaultGateway {
 }
 
 /// Get LSB information by reading /etc/os-release (Linux only)
-fn getLsbInfo(allocator: std.mem.Allocator) !?LsbInfo {
+pub fn getLsbInfo(allocator: std.mem.Allocator) !?LsbInfo {
     if (builtin.os.tag != .linux) return null;
 
     const file = std.fs.cwd().openFile("/etc/os-release", .{}) catch return null;
