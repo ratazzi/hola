@@ -139,11 +139,11 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         try runLinkCommand(allocator, iter);
         return;
     }
-    if (std.mem.eql(u8, command, "dock-apps")) {
+    if (std.mem.eql(u8, command, "dock")) {
         if (is_macos) {
-            try runDockAppsCommand(allocator, iter);
+            try runDockCommand(allocator, iter);
         } else {
-            std.debug.print("Error: dock-apps command is only available on macOS\n", .{});
+            std.debug.print("Error: dock command is only available on macOS\n", .{});
         }
         return;
     }
@@ -396,8 +396,66 @@ fn printLinkHelp(reason: ?[]const u8) !void {
     );
 }
 
-fn runDockAppsCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn runDockCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     _ = iter;
+
+    // Helper function to read Dock preferences using CFPreferences API
+    const readDockPref = struct {
+        fn call(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
+            const c = @cImport({
+                @cInclude("CoreFoundation/CoreFoundation.h");
+            });
+
+            // Convert key to CFString
+            const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
+            if (key_cf == null) return error.OutOfMemory;
+            defer c.CFRelease(key_cf);
+
+            // Read preference using CFPreferences
+            const domain = c.CFStringCreateWithCString(null, "com.apple.dock", c.kCFStringEncodingUTF8);
+            if (domain == null) return error.OutOfMemory;
+            defer c.CFRelease(domain);
+
+            const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+            if (value_cf == null) {
+                return null;
+            }
+            defer c.CFRelease(value_cf);
+
+            // Convert CFTypeRef to plist.Value
+            const type_id = c.CFGetTypeID(value_cf);
+
+            if (type_id == c.CFNumberGetTypeID()) {
+                const num = @as(c.CFNumberRef, @ptrCast(value_cf));
+                var int_val: c_longlong = undefined;
+                if (c.CFNumberGetValue(num, c.kCFNumberLongLongType, &int_val) != 0) {
+                    return plist.Value{ .integer = @as(i64, @intCast(int_val)) };
+                }
+                return null;
+            } else if (type_id == c.CFBooleanGetTypeID()) {
+                const bool_val = c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(value_cf)));
+                return plist.Value{ .boolean = bool_val != 0 };
+            } else if (type_id == c.CFStringGetTypeID()) {
+                const str = @as(c.CFStringRef, @ptrCast(value_cf));
+                const max_len = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(str), c.kCFStringEncodingUTF8);
+                var buf = try alloc.alloc(u8, @as(usize, @intCast(max_len)) + 1);
+                if (c.CFStringGetCString(str, buf.ptr, @as(c_long, @intCast(buf.len)), c.kCFStringEncodingUTF8) == 0) {
+                    alloc.free(buf);
+                    return null;
+                }
+                // Trim to actual length (null-terminated)
+                const len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+                const str_slice = try alloc.dupe(u8, buf[0..len]);
+                alloc.free(buf);
+                return plist.Value{ .string = str_slice };
+            } else if (type_id == c.CFArrayGetTypeID()) {
+                // Return the array as-is for persistent-apps
+                return plist.Value{ .array = undefined }; // We'll handle this specially
+            }
+
+            return null;
+        }
+    }.call;
 
     const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch {
         std.debug.print("Error: HOME environment variable not set\n", .{});
@@ -408,13 +466,20 @@ fn runDockAppsCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterat
     const dock_plist_path = try std.fmt.allocPrint(allocator, "{s}/Library/Preferences/com.apple.dock.plist", .{home_dir});
     defer allocator.free(dock_plist_path);
 
-    std.debug.print("Reading Dock plist: {s}\n\n", .{dock_plist_path});
-
     var dict = plist.Dictionary.loadFromFile(allocator, dock_plist_path) catch |err| {
         std.debug.print("Error loading Dock plist: {}\n", .{err});
         return;
     };
     defer dict.deinit();
+
+    // Collect app paths (still from plist since persistent-apps is complex)
+    var app_paths = std.ArrayList([]const u8).empty;
+    defer {
+        for (app_paths.items) |path| {
+            allocator.free(path);
+        }
+        app_paths.deinit(allocator);
+    }
 
     // Get persistent-apps array
     var persistent_apps_value = dict.get("persistent-apps") orelse {
@@ -431,84 +496,139 @@ fn runDockAppsCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterat
         },
     };
 
-    std.debug.print("Found {d} applications in Dock:\n\n", .{apps_array.len});
-
-    for (apps_array, 0..) |app_item, i| {
+    // Extract app paths
+    for (apps_array) |app_item| {
         const app_dict = switch (app_item) {
             .dictionary => |d| d,
-            else => {
-                std.debug.print("  [{d}] (invalid format)\n", .{i + 1});
-                continue;
-            },
+            else => continue,
         };
 
-        // Get tile-data
-        var tile_data_value = app_dict.get("tile-data") orelse {
-            std.debug.print("  [{d}] (no tile-data)\n", .{i + 1});
-            continue;
-        };
+        var tile_data_value = app_dict.get("tile-data") orelse continue;
         defer tile_data_value.deinit(allocator);
 
         const tile_data = switch (tile_data_value) {
             .dictionary => |d| d,
-            else => {
-                std.debug.print("  [{d}] (tile-data is not a dict)\n", .{i + 1});
-                continue;
-            },
+            else => continue,
         };
 
-        // Get file-label (app name)
-        const file_label_value = tile_data.get("file-label");
-        var app_name: []const u8 = "(no name)";
-        var app_name_owned: ?plist.Value = null;
-        if (file_label_value) |label| {
-            app_name_owned = label;
-            switch (label) {
-                .string => |s| {
-                    app_name = s;
-                },
-                else => {},
-            }
-        }
+        const file_data_value = tile_data.get("file-data") orelse continue;
+        const file_data_dict = switch (file_data_value) {
+            .dictionary => |d| d,
+            else => continue,
+        };
+        defer file_data_value.deinit(allocator);
 
-        // Get file-data -> _CFURLString (app path)
-        const file_data_value = tile_data.get("file-data");
-        var app_path: []const u8 = "(no path)";
-        var app_path_owned: ?plist.Value = null;
-        if (file_data_value) |data| {
-            app_path_owned = data;
-            const file_data_dict = switch (data) {
-                .dictionary => |d| d,
-                else => {
-                    continue;
-                },
-            };
+        const url_string_value = file_data_dict.get("_CFURLString") orelse continue;
+        defer url_string_value.deinit(allocator);
 
-            const url_string_value = file_data_dict.get("_CFURLString");
-            if (url_string_value) |url_str| {
-                app_path_owned = url_str;
-                switch (url_str) {
-                    .string => |s| {
-                        app_path = s;
-                    },
-                    else => {},
-                }
-            }
-        }
+        const app_path = switch (url_string_value) {
+            .string => |s| s,
+            else => continue,
+        };
 
-        std.debug.print("  [{d}] {s}\n", .{ i + 1, app_name });
-        if (!std.mem.eql(u8, app_path, "(no path)")) {
-            std.debug.print("      Path: {s}\n", .{app_path});
-        }
-
-        // Clean up after printing
-        if (app_path_owned) |path_val| {
-            path_val.deinit(allocator);
-        }
-        if (app_name_owned) |name_val| {
-            name_val.deinit(allocator);
-        }
+        try app_paths.append(allocator, try allocator.dupe(u8, app_path));
     }
+
+    // Read Dock configuration settings using CFPreferences API
+    var orientation_owned: ?[]u8 = null;
+    defer if (orientation_owned) |s| allocator.free(s);
+
+    const orientation = blk: {
+        if (try readDockPref(allocator, "orientation")) |val| {
+            defer val.deinit(allocator);
+            break :blk switch (val) {
+                .string => |s| blk2: {
+                    orientation_owned = try allocator.dupe(u8, s);
+                    break :blk2 orientation_owned.?;
+                },
+                else => "bottom",
+            };
+        }
+        break :blk "bottom";
+    };
+
+    const autohide = blk: {
+        if (try readDockPref(allocator, "autohide")) |val| {
+            defer val.deinit(allocator);
+            break :blk switch (val) {
+                .boolean => |b| b,
+                .integer => |i| i != 0,
+                else => false,
+            };
+        }
+        break :blk false;
+    };
+
+    const magnification = blk: {
+        if (try readDockPref(allocator, "magnification")) |val| {
+            defer val.deinit(allocator);
+            break :blk switch (val) {
+                .boolean => |b| b,
+                .integer => |i| i != 0,
+                else => false,
+            };
+        }
+        break :blk false;
+    };
+
+    const tilesize = blk: {
+        if (try readDockPref(allocator, "tilesize")) |val| {
+            defer val.deinit(allocator);
+            break :blk switch (val) {
+                .integer => |i| i,
+                .float => |f| @as(i64, @intFromFloat(f)),
+                else => 50,
+            };
+        }
+        break :blk 50;
+    };
+
+    const largesize = blk: {
+        if (try readDockPref(allocator, "largesize")) |val| {
+            defer val.deinit(allocator);
+            break :blk switch (val) {
+                .integer => |i| i,
+                .float => |f| @as(i64, @intFromFloat(f)),
+                else => 64,
+            };
+        }
+        break :blk 64;
+    };
+
+    // Build output string atomically
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+
+    try output.appendSlice(allocator, "macos_dock do\n");
+    try output.appendSlice(allocator, "  apps [\n");
+
+    for (app_paths.items) |path| {
+        // Remove file:// prefix and decode URL
+        const clean_path = if (std.mem.startsWith(u8, path, "file://"))
+            path[7..]
+        else
+            path;
+
+        // URL decode - allocate buffer and decode
+        const decoded_buf = try allocator.alloc(u8, clean_path.len);
+        defer allocator.free(decoded_buf);
+        const decoded = std.Uri.percentDecodeBackwards(decoded_buf, clean_path);
+
+        try output.appendSlice(allocator, "    '");
+        try output.appendSlice(allocator, decoded);
+        try output.appendSlice(allocator, "',\n");
+    }
+
+    try output.appendSlice(allocator, "  ]\n");
+    try std.fmt.format(output.writer(allocator), "  orientation :{s}\n", .{orientation});
+    try std.fmt.format(output.writer(allocator), "  autohide {s}\n", .{if (autohide) "true" else "false"});
+    try std.fmt.format(output.writer(allocator), "  magnification {s}\n", .{if (magnification) "true" else "false"});
+    try std.fmt.format(output.writer(allocator), "  tilesize {d}\n", .{tilesize});
+    try std.fmt.format(output.writer(allocator), "  largesize {d}\n", .{largesize});
+    try output.appendSlice(allocator, "end\n");
+
+    // Print atomically
+    std.debug.print("{s}", .{output.items});
 }
 
 fn runApplescriptCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
@@ -768,7 +888,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     const commands = [_]help_formatter.HelpFormatter.CommandItem{
         .{ .command = "git-clone", .description = "Clone repositories with embedded libgit2 client" },
         .{ .command = "link", .description = "Scan ~/.dotfiles and show link plan (dry-run mode)" },
-        .{ .command = "dock-apps", .description = "List applications in macOS Dock" },
+        .{ .command = "dock", .description = "Show current macOS Dock configuration" },
         .{ .command = "applescript", .description = "Execute AppleScript via macOS system API" },
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
         .{ .command = "node-info", .description = "Display complete node information (like Chef Ohai)" },
@@ -783,7 +903,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     const examples = [_]help_formatter.HelpFormatter.ExampleItem{
         .{ .prefix = "Clone config:", .command = "git-clone https://github.com/user/hola ~/.local/share/hola/config --branch main" },
         .{ .prefix = "Link dotfiles:", .command = "link --root ~/.dotfiles" },
-        .{ .prefix = "Dock utilities:", .command = "dock-apps" },
+        .{ .prefix = "Dock utilities:", .command = "dock" },
         .{ .prefix = "AppleScript:", .command = "applescript \"1 + 1\"" },
         .{ .prefix = "AppleScript file:", .command = "applescript --file script.applescript" },
         .{ .prefix = "Infrastructure:", .command = "provision provision.rb" },
