@@ -3,9 +3,16 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
 const builtin = @import("builtin");
+const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
+
+/// Context for async package operations
+const PackageApplyContext = struct {
+    resource: *const Resource,
+    action: Resource.Action,
+};
 
 /// Package resource data structure
 pub const Resource = struct {
@@ -55,10 +62,26 @@ pub const Resource = struct {
             };
         }
 
-        switch (self.action) {
-            .install => return try self.applyInstall(),
-            .remove => return try self.applyRemove(),
-            .upgrade => return try self.applyUpgrade(),
+        // Execute the entire apply operation asynchronously
+        const ctx = PackageApplyContext{
+            .resource = &self,
+            .action = self.action,
+        };
+
+        return try AsyncExecutor.executeWithContext(
+            PackageApplyContext,
+            base.ApplyResult,
+            ctx,
+            applyAsync,
+        );
+    }
+
+    /// Async apply implementation - runs in separate thread
+    fn applyAsync(ctx: PackageApplyContext) !base.ApplyResult {
+        switch (ctx.action) {
+            .install => return try ctx.resource.applyInstallSync(),
+            .remove => return try ctx.resource.applyRemoveSync(),
+            .upgrade => return try ctx.resource.applyUpgradeSync(),
             .nothing => {
                 return base.ApplyResult{
                     .was_updated = false,
@@ -78,7 +101,7 @@ pub const Resource = struct {
         };
     }
 
-    fn applyInstall(self: Resource) !base.ApplyResult {
+    fn applyInstallSync(self: Resource) !base.ApplyResult {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -114,7 +137,7 @@ pub const Resource = struct {
         };
     }
 
-    fn applyRemove(self: Resource) !base.ApplyResult {
+    fn applyRemoveSync(self: Resource) !base.ApplyResult {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -150,7 +173,7 @@ pub const Resource = struct {
         };
     }
 
-    fn applyUpgrade(self: Resource) !base.ApplyResult {
+    fn applyUpgradeSync(self: Resource) !base.ApplyResult {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -356,6 +379,8 @@ pub const Resource = struct {
     }
 
     fn runCommand(self: Resource, allocator: std.mem.Allocator, cmd: []const u8) !void {
+        _ = self;
+
         var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
@@ -404,8 +429,6 @@ pub const Resource = struct {
                 return error.CommandFailed;
             },
         }
-
-        _ = self;
     }
 };
 
