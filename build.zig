@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -6,7 +7,7 @@ const std = @import("std");
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -21,11 +22,34 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
-    // Define paths for external libraries with platform defaults
+    const strip = b.option(bool, "strip", "Strip debug info");
+
+    // Define paths for external libraries
+    // For native builds (macOS), use system libraries
+    // For cross-compilation (macOS -> Linux), use hola_deps package
     const mruby_path = b.option([]const u8, "mruby_path", "Path to mruby installation") orelse
-        if (target.result.os.tag == .macos) "/opt/homebrew/Cellar/mruby/3.4.0" else "/usr";
+        if (target.result.os.tag == .macos) "/opt/homebrew/Cellar/mruby/3.4.0" else "/usr/local/mruby";
+
     const libgit2_path = b.option([]const u8, "libgit2_path", "Path to libgit2 installation") orelse
-        if (target.result.os.tag == .macos) "/opt/homebrew/opt/libgit2" else "/usr";
+        if (target.result.os.tag == .macos) "/opt/homebrew/opt/libgit2" else "/usr/local";
+
+    var final_mruby_path = mruby_path;
+    var final_libgit2_path = libgit2_path;
+
+    // Detect cross-compilation scenario: Host is macOS, Target is Linux
+    const is_cross_compile = (builtin.os.tag == .macos) and (target.result.os.tag == .linux);
+
+    if (is_cross_compile) {
+        // Use hola_deps package for prebuilt Linux dependencies
+        const hola_deps_dep = b.dependency("hola_deps", .{
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const deps_path = hola_deps_dep.path(".").getPath(b);
+        final_mruby_path = b.fmt("{s}/mruby", .{deps_path});
+        final_libgit2_path = deps_path;
+    }
 
     const clap_dep = b.dependency("clap", .{
         .target = target,
@@ -48,9 +72,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Generate executable name with architecture
+    // Format: hola-{os}-{arch} (e.g., hola-macos-aarch64, hola-linux-x86_64)
+    const exe_name = b.fmt("hola-{s}-{s}", .{
+        @tagName(target.result.os.tag),
+        @tagName(target.result.cpu.arch),
+    });
+
     // Define the main executable
     const exe = b.addExecutable(.{
-        .name = "hola",
+        .name = exe_name,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -66,15 +97,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    if (strip) |s| {
+        exe.root_module.strip = s;
+    }
+
     // Add mruby header file path
-    exe.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{mruby_path}) });
+    exe.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{final_mruby_path}) });
 
-    // Add mruby library file path
-    exe.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/lib", .{mruby_path}) });
-
-    // Link mruby static library
-    exe.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libmruby.a", .{mruby_path}) });
+    // Link mruby static library directly (no need to add library path since we specify full path)
+    exe.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libmruby.a", .{final_mruby_path}) });
     exe.linkLibC();
+
+    // For Linux cross-compilation, provide linker symbols that mruby expects
+    if (target.result.os.tag == .linux) {
+        exe.root_module.link_libc = true;
+        exe.addAssemblyFile(b.path("src/linux_linker_shims.s"));
+    }
 
     // Platform-specific configuration
     if (target.result.os.tag == .macos) {
@@ -89,7 +127,7 @@ pub fn build(b: *std.Build) void {
 
     // Add mruby helpers for array handling
     exe.addCSourceFile(.{ .file = b.path("src/mruby_helpers.c"), .flags = &.{} });
-    configureLibGit2(exe, b, libgit2_path, target.result.os.tag);
+    configureLibGit2(exe, b, final_libgit2_path, target.result.os.tag);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -127,7 +165,7 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    configureLibGit2(exe_tests, b, libgit2_path, target.result.os.tag);
+    configureLibGit2(exe_tests, b, final_libgit2_path, target.result.os.tag);
 
     // Run step for the test executable
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -158,20 +196,45 @@ fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: 
         step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/libssh2"}) });
         step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
         step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr" else "/opt/homebrew/opt/openssl@3"}) });
+
+        // On macOS, libz and libiconv are provided by the SDK
+        // We need to add the SDK path for headers, libraries and frameworks
+        const result = b.run(&.{ "xcrun", "--show-sdk-path" });
+        const sdk_path = std.mem.trim(u8, result, &std.ascii.whitespace);
+
+        // Add SDK paths for headers, libraries and frameworks
+        step.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
+        step.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk_path}) });
+        step.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk_path}) });
+
         step.linkSystemLibrary("z");
         step.linkSystemLibrary("iconv");
+
         step.linkFramework("CoreFoundation");
         step.linkFramework("Security");
     } else {
-        // Linux: use static libraries (built from source)
-        // Default paths assume libraries are in /usr/local/lib
-        const static_lib_path = if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr/local" else libgit2_path;
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{static_lib_path}) });
-        step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{static_lib_path}) });
+        // Linux: use static libraries (built from source or system)
+        // If libgit2_path contains "deps_install", we know it's our custom build
+        const is_custom_build = std.mem.indexOf(u8, libgit2_path, "deps_install") != null;
+
+        if (is_custom_build) {
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{libgit2_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{libgit2_path}) });
+        } else {
+            // Fallback to system paths (Docker)
+            const static_lib_path = if (std.mem.eql(u8, libgit2_path, "/usr")) "/usr/local" else libgit2_path;
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{static_lib_path}) });
+            step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{static_lib_path}) });
+        }
     }
 }

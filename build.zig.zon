@@ -32,6 +32,10 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .hola_deps = .{
+            .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly/hola-deps-linux-x86_64.tar.gz",
+            .hash = "hola_deps-0.1.0-clHq_xEi6AKOAzS-haodgRaFjv4cKLOCFhZlXNnnqIob",
+        },
         .clap = .{
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/heads/master.tar.gz",
             .hash = "clap-0.11.0-oBajB-TnAQC7yPLnZRT5WzHZ_4Ly4dX2OILskli74b9H",

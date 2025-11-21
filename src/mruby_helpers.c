@@ -5,6 +5,15 @@
 #include <mruby/hash.h>
 #include <stdio.h>
 
+#ifdef __linux__
+// Shim for symbols expected by some static libraries (like mruby) but missing in Zig/LLD link
+// These are standard Unix linker symbols marking segment ends.
+// Use weak symbols to avoid conflicts with other definitions
+__attribute__((weak)) char etext;
+__attribute__((weak)) char edata;
+__attribute__((weak)) char end;
+#endif
+
 // Helper to get value type
 uint32_t zig_mrb_type(mrb_value val) {
     return mrb_type(val);

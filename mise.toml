@@ -1,0 +1,29 @@
+[tools]
+zig = "0.15.2"
+
+[tasks.build]
+description = "Build hola with release optimizations"
+run = "zig build -Doptimize=ReleaseSmall -Dstrip=true -Dcpu=baseline"
+
+[tasks.build-dev]
+description = "Build hola in debug mode"
+run = "zig build"
+
+[tasks.fmt]
+description = "Format all Zig source files"
+run = "zig fmt src/"
+
+[tasks.lint]
+description = "Check code quality (formatting)"
+run = """
+if ! zig fmt --check src/; then
+  echo "❌ Code formatting issues found!"
+  echo "Run 'mise fmt' to fix formatting"
+  exit 1
+fi
+echo "✅ All files are properly formatted"
+"""
+
+[tasks.test]
+description = "Run all tests"
+run = "zig build test"
