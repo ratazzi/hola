@@ -79,12 +79,23 @@ pub const Resource = struct {
             // Get mruby state from common props
             const mrb = self.common.mrb_state orelse return error.NoMrubyState;
 
-            // Call the Ruby proc
-            const result = mruby.mrb_yield(mrb, proc, mruby.mrb_nil_value());
+            // Call the Ruby proc using mrb_funcall
+            // Proc.call() in Ruby translates to funcall with "call" method
+            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
+            const result = mruby.mrb_funcall_argv(mrb, proc, call_sym, 0, null);
 
             // Check if an exception occurred
             if (zig_mrb_has_exception(mrb) != 0) {
-                // Print exception
+                // Get exception object and convert to string
+                const exc = mruby.mrb_get_exception(mrb);
+                const exc_str = mruby.mrb_inspect(mrb, exc);
+                const err_msg_cstr = mruby.mrb_str_to_cstr(mrb, exc_str);
+                const err_msg = std.mem.span(err_msg_cstr);
+
+                // Log the error message
+                std.log.err("Ruby block execution failed: {s}", .{err_msg});
+
+                // Also print to stderr for consistency
                 mruby.mrb_print_error(mrb);
                 return error.RubyBlockFailed;
             }

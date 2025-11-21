@@ -134,3 +134,11 @@ mrb_value zig_mrb_false_value(void) {
 int zig_mrb_has_exception(mrb_state *mrb) {
     return mrb->exc != NULL ? 1 : 0;
 }
+
+// Helper to get exception object
+mrb_value zig_mrb_get_exception(mrb_state *mrb) {
+    if (mrb->exc) {
+        return mrb_obj_value(mrb->exc);
+    }
+    return mrb_nil_value();
+}

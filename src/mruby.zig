@@ -28,10 +28,18 @@ pub extern fn mrb_get_args(mrb: *mrb_state, format: [*c]const u8, ...) mrb_int;
 
 // String handling
 pub extern fn mrb_str_to_cstr(mrb: *mrb_state, str: mrb_value) [*c]const u8;
+pub extern fn mrb_inspect(mrb: *mrb_state, obj: mrb_value) mrb_value;
+
+// Exception handling (via C helper since mrb->exc is accessed directly)
+extern fn zig_mrb_get_exception(mrb: *mrb_state) mrb_value;
+pub const mrb_get_exception = zig_mrb_get_exception;
 
 // Block/Proc handling
 pub extern fn mrb_yield(mrb: *mrb_state, b: mrb_value, arg: mrb_value) mrb_value;
 pub extern fn mrb_yield_argv(mrb: *mrb_state, b: mrb_value, argc: mrb_int, argv: [*c]const mrb_value) mrb_value;
+
+// Function call
+pub extern fn mrb_funcall_argv(mrb: *mrb_state, val: mrb_value, name: mrb_sym, argc: mrb_int, argv: [*c]const mrb_value) mrb_value;
 
 // GC protection
 pub extern fn mrb_gc_register(mrb: *mrb_state, obj: mrb_value) void;
