@@ -15,6 +15,7 @@ const base = @import("base_resource.zig");
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
+const AsyncExecutor = @import("async_executor.zig").AsyncExecutor;
 
 pub const Options = struct {
     script_path: []const u8,
@@ -23,6 +24,14 @@ pub const Options = struct {
 // Global resource collector (will be initialized per-run)
 var g_allocator: std.mem.Allocator = undefined;
 var g_resources: std.ArrayList(resources.ResourceWithMetadata) = undefined;
+var g_display: ?*modern_display.ModernProvisionDisplay = null;
+
+// Poll callback for async executor
+fn pollDisplayUpdate() !void {
+    if (g_display) |display| {
+        try display.update();
+    }
+}
 
 // Pending notification wrapper
 const PendingNotification = struct {
@@ -789,6 +798,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize modern display with indicatif enabled
     var display = try modern_display.ModernProvisionDisplay.init(allocator, true); // Enable indicatif
     defer display.deinit();
+
+    // Set global display for async executor callback
+    g_display = &display;
+    defer g_display = null;
+
+    // Set poll callback for async executor
+    AsyncExecutor.setPollCallback(pollDisplayUpdate);
 
     // Show section header
     try display.showSection("Applying Configuration");

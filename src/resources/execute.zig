@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const ansi = @import("../ansi_constants.zig");
 const logger = @import("../logger.zig");
+const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 
 /// Execute resource data structure
 pub const Resource = struct {
@@ -82,33 +83,50 @@ pub const Resource = struct {
         }
     }
 
-    fn applyRun(self: Resource) !void {
-        // Don't output debug info during ANSI progress display
+    const ExecuteResult = struct {
+        term: std.process.Child.Term,
+        stdout: []u8,
+        stderr: []u8,
+        allocator: std.mem.Allocator,
 
+        pub fn deinit(self: *const ExecuteResult) void {
+            self.allocator.free(self.stdout);
+            self.allocator.free(self.stderr);
+        }
+    };
+
+    const ExecuteContext = struct {
+        command: []const u8,
+        cwd: ?[]const u8,
+        user: ?[]const u8,
+        group: ?[]const u8,
+    };
+
+    fn executeCommand(ctx: ExecuteContext) !ExecuteResult {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        const allocator = arena.allocator();
+        const temp_allocator = arena.allocator();
 
         // Prepare command for shell execution
-        const shell_cmd = try std.fmt.allocPrint(allocator, "{s}", .{self.command});
+        const shell_cmd = try std.fmt.allocPrint(temp_allocator, "{s}", .{ctx.command});
 
         // Create child process
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", shell_cmd }, allocator);
+        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", shell_cmd }, temp_allocator);
 
         // Set working directory if specified
-        if (self.cwd) |cwd| {
+        if (ctx.cwd) |cwd| {
             child.cwd = cwd;
         }
 
         // Set user and/or group if specified (requires root privileges)
-        if (self.user != null or self.group != null) {
+        if (ctx.user != null or ctx.group != null) {
             const c = @cImport({
                 @cInclude("pwd.h");
                 @cInclude("grp.h");
             });
 
             // Get user info if user is specified
-            if (self.user) |user| {
+            if (ctx.user) |user| {
                 const username_z = std.posix.toPosixPath(user) catch |err| {
                     std.debug.print("[execute] failed to convert username '{s}': {}\n", .{ user, err });
                     return error.UserInfoFailed;
@@ -121,11 +139,11 @@ pub const Resource = struct {
                 }
 
                 child.uid = @intCast(pwd.*.pw_uid);
-                child.gid = @intCast(pwd.*.pw_gid); // Default to user's primary group
+                child.gid = @intCast(pwd.*.pw_gid);
             }
 
             // Override with group if specified
-            if (self.group) |group| {
+            if (ctx.group) |group| {
                 const groupname_z = std.posix.toPosixPath(group) catch |err| {
                     std.debug.print("[execute] failed to convert groupname '{s}': {}\n", .{ group, err });
                     return error.GroupInfoFailed;
@@ -147,13 +165,45 @@ pub const Resource = struct {
 
         try child.spawn();
 
-        // Read output for display
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        defer allocator.free(stdout);
-        defer allocator.free(stderr);
-
+        // Blocking wait in worker thread (main thread polls our status)
+        const stdout = try child.stdout.?.readToEndAlloc(temp_allocator, std.math.maxInt(usize));
+        const stderr = try child.stderr.?.readToEndAlloc(temp_allocator, std.math.maxInt(usize));
         const term = try child.wait();
+
+        // Allocate result using page allocator (will be freed by caller)
+        const result_allocator = std.heap.page_allocator;
+        return ExecuteResult{
+            .term = term,
+            .stdout = try result_allocator.dupe(u8, stdout),
+            .stderr = try result_allocator.dupe(u8, stderr),
+            .allocator = result_allocator,
+        };
+    }
+
+    fn applyRun(self: Resource) !void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        // Execute command asynchronously to allow spinner to continue
+        const ctx = ExecuteContext{
+            .command = self.command,
+            .cwd = self.cwd,
+            .user = self.user,
+            .group = self.group,
+        };
+
+        const result = try AsyncExecutor.executeWithContext(
+            ExecuteContext,
+            ExecuteResult,
+            ctx,
+            executeCommand,
+        );
+        defer result.deinit();
+
+        const term = result.term;
+        const stdout = result.stdout;
+        const stderr = result.stderr;
 
         // Log command execution
         const exit_code: ?i32 = switch (term) {
@@ -172,7 +222,7 @@ pub const Resource = struct {
         } else try allocator.dupe(u8, "");
         defer allocator.free(exit_msg);
 
-        logger.log(level, "execute[{s}]: {s}{s}\n", .{ self.name, shell_cmd, exit_msg });
+        logger.log(level, "execute[{s}]: {s}{s}\n", .{ self.name, self.command, exit_msg });
 
         if (stdout.len > 0) {
             const stdout_trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
@@ -215,8 +265,8 @@ pub const Resource = struct {
                 std.debug.print("[execute] command stopped by signal {d}\n", .{sig});
                 return error.CommandStopped;
             },
-            .Unknown => |status| {
-                std.debug.print("[execute] command exited with unknown status {d}\n", .{status});
+            .Unknown => |unknown_status| {
+                std.debug.print("[execute] command exited with unknown status {d}\n", .{unknown_status});
                 return error.CommandFailed;
             },
         }
