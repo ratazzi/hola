@@ -1,0 +1,7 @@
+.claude
+.zig-cache
+.zig-global-cache
+zig-out
+/indicatif
+/test_*
+/zig-cache
