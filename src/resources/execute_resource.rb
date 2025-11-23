@@ -8,6 +8,7 @@ class ExecuteResource
     @cwd = ""
     @user = ""
     @group = ""
+    @live_stream = false  # Default: don't output to stdout
     @action = "run"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -20,7 +21,7 @@ class ExecuteResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, @action, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, @live_stream, @action, only_if_arg, not_if_arg, notifications_arg)
   end
 
   def command(value)

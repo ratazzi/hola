@@ -14,6 +14,7 @@ pub const Resource = struct {
     user: ?[]const u8, // User to run as
     group: ?[]const u8, // Group to run as
     environment: ?[]const u8, // Environment variables (future)
+    live_stream: bool, // Whether to output command result to stdout
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -238,15 +239,17 @@ pub const Resource = struct {
             }
         }
 
-        // Display command output like Docker build
-        if (stdout.len > 0) {
-            showCommandOutput(stdout);
-        }
-        if (stderr.len > 0) {
-            // Show stderr in red to indicate errors
-            std.debug.print("   {s}", .{ansi.ANSI.RED});
-            showCommandOutput(stderr);
-            std.debug.print("{s}", .{ansi.ANSI.RESET});
+        // Display command output only if live_stream is enabled
+        if (self.live_stream) {
+            if (stdout.len > 0) {
+                showCommandOutput(stdout);
+            }
+            if (stderr.len > 0) {
+                // Show stderr in red to indicate errors
+                std.debug.print("   {s}", .{ansi.ANSI.RED});
+                showCommandOutput(stderr);
+                std.debug.print("{s}", .{ansi.ANSI.RESET});
+            }
         }
 
         // Check exit status
@@ -279,7 +282,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("execute_resource.rb");
 
 /// Zig callback: called from Ruby to add an execute resource
-/// Format: add_execute(name, command, cwd, user, group, action, only_if_block, not_if_block, notifications_array)
+/// Format: add_execute(name, command, cwd, user, group, live_stream, action, only_if_block, not_if_block, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -293,13 +296,14 @@ pub fn zigAddResource(
     var cwd_val: mruby.mrb_value = undefined;
     var user_val: mruby.mrb_value = undefined;
     var group_val: mruby.mrb_value = undefined;
+    var live_stream_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 6 strings + 3 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "SSSSSS|ooA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 5 strings + 1 bool + 1 string + 3 optional (blocks + array)
+    _ = mruby.mrb_get_args(mrb, "SSSSSoS|ooA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &live_stream_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const command_cstr = mruby.mrb_str_to_cstr(mrb, command_val);
@@ -329,6 +333,8 @@ pub fn zigAddResource(
     else
         null;
 
+    const live_stream = mruby.mrb_test(live_stream_val);
+
     const action_str = std.mem.span(action_cstr);
     const action: Resource.Action = if (std.mem.eql(u8, action_str, "nothing"))
         .nothing
@@ -346,6 +352,7 @@ pub fn zigAddResource(
         .user = user,
         .group = group,
         .environment = null,
+        .live_stream = live_stream,
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();
