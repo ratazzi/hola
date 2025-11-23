@@ -10,7 +10,7 @@ pub const Resource = struct {
     content: ?[]const u8, // Unit file content
     enabled: ?bool, // Whether to enable the unit
     active: ?bool, // Whether to start the unit
-    actions: []const Action, // Actions to perform
+    action: Action, // Single action to perform
 
     // Common properties (guards, notifications, etc.)
     common: base.CommonProps,
@@ -30,7 +30,6 @@ pub const Resource = struct {
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         if (self.content) |content| allocator.free(content);
-        allocator.free(self.actions);
 
         // Deinit common props
         var common = self.common;
@@ -51,22 +50,16 @@ pub const Resource = struct {
         if (skip_reason) |reason| {
             return base.ApplyResult{
                 .was_updated = false,
-                .action = "skipped",
+                .action = @tagName(self.action),
                 .skip_reason = reason,
             };
         }
 
-        var was_updated = false;
-
-        // Execute actions in order
-        for (self.actions) |action| {
-            const updated = try applyAction(self, action);
-            was_updated = was_updated or updated;
-        }
+        const was_updated = try applyAction(self, self.action);
 
         return base.ApplyResult{
             .was_updated = was_updated,
-            .action = "configured",
+            .action = @tagName(self.action),
             .skip_reason = if (was_updated) null else "up to date",
         };
     }
@@ -247,6 +240,18 @@ pub const Resource = struct {
 
         return stdout;
     }
+
+    fn actionFromString(action_str: []const u8) Action {
+        if (std.mem.eql(u8, action_str, "create")) return .create;
+        if (std.mem.eql(u8, action_str, "enable")) return .enable;
+        if (std.mem.eql(u8, action_str, "disable")) return .disable;
+        if (std.mem.eql(u8, action_str, "start")) return .start;
+        if (std.mem.eql(u8, action_str, "stop")) return .stop;
+        if (std.mem.eql(u8, action_str, "restart")) return .restart;
+        if (std.mem.eql(u8, action_str, "reload")) return .reload;
+        if (std.mem.eql(u8, action_str, "reload_or_restart")) return .reload_or_restart;
+        return .nothing;
+    }
 };
 
 /// Ruby prelude for systemd_unit resource
@@ -272,58 +277,44 @@ pub fn zigAddResource(
 
     // Extract name
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
-    const name = allocator.dupe(u8, std.mem.span(name_cstr)) catch return mruby.mrb_nil_value();
+    const name_span = std.mem.span(name_cstr);
 
     // Extract content (optional)
     const content_cstr = mruby.mrb_str_to_cstr(mrb, content_val);
     const content_str = std.mem.span(content_cstr);
-    const content: ?[]const u8 = if (content_str.len > 0)
-        allocator.dupe(u8, content_str) catch return mruby.mrb_nil_value()
-    else
-        null;
 
     // Parse actions array
     const actions_len = mruby.mrb_ary_len(mrb, actions_val);
-    var actions = allocator.alloc(Resource.Action, @intCast(actions_len)) catch return mruby.mrb_nil_value();
 
+    // For each action, create a separate resource
     var i: usize = 0;
     while (i < actions_len) : (i += 1) {
         const action_val = mruby.mrb_ary_ref(mrb, actions_val, @intCast(i));
         const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
         const action_str = std.mem.span(action_cstr);
 
-        actions[i] = if (std.mem.eql(u8, action_str, "create"))
-            .create
-        else if (std.mem.eql(u8, action_str, "enable"))
-            .enable
-        else if (std.mem.eql(u8, action_str, "disable"))
-            .disable
-        else if (std.mem.eql(u8, action_str, "start"))
-            .start
-        else if (std.mem.eql(u8, action_str, "stop"))
-            .stop
-        else if (std.mem.eql(u8, action_str, "restart"))
-            .restart
-        else if (std.mem.eql(u8, action_str, "reload"))
-            .reload
-        else if (std.mem.eql(u8, action_str, "reload_or_restart"))
-            .reload_or_restart
+        const action = Resource.actionFromString(action_str);
+
+        // Duplicate name and content for each resource
+        const name = allocator.dupe(u8, name_span) catch return mruby.mrb_nil_value();
+        const content: ?[]const u8 = if (content_str.len > 0)
+            allocator.dupe(u8, content_str) catch return mruby.mrb_nil_value()
         else
-            .nothing;
+            null;
+
+        // Build common properties (guards + notifications) for each resource
+        var common = base.CommonProps.init(allocator);
+        base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+
+        resources.append(allocator, .{
+            .name = name,
+            .content = content,
+            .enabled = null,
+            .active = null,
+            .action = action,
+            .common = common,
+        }) catch return mruby.mrb_nil_value();
     }
-
-    // Build common properties (guards + notifications)
-    var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
-
-    resources.append(allocator, .{
-        .name = name,
-        .content = content,
-        .enabled = null,
-        .active = null,
-        .actions = actions,
-        .common = common,
-    }) catch return mruby.mrb_nil_value();
 
     return mruby.mrb_nil_value();
 }
