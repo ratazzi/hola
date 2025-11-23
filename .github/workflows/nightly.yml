@@ -9,8 +9,6 @@ on:
 
 jobs:
   check:
-    # Skip check for manual triggers, always build
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -22,7 +20,14 @@ jobs:
       - name: Check for recent commits
         id: check
         run: |
-          # Check if there are any commits in the last 24 hours
+          # Manual trigger: always build
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger detected, forcing build"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Scheduled trigger: check for commits in the last 24 hours
           RECENT_COMMITS=$(git log --since="24 hours ago" --oneline | wc -l)
           if [ "$RECENT_COMMITS" -gt 0 ]; then
             echo "Found $RECENT_COMMITS commit(s) in the last 24 hours"
@@ -34,8 +39,7 @@ jobs:
 
   build:
     needs: check
-    # Build if: manual trigger OR check passed
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.check.outputs.should_build == 'true')
+    if: needs.check.outputs.should_build == 'true'
     runs-on: macos-latest
     strategy:
       matrix:
