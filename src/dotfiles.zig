@@ -15,7 +15,7 @@ const default_display_prefix: []const u8 = "~/";
 
 pub const Options = struct {
     root_override: ?[]const u8 = null,
-    dry_run: bool = true,
+    dry_run: bool = false, // Default: actually create links
     home_override: ?[]const u8 = null,
     ignore_patterns: ?[]const []const u8 = null,
     output_writer: ?std.fs.File.Writer = null, // Optional writer for output (for progress display integration)

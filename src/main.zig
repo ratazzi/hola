@@ -42,15 +42,15 @@ const git_clone_parsers = .{
 };
 
 const link_params = clap.parseParamsComptime(
-    \\-h, --help             Show help for link
-    \\--root <root_path>     Override dotfiles root (defaults to ~/.dotfiles)
-    \\--target <target_dir>  Override link destination (defaults to $HOME)
-    \\--apply                Actually create links (dry-run only right now)
+    \\-h, --help                 Show help for link
+    \\--dotfiles <dotfiles_dir>  Dotfiles repository location (default ~/.dotfiles)
+    \\--home <home_dir>          Home directory to link into (default $HOME)
+    \\--dry-run                  Preview changes without creating links
     \\
 );
 const link_parsers = .{
-    .root_path = clap.parsers.string,
-    .target_dir = clap.parsers.string,
+    .dotfiles_dir = clap.parsers.string,
+    .home_dir = clap.parsers.string,
 };
 
 const applescript_params = clap.parseParamsComptime(
@@ -65,13 +65,13 @@ const applescript_parsers = .{
 };
 
 const apply_params = clap.parseParamsComptime(
-    \\-h, --help            Show help for apply
-    \\--root <root_path>    Override config root (defaults to ~/.local/share/hola/config)
-    \\--dry-run             Show what would be done without actually doing it
+    \\-h, --help                 Show help for apply
+    \\--dotfiles <dotfiles_dir>  Dotfiles repository location (default ~/.dotfiles)
+    \\--dry-run                  Show what would be done without actually doing it
     \\
 );
 const apply_parsers = .{
-    .root_path = clap.parsers.string,
+    .dotfiles_dir = clap.parsers.string,
 };
 
 const provision_params = clap.parseParamsComptime(
@@ -250,22 +250,30 @@ fn runLinkCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) 
         }
     }
 
-    if (res.args.root) |root_path| {
-        options.root_override = try allocator.dupe(u8, root_path);
-    }
-    if (res.args.target) |target_path| {
-        options.home_override = try allocator.dupe(u8, target_path);
+    // Get actual $HOME for path resolution
+    const actual_home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(actual_home);
+
+    // Resolve dotfiles path (could be relative or contain ~)
+    if (res.args.dotfiles) |dotfiles_path| {
+        options.root_override = try resolvePathForLink(allocator, dotfiles_path, actual_home);
     }
 
-    if (res.args.apply != 0) {
-        options.dry_run = false;
+    // Resolve home path (could be relative or contain ~)
+    if (res.args.home) |home_path| {
+        options.home_override = try resolvePathForLink(allocator, home_path, actual_home);
+    }
+
+    // Default behavior: apply changes (dry_run = false)
+    // Only set dry_run = true if --dry-run flag is specified
+    const dry_run_flag = @field(res.args, "dry-run");
+    if (dry_run_flag != 0) {
+        options.dry_run = true;
     }
 
     // Load TOML configuration
     const base_root = options.root_override orelse "~/.dotfiles";
-    const home_dir = try resolveHomeForLink(allocator, options.home_override);
-    defer allocator.free(home_dir);
-    const resolved_root = try resolvePathForLink(allocator, base_root, home_dir);
+    const resolved_root = try resolvePathForLink(allocator, base_root, actual_home);
     defer allocator.free(resolved_root);
 
     const ignore_patterns = try loadLinkConfig(allocator, resolved_root);
@@ -300,6 +308,44 @@ fn resolvePathForLink(allocator: std.mem.Allocator, path: []const u8, home: []co
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
     return std.fs.path.join(allocator, &.{ cwd, path });
+}
+
+fn getDefaultDotfilesPath(allocator: std.mem.Allocator, home: []const u8) ![]const u8 {
+    // Check if saved preference exists at ~/.local/state/hola/dotfiles
+    const state_link = try std.fs.path.join(allocator, &.{ home, ".local/state/hola/dotfiles" });
+    defer allocator.free(state_link);
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.fs.readLinkAbsolute(state_link, &link_buf)) |target| {
+        // Saved preference exists, use it
+        return allocator.dupe(u8, target);
+    } else |_| {
+        // No saved preference, use default ~/.dotfiles
+        return std.fs.path.join(allocator, &.{ home, ".dotfiles" });
+    }
+}
+
+fn saveDotfilesPreference(allocator: std.mem.Allocator, dotfiles_path: []const u8, home: []const u8) !void {
+    const state_dir = try std.fs.path.join(allocator, &.{ home, ".local/state/hola" });
+    defer allocator.free(state_dir);
+
+    const state_link = try std.fs.path.join(allocator, &.{ state_dir, "dotfiles" });
+    defer allocator.free(state_link);
+
+    // Create ~/.local/state/hola directory if it doesn't exist
+    std.fs.makeDirAbsolute(state_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Remove existing symlink if present
+    std.fs.deleteFileAbsolute(state_link) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+
+    // Create new symlink pointing to dotfiles_path
+    try std.fs.symLinkAbsolute(dotfiles_path, state_link, .{});
 }
 
 fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []const u8 {
@@ -385,15 +431,16 @@ fn printLinkHelp(reason: ?[]const u8) !void {
     }
     try out.writeAll(
         \\link
-        \\  hola link [--root <path>] [--target <path>] [--apply]
+        \\  hola link [--dotfiles <path>] [--home <path>] [--dry-run]
         \\
         \\Flags
-        \\  --root <path>     Override the dotfiles root (default ~/.dotfiles)
-        \\  --target <path>   Override the link destination (default $HOME)
-        \\  --apply           Actually create links (dry-run only right now)
+        \\  --dotfiles <path>  Dotfiles repository location (default ~/.dotfiles)
+        \\  --home <path>      Home directory to link into (default $HOME)
+        \\  --dry-run          Preview changes without creating links
         \\
         \\Example
-        \\  hola link --root ~/workspace/dotfiles --target /tmp/link-playground
+        \\  hola link --dotfiles ~/workspace/dotfiles --home /tmp/test-home
+        \\  hola link --dry-run  # Preview changes only
         \\
     );
 }
@@ -718,11 +765,23 @@ fn runApplyCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator)
 
     if (res.args.help != 0) return printApplyHelp(null);
 
-    // Determine config root
-    const config_root = if (res.args.root) |root|
-        try allocator.dupe(u8, root)
-    else
-        try getDefaultConfigRoot(allocator);
+    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+
+    // Determine dotfiles root
+    const config_root = if (res.args.dotfiles) |dotfiles_path| blk: {
+        // User specified a dotfiles path, resolve it
+        const resolved = try resolvePathForLink(allocator, dotfiles_path, home);
+        // Save this preference for future use (unless dry-run)
+        const dry_run = @field(res.args, "dry-run") != 0;
+        if (!dry_run) {
+            try saveDotfilesPreference(allocator, resolved, home);
+        }
+        break :blk resolved;
+    } else blk: {
+        // Use saved preference or default
+        break :blk try getDefaultDotfilesPath(allocator, home);
+    };
     defer allocator.free(config_root);
 
     const dry_run = @field(res.args, "dry-run") != 0;
@@ -746,7 +805,7 @@ fn printApplyHelp(reason: ?[]const u8) !void {
     }
     try out.writeAll(
         \\apply
-        \\  hola apply [--root <path>] [--dry-run]
+        \\  hola apply [--dotfiles <path>] [--dry-run]
         \\
         \\Execute the full bootstrap sequence:
         \\  1. Link dotfiles
@@ -757,12 +816,12 @@ fn printApplyHelp(reason: ?[]const u8) !void {
         \\  6. Run provision script (provision.rb)
         \\
         \\Flags
-        \\  --root <path>    Override config root (default: ~/.local/share/hola/config)
-        \\  --dry-run        Show what would be done without actually doing it
+        \\  --dotfiles <path>  Dotfiles repository location (default ~/.dotfiles)
+        \\  --dry-run          Show what would be done without actually doing it
         \\
         \\Example
         \\  hola apply
-        \\  hola apply --root ~/workspace/my-config
+        \\  hola apply --dotfiles ~/workspace/dotfiles
         \\  hola apply --dry-run
         \\
     );
@@ -899,7 +958,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     }
 
     // Header with branding (Bun style)
-    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise + dotfiles = your dev environment\n");
+    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise.toml + dotfiles = your dev environment\n");
 
     // Usage section (Bun style with colon on same line)
     help_formatter.HelpFormatter.usageHeader();
@@ -910,7 +969,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     help_formatter.HelpFormatter.sectionHeader("Commands");
     const commands = [_]help_formatter.HelpFormatter.CommandItem{
         .{ .command = "git-clone", .description = "Clone repositories with embedded libgit2 client" },
-        .{ .command = "link", .description = "Scan ~/.dotfiles and show link plan (dry-run mode)" },
+        .{ .command = "link", .description = "Create symlinks from dotfiles to home directory" },
         .{ .command = "dock", .description = "Show current macOS Dock configuration" },
         .{ .command = "applescript", .description = "Execute AppleScript via macOS system API" },
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
@@ -925,13 +984,12 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     help_formatter.HelpFormatter.sectionHeader("Examples");
     const examples = [_]help_formatter.HelpFormatter.ExampleItem{
         .{ .prefix = "Clone config:", .command = "git-clone https://github.com/user/hola ~/.local/share/hola/config --branch main" },
-        .{ .prefix = "Link dotfiles:", .command = "link --root ~/.dotfiles" },
+        .{ .prefix = "Link dotfiles:", .command = "link --dotfiles ~/.dotfiles" },
         .{ .prefix = "Dock utilities:", .command = "dock" },
         .{ .prefix = "AppleScript:", .command = "applescript \"1 + 1\"" },
         .{ .prefix = "AppleScript file:", .command = "applescript --file script.applescript" },
         .{ .prefix = "Infrastructure:", .command = "provision provision.rb" },
         .{ .prefix = "Node information:", .command = "node-info" },
-        .{ .prefix = "Node info JSON:", .command = "node-info --json" },
         .{ .prefix = "Full bootstrap:", .command = "apply" },
         .{ .prefix = "Dry run:", .command = "apply --dry-run" },
     };

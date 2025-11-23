@@ -136,7 +136,7 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
     defer display.deinit();
 
     // Print banner using help formatter
-    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise + dotfiles = your dev environment");
+    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise.toml + dotfiles = your dev environment");
 
     // Phase 1: Link dotfiles
     try linkDotfiles(allocator, opts.config_root, opts.dry_run, &display);
@@ -208,54 +208,20 @@ pub fn run(allocator: std.mem.Allocator, opts: ApplyOptions) !void {
 fn linkDotfiles(allocator: std.mem.Allocator, config_root: []const u8, dry_run: bool, display: *modern_display.ModernProvisionDisplay) !void {
     try display.showSection("Linking Dotfiles");
 
-    // Try multiple possible dotfiles root locations:
-    // 1. config_root/home (for structured config layout)
-    // 2. ~/.dotfiles (default dotfiles location, same as link command)
-    // 3. config_root itself (if config_root is already a dotfiles root)
-    var dotfiles_root: ?[]const u8 = null;
-
-    // Try config_root/home first
-    const config_home = try std.fs.path.join(allocator, &.{ config_root, "home" });
-    defer allocator.free(config_home);
-
-    std.fs.accessAbsolute(config_home, .{}) catch |err| switch (err) {
+    // config_root is the dotfiles repository location
+    // Check if it exists
+    std.fs.accessAbsolute(config_root, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            // Try ~/.dotfiles as fallback
-            const home = try std.process.getEnvVarOwned(allocator, "HOME");
-            defer allocator.free(home);
-            const default_dotfiles = try std.fs.path.join(allocator, &.{ home, ".dotfiles" });
-            defer allocator.free(default_dotfiles);
-
-            std.fs.accessAbsolute(default_dotfiles, .{}) catch |err2| switch (err2) {
-                error.FileNotFound => {
-                    // Try config_root itself as last resort
-                    std.fs.accessAbsolute(config_root, .{}) catch |err3| switch (err3) {
-                        error.FileNotFound => {
-                            const msg = try std.fmt.allocPrint(allocator, "No dotfiles directory found (tried {s}/home, ~/.dotfiles, {s}), skipping dotfiles linking", .{ config_root, config_root });
-                            defer allocator.free(msg);
-                            try display.showInfo(msg);
-                            return;
-                        },
-                        else => return err3,
-                    };
-                    dotfiles_root = try allocator.dupe(u8, config_root);
-                },
-                else => return err2,
-            };
-            if (dotfiles_root == null) {
-                dotfiles_root = try allocator.dupe(u8, default_dotfiles);
-            }
+            const msg = try std.fmt.allocPrint(allocator, "Dotfiles directory not found: {s}, skipping dotfiles linking", .{config_root});
+            defer allocator.free(msg);
+            try display.showInfo(msg);
+            return;
         },
         else => return err,
     };
 
-    if (dotfiles_root == null) {
-        dotfiles_root = try allocator.dupe(u8, config_home);
-    }
-    defer allocator.free(dotfiles_root.?);
-
     var options: dotfiles.Options = .{
-        .root_override = dotfiles_root.?,
+        .root_override = config_root,
         .dry_run = dry_run,
     };
     defer {
@@ -267,12 +233,8 @@ fn linkDotfiles(allocator: std.mem.Allocator, config_root: []const u8, dry_run: 
         }
     }
 
-    // Load TOML configuration for ignore patterns
-    // Try config_root first, then dotfiles_root
-    var ignore_patterns = try loadLinkConfig(allocator, config_root);
-    if (ignore_patterns == null) {
-        ignore_patterns = try loadLinkConfig(allocator, dotfiles_root.?);
-    }
+    // Load TOML configuration for ignore patterns from dotfiles directory
+    const ignore_patterns = try loadLinkConfig(allocator, config_root);
     if (ignore_patterns) |patterns| {
         options.ignore_patterns = patterns;
     }
