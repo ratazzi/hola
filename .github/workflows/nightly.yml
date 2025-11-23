@@ -1,0 +1,118 @@
+name: Nightly Release
+
+on:
+  schedule:
+    # Run at 00:00 UTC every day
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Allow manual trigger
+
+jobs:
+  check:
+    # Skip check for manual triggers, always build
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for recent commits
+        id: check
+        run: |
+          # Check if there are any commits in the last 24 hours
+          RECENT_COMMITS=$(git log --since="24 hours ago" --oneline | wc -l)
+          if [ "$RECENT_COMMITS" -gt 0 ]; then
+            echo "Found $RECENT_COMMITS commit(s) in the last 24 hours"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "No commits in the last 24 hours, skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    # Build if: manual trigger OR check passed
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.check.outputs.should_build == 'true')
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - name: macos
+            triple: aarch64-macos
+          - name: linux
+            triple: x86_64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install libgit2 mruby openssl@3
+
+      - name: Setup Zig
+        uses: jdx/mise-action@v2
+
+      - name: Build for ${{ matrix.target.name }}
+        run: |
+          MRUBY_PATH=$(brew --prefix mruby)
+          echo "Using mruby path: $MRUBY_PATH"
+          echo "Building for target: ${{ matrix.target.triple }}"
+
+          mise build -- -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hola-${{ matrix.target.triple }}
+          path: zig-out/bin/hola-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Delete old nightly release
+        uses: dev-drprasad/delete-tag-and-release@v1.0
+        with:
+          tag_name: nightly
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_release: true
+        continue-on-error: true
+
+      - name: Create or Update Nightly Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          name: Nightly Build (${{ steps.date.outputs.date }})
+          body: |
+            🌙 **Nightly Development Build**
+
+            This is an automated nightly build from the latest `master` branch.
+
+            **Build Date:** ${{ steps.date.outputs.date }}
+            **Commit:** ${{ github.sha }}
+
+            ⚠️  **Warning:** These are unstable development builds and may contain bugs.
+            For stable releases, please use the [latest official release](https://github.com/${{ github.repository }}/releases/latest).
+
+            ## Downloads
+            - `hola-macos-aarch64` - macOS Apple Silicon (M1/M2/M3)
+            - `hola-linux-x86_64` - Linux x86_64
+          files: artifacts/*/hola-*
+          draft: false
+          prerelease: true
