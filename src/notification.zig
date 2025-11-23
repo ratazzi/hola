@@ -3,7 +3,7 @@ const std = @import("std");
 /// Notification timing
 pub const Timing = enum {
     immediate, // Execute right away
-    delayed,   // Execute at the end (Chef default)
+    delayed, // Execute at the end (Chef default)
 };
 
 /// Notification action to trigger
@@ -26,7 +26,7 @@ pub const Notification = struct {
 /// Resource identifier (e.g., "file[/etc/nginx.conf]", "service[nginx]")
 pub const ResourceId = struct {
     type_name: []const u8, // "file", "service", "package", etc.
-    name: []const u8,      // "/etc/nginx.conf", "nginx", etc.
+    name: []const u8, // "/etc/nginx.conf", "nginx", etc.
 
     /// Format: "type[name]"
     pub fn format(

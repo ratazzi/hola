@@ -73,7 +73,7 @@ fn matchRecursive(pattern: []const u8, text: []const u8) bool {
 
         // Handle character class [abc] or [!abc]
         if (pattern_char == '[') {
-            const class_end = std.mem.indexOfScalar(u8, pattern[pattern_idx + 1..], ']') orelse {
+            const class_end = std.mem.indexOfScalar(u8, pattern[pattern_idx + 1 ..], ']') orelse {
                 // Invalid pattern, treat as literal [
                 if (text_idx >= text.len or text[text_idx] != '[') {
                     return false;
@@ -86,7 +86,7 @@ fn matchRecursive(pattern: []const u8, text: []const u8) bool {
             const class_start = pattern_idx + 1;
             const class_end_abs = pattern_idx + 1 + class_end;
             const negated = pattern_idx + 1 < pattern.len and pattern[pattern_idx + 1] == '!';
-            const class_pattern = pattern[class_start + @intFromBool(negated)..class_end_abs];
+            const class_pattern = pattern[class_start + @intFromBool(negated) .. class_end_abs];
 
             if (text_idx >= text.len) {
                 return false;
@@ -165,4 +165,3 @@ test "glob matching" {
     try std.testing.expect(match(".git*", ".gitignore"));
     try std.testing.expect(match(".git*", ".github"));
 }
-

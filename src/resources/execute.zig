@@ -74,7 +74,7 @@ pub const Resource = struct {
     /// Helper to show command output (indented)
     fn showCommandOutput(output: []const u8) void {
         if (output.len == 0) return;
-        
+
         // Split output into lines and indent each line
         var lines = std.mem.splitSequence(u8, output, "\n");
         while (lines.next()) |line| {

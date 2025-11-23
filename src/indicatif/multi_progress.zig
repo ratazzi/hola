@@ -77,7 +77,7 @@ pub const MultiProgress = struct {
         // Pre-allocate buffer with enough capacity
         var buffer: std.ArrayList(u8) = .{};
         defer buffer.deinit(self.allocator);
-        try buffer.ensureTotalCapacity(self.allocator, 512);  // Pre-allocate to avoid reallocation
+        try buffer.ensureTotalCapacity(self.allocator, 512); // Pre-allocate to avoid reallocation
 
         // Draw each progress bar
         var total_lines: usize = 0;

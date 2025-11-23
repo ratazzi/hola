@@ -338,8 +338,7 @@ pub fn getNetworkInterfaces(allocator: std.mem.Allocator) ![]NetworkInterface {
                 var addr: [4]u8 = undefined;
                 std.mem.writeInt(u32, &addr, @byteSwap(sockaddr_in.sin_addr.s_addr), .big);
 
-                const ip_str = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}",
-                    .{ addr[0], addr[1], addr[2], addr[3] });
+                const ip_str = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
 
                 const flags = ifaddr.ifa_flags;
                 const is_up = (flags & c.IFF_UP) != 0;
@@ -495,8 +494,7 @@ fn getDefaultGatewayMacOS(allocator: std.mem.Allocator) !?DefaultGateway {
                     var addr: [4]u8 = undefined;
                     std.mem.writeInt(u32, &addr, @byteSwap(sin.sin_addr.s_addr), .big);
 
-                    const ip = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}",
-                        .{ addr[0], addr[1], addr[2], addr[3] });
+                    const ip = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{ addr[0], addr[1], addr[2], addr[3] });
 
                     // Get interface name using if_indextoname
                     const if_index = rt_msghdr.rtm_index;

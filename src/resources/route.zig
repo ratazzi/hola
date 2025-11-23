@@ -29,7 +29,7 @@ pub const Resource = struct {
     pub fn apply(self: Resource) !base.ApplyResult {
         const skip_reason = try self.common.shouldRun();
         if (skip_reason) |reason| {
-             return base.ApplyResult{
+            return base.ApplyResult{
                 .was_updated = false,
                 .action = @tagName(self.action),
                 .skip_reason = reason,
@@ -37,9 +37,9 @@ pub const Resource = struct {
         }
 
         if (builtin.os.tag == .macos) {
-             return macos_impl.apply(self);
+            return macos_impl.apply(self);
         } else if (builtin.os.tag == .linux) {
-             return linux_impl.apply(self);
+            return linux_impl.apply(self);
         } else {
             return base.ApplyResult{
                 .was_updated = false,
@@ -95,7 +95,7 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
 
         var sa = @as(*c.struct_sockaddr_in, @ptrCast(@alignCast(&buf[offset])));
         // Reset memory
-        @memset(buf[offset..offset+sa_len], 0);
+        @memset(buf[offset .. offset + sa_len], 0);
 
         sa.sin_len = @intCast(sa_len);
         sa.sin_family = c.AF_INET;
@@ -164,7 +164,7 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
             mask_val = try parseNetmask(nm);
             has_mask = true;
         } else if (std.mem.indexOf(u8, self.target, "/")) |idx| {
-            const cidr = self.target[idx+1..];
+            const cidr = self.target[idx + 1 ..];
             mask_val = try parseNetmask(cidr);
             has_mask = true;
         }
@@ -233,26 +233,26 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
         // Usually just DST + MASK is enough to delete.
 
         if (self.gateway) |gw| {
-             // If user specifies gateway, they probably want to delete THAT route
-             const gw_ip = try parseIp(gw);
-             rtm.rtm_addrs |= c.RTA_GATEWAY;
-             ptr += writeSockaddrIn(&buf, ptr, gw_ip);
+            // If user specifies gateway, they probably want to delete THAT route
+            const gw_ip = try parseIp(gw);
+            rtm.rtm_addrs |= c.RTA_GATEWAY;
+            ptr += writeSockaddrIn(&buf, ptr, gw_ip);
         }
 
         var mask_val: u32 = 0xFFFFFFFF;
         if (self.netmask) |nm| {
             mask_val = try parseNetmask(nm);
         } else if (std.mem.indexOf(u8, self.target, "/")) |idx| {
-            const cidr = self.target[idx+1..];
+            const cidr = self.target[idx + 1 ..];
             mask_val = try parseNetmask(cidr);
         }
 
         if (mask_val == 0xFFFFFFFF) {
-             // Host route delete
-             // Don't set RTA_NETMASK
+            // Host route delete
+            // Don't set RTA_NETMASK
         } else {
-             rtm.rtm_addrs |= c.RTA_NETMASK;
-             ptr += writeSockaddrIn(&buf, ptr, mask_val);
+            rtm.rtm_addrs |= c.RTA_NETMASK;
+            ptr += writeSockaddrIn(&buf, ptr, mask_val);
         }
 
         rtm.rtm_msglen = @intCast(ptr);
@@ -269,7 +269,9 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
         return true;
     }
 } else struct {
-    pub fn apply(_: Resource) !base.ApplyResult { unreachable; }
+    pub fn apply(_: Resource) !base.ApplyResult {
+        unreachable;
+    }
 };
 
 const linux_impl = if (builtin.os.tag == .linux) struct {
@@ -329,7 +331,7 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
             mask_sin.sin_family = c.AF_INET;
             mask_sin.sin_addr.s_addr = try parseNetmask(nm);
         } else if (std.mem.indexOf(u8, self.target, "/")) |idx| {
-            const cidr = self.target[idx+1..];
+            const cidr = self.target[idx + 1 ..];
             var mask_sin = @as(*c.struct_sockaddr_in, @ptrCast(&rt.rt_genmask));
             mask_sin.sin_family = c.AF_INET;
             mask_sin.sin_addr.s_addr = try parseNetmask(cidr);
@@ -370,7 +372,7 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
             mask_sin.sin_family = c.AF_INET;
             mask_sin.sin_addr.s_addr = try parseNetmask(nm);
         } else if (std.mem.indexOf(u8, self.target, "/")) |idx| {
-            const cidr = self.target[idx+1..];
+            const cidr = self.target[idx + 1 ..];
             var mask_sin = @as(*c.struct_sockaddr_in, @ptrCast(&rt.rt_genmask));
             mask_sin.sin_family = c.AF_INET;
             mask_sin.sin_addr.s_addr = try parseNetmask(cidr);
@@ -391,7 +393,9 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
         return true;
     }
 } else struct {
-    pub fn apply(_: Resource) !base.ApplyResult { unreachable; }
+    pub fn apply(_: Resource) !base.ApplyResult {
+        unreachable;
+    }
 };
 
 /// Ruby prelude

@@ -526,6 +526,3 @@ fn createResponseArray(mrb: *mruby.mrb_state, _: std.mem.Allocator, response: *R
 }
 
 pub const ruby_prelude = @embedFile("ruby_prelude/http_client.rb");
-
-
-

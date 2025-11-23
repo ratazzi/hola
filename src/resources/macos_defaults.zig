@@ -157,7 +157,6 @@ pub const Resource = struct {
 
         // Step 2: Compare with desired value
         if (current_value) |current| {
-
             const values_match = switch (self.value) {
                 .boolean => |b| current == .boolean and current.boolean == b,
                 .integer => |i| current == .integer and current.integer == i,

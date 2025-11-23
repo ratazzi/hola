@@ -107,7 +107,7 @@ fn logLibGit2Error(code: c_int) void {
             return;
         }
     }
-    log.err("libgit2 ({d}): <no details>", .{ code });
+    log.err("libgit2 ({d}): <no details>", .{code});
 }
 
 /// Credential callback used by libgit2 for both SSH and HTTPS.
@@ -234,51 +234,46 @@ const ProgressContext = struct {
 pub fn diffStrings(allocator: std.mem.Allocator, old_content: []const u8, new_content: []const u8, old_path: []const u8, new_path: []const u8) ![]const u8 {
     var client = try Client.init();
     defer client.deinit();
-    
+
     const old_path_c = try dupZ(allocator, old_path);
     defer allocator.free(old_path_c);
-    
+
     const new_path_c = try dupZ(allocator, new_path);
     defer allocator.free(new_path_c);
-    
+
     // Create diff from buffers using patch generation
     var patch: ?*c.git_patch = null;
     var diff_opts: c.git_diff_options = undefined;
     _ = c.git_diff_options_init(&diff_opts, c.GIT_DIFF_OPTIONS_VERSION);
     diff_opts.context_lines = 3;
-    
-    const code = c.git_patch_from_buffers(
-        &patch,
-        old_content.ptr, old_content.len, old_path_c.ptr,
-        new_content.ptr, new_content.len, new_path_c.ptr,
-        &diff_opts
-    );
-    
+
+    const code = c.git_patch_from_buffers(&patch, old_content.ptr, old_content.len, old_path_c.ptr, new_content.ptr, new_content.len, new_path_c.ptr, &diff_opts);
+
     if (code != 0) {
         logLibGit2Error(code);
         return error.DiffFailed;
     }
-    
+
     defer if (patch) |p| c.git_patch_free(p);
-    
+
     if (patch == null) {
         return try allocator.dupe(u8, "");
     }
-    
+
     // Format patch as string
     var buf: c.git_buf = .{ .ptr = null, .size = 0 };
     defer c.git_buf_dispose(&buf);
-    
+
     const patch_code = c.git_patch_to_buf(&buf, patch);
     if (patch_code != 0) {
         logLibGit2Error(patch_code);
         return error.PatchFailed;
     }
-    
+
     if (buf.ptr == null or buf.size == 0) {
         return try allocator.dupe(u8, "");
     }
-    
+
     const patch_slice = buf.ptr[0..buf.size];
     return try allocator.dupe(u8, patch_slice);
 }

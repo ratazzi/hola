@@ -868,7 +868,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         }
     }
 
-
     if (download_mgr.tasks.items.len > 0) {
         // Show download section header
         try display.showSectionWithLevel("Downloading Remote Files", 3);

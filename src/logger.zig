@@ -153,9 +153,7 @@ pub const Logger = struct {
 
         // Format: [HH:MM:SS.uuuuuu] [LEVEL] message
         var time_buf: [32]u8 = undefined;
-        const time_str = try std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}", .{
-            @abs(hours), @abs(minutes), @abs(seconds), @abs(microseconds)
-        });
+        const time_str = try std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}", .{ @abs(hours), @abs(minutes), @abs(seconds), @abs(microseconds) });
 
         const full_msg = try std.fmt.allocPrint(
             self.allocator,
@@ -285,4 +283,3 @@ pub fn getLogPath() ?[]const u8 {
     }
     return null;
 }
-

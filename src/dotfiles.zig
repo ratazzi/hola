@@ -413,13 +413,12 @@ const Planner = struct {
                             .target_style = CellStyle.colored(reason, Ansi.green),
                             .reason_text = reason,
                         };
-                    } else
-                        StatusInfo{
-                            .status_cell = CellStyle.label("[!]", Ansi.red),
-                            .path_style = CellStyle.dimmed(path_str),
-                            .target_style = CellStyle.colored(source_abs, Ansi.red),
-                            .reason_text = try self.allocator.dupe(u8, source_abs),
-                        };
+                    } else StatusInfo{
+                        .status_cell = CellStyle.label("[!]", Ansi.red),
+                        .path_style = CellStyle.dimmed(path_str),
+                        .target_style = CellStyle.colored(source_abs, Ansi.red),
+                        .reason_text = try self.allocator.dupe(u8, source_abs),
+                    };
 
                     try cells_buf.append(self.allocator, status_info.reason_text);
 
