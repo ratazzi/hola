@@ -788,9 +788,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // try mrb.evalString(resources.service.ruby_prelude);
 
     // Load and execute user's recipe
-    const script = try std.fs.cwd().readFileAlloc(allocator, opts.script_path, std.math.maxInt(usize));
-    defer allocator.free(script);
-    try mrb.evalString(script);
+    // Use evalFile instead of evalString to preserve file path and line numbers in error messages
+    try mrb.evalFile(opts.script_path);
 
     // Record start time for timer
     const start_time = std.time.nanoTimestamp();

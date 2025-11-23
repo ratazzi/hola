@@ -14,9 +14,17 @@ pub const mrb_bool = u8;
 // Function pointer type for mruby methods
 pub const mrb_func_t = *const fn (mrb: *mrb_state, self: mrb_value) callconv(.c) mrb_value;
 
+// Compiler context for file loading
+pub const mrb_ccontext = opaque {};
+
 extern fn mrb_open() ?*mrb_state;
 extern fn mrb_close(mrb: *mrb_state) void;
 pub extern fn mrb_load_string(mrb: *mrb_state, code: [*c]const u8) mrb_value;
+pub extern fn mrb_load_file(mrb: *mrb_state, file: *std.c.FILE) mrb_value;
+pub extern fn mrb_load_file_cxt(mrb: *mrb_state, file: *std.c.FILE, cxt: ?*mrb_ccontext) mrb_value;
+pub extern fn mrb_ccontext_new(mrb: *mrb_state) ?*mrb_ccontext;
+pub extern fn mrb_ccontext_free(mrb: *mrb_state, cxt: *mrb_ccontext) void;
+pub extern fn mrb_ccontext_filename(mrb: *mrb_state, cxt: *mrb_ccontext, filename: [*:0]const u8) [*:0]const u8;
 pub extern fn mrb_print_error(mrb: *mrb_state) void;
 
 // Class and method definition
@@ -147,6 +155,30 @@ pub const State = struct {
         @memcpy(mem[0..code.len], code);
         mem[code.len] = 0;
         _ = mrb_load_string(mrb, mem.ptr);
+        mrb_print_error(mrb);
+    }
+
+    pub fn evalFile(self: *State, file_path: []const u8) !void {
+        const mrb = self.mrb orelse return error.MRubyNotInitialized;
+
+        // Convert Zig string to C string with sentinel
+        const heap = std.heap.c_allocator;
+        const path_cstr = try heap.dupeZ(u8, file_path);
+        defer heap.free(path_cstr);
+
+        // Create a context and set the filename for proper error reporting
+        const cxt = mrb_ccontext_new(mrb) orelse return error.ContextCreationFailed;
+        defer mrb_ccontext_free(mrb, cxt);
+        _ = mrb_ccontext_filename(mrb, cxt, path_cstr.ptr);
+
+        // Open file using C fopen
+        const file = std.c.fopen(path_cstr.ptr, "r") orelse return error.FileNotFound;
+        defer _ = std.c.fclose(file);
+
+        // Load and execute the file with context
+        _ = mrb_load_file_cxt(mrb, file, cxt);
+
+        // Print any errors
         mrb_print_error(mrb);
     }
 };
