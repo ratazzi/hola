@@ -76,11 +76,13 @@ const apply_parsers = .{
 
 const provision_params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
+    \\-o, --output <MODE>   Output mode: pretty (default) or plain
     \\<path>                Path to provision file (.rb)
     \\
 );
 const provision_parsers = .{
     .path = clap.parsers.string,
+    .MODE = clap.parsers.string,
 };
 
 const node_info_params = clap.parseParamsComptime(
@@ -781,7 +783,24 @@ fn runProvisionCommand(allocator: std.mem.Allocator, iter: *std.process.ArgItera
 
     const script_path = res.positionals[0] orelse return printProvisionHelp("Missing provision file path.");
 
-    provision.run(allocator, .{ .script_path = script_path }) catch |err| {
+    // Determine output mode
+    var use_pretty_output = true; // Default to pretty
+    if (res.args.output) |output_mode| {
+        if (std.mem.eql(u8, output_mode, "plain")) {
+            use_pretty_output = false;
+        } else if (std.mem.eql(u8, output_mode, "pretty")) {
+            use_pretty_output = true;
+        } else {
+            std.debug.print("Invalid output mode: {s}\n", .{output_mode});
+            std.debug.print("Valid modes: pretty, plain\n", .{});
+            return error.InvalidOutputMode;
+        }
+    }
+
+    provision.run(allocator, .{
+        .script_path = script_path,
+        .use_pretty_output = use_pretty_output,
+    }) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
     };
 }
@@ -794,12 +813,16 @@ fn printProvisionHelp(reason: ?[]const u8) !void {
     }
     try out.writeAll(
         \\provision
-        \\  hola provision <file>
+        \\  hola provision [OPTIONS] <file>
         \\
         \\Run a provisioning script that defines infrastructure resources.
         \\
+        \\Options:
+        \\  -o, --output MODE    Output mode: pretty (default) or plain
+        \\
         \\Example
         \\  hola provision provision.rb
+        \\  hola provision --output plain provision.rb
         \\
         \\Ruby DSL:
         \\  file "/tmp/config" do

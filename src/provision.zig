@@ -19,6 +19,7 @@ const AsyncExecutor = @import("async_executor.zig").AsyncExecutor;
 
 pub const Options = struct {
     script_path: []const u8,
+    use_pretty_output: bool = true, // Default to pretty output
 };
 
 // Global resource collector (will be initialized per-run)
@@ -794,8 +795,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Record start time for timer
     const start_time = std.time.nanoTimestamp();
 
-    // Initialize modern display with indicatif enabled
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, true); // Enable indicatif
+    // Initialize modern display with the specified output mode
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.use_pretty_output);
     defer display.deinit();
 
     // Set global display for async executor callback
@@ -812,8 +813,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     display.setTotalResources(g_resources.items.len);
 
     // Phase 0: Start parallel downloads for remote files
-    // Enable download manager's progress display using indicatif
-    var download_mgr = try download_manager.DownloadManager.init(allocator, true);
+    // Initialize download manager with the specified output mode
+    var download_mgr = try download_manager.DownloadManager.init(allocator, opts.use_pretty_output);
     defer download_mgr.deinit();
 
     // Set the display for download manager to use indicatif

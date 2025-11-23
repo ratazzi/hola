@@ -12,6 +12,10 @@ const STATUS_DOWNLOADING = "[DL] downloading";
 const STATUS_DONE = "[DL] done";
 const STATUS_FAILED = "[DL] failed";
 
+// Indentation constants
+const INDENT_RESOURCE = " "; // 1 spaces for resource items
+const INDENT_NOTIFICATION = "    "; // 2 spaces for notifications (sub-items)
+
 /// Modern provision display using indicatif
 pub const ModernProvisionDisplay = struct {
     const DownloadEntry = struct {
@@ -319,7 +323,7 @@ pub const ModernProvisionDisplay = struct {
     /// Add/update a download spinner
     pub fn addDownload(self: *Self, name: []const u8, total_bytes: u64) !void {
         if (!self.show_progress) {
-            std.debug.print(" Downloading {s}...\n", .{name});
+            // In plain mode, don't output anything - wait for finishDownload
             return;
         }
 
@@ -412,11 +416,7 @@ pub const ModernProvisionDisplay = struct {
     /// Finish a download
     pub fn finishDownload(self: *Self, name: []const u8, success: bool) !void {
         if (!self.show_progress) {
-            if (success) {
-                std.debug.print("✓ {s}\n", .{name});
-            } else {
-                std.debug.print("✗ {s} failed\n", .{name});
-            }
+            // In plain mode, downloads are silent - no output
             return;
         }
 
@@ -454,7 +454,7 @@ pub const ModernProvisionDisplay = struct {
         self.executed_count += 1;
 
         if (!self.show_progress) {
-            std.debug.print("Processing {s}[{s}]...\n", .{ resource_type, resource_name });
+            // In plain mode, don't output "Processing..." - just wait for the final status
             return;
         }
 
@@ -468,7 +468,9 @@ pub const ModernProvisionDisplay = struct {
         const spinner = try self.mp.addSpinner();
         const msg = try self.buildResourceMessage(resource_type, resource_name, "");
 
-        var style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{spinner} {msg}");
+        const template = try std.fmt.allocPrint(self.allocator, "{s}{{spinner}} {{msg}}", .{INDENT_RESOURCE});
+        defer self.allocator.free(template);
+        var style = try indicatif.ProgressStyle.withTemplate(self.allocator, template);
         style.tick_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
         spinner.setStyle(style);
         spinner.setMessage(msg);
@@ -489,7 +491,15 @@ pub const ModernProvisionDisplay = struct {
         self.updated_count += 1;
 
         if (!self.show_progress) {
-            std.debug.print("\x1b[32m✓\x1b[0m {s}[{s}] action {s} (up to date)\n", .{ resource_type, resource_name, action });
+            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
+            const current_digits = std.math.log10_int(self.executed_count) + 1;
+            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
+            var i: usize = 0;
+            var padding_str: [16]u8 = undefined;
+            while (i < padding) : (i += 1) {
+                padding_str[i] = ' ';
+            }
+            std.debug.print("{s}\x1b[32m✓ [{s}{d}/{d}]  {s}[{s}] action {s} (up to date)\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action });
             return;
         }
 
@@ -502,8 +512,8 @@ pub const ModernProvisionDisplay = struct {
             defer self.allocator.free(base);
             const message = try std.fmt.allocPrint(self.allocator, "{s} action {s} (up to date)", .{ base, action });
             defer self.allocator.free(message);
-            // Add checkmark icon before the message for alignment
-            const base_with_checkmark = try std.fmt.allocPrint(self.allocator, "✓ {s}", .{message});
+            // Add indentation and checkmark icon before the message
+            const base_with_checkmark = try std.fmt.allocPrint(self.allocator, "{s}✓ {s}", .{ INDENT_RESOURCE, message });
             defer self.allocator.free(base_with_checkmark);
             const msg = try self.makeColoredMessage(.Green, true, base_with_checkmark);
             try self.download_finished_messages.append(self.allocator, msg);
@@ -523,8 +533,16 @@ pub const ModernProvisionDisplay = struct {
         self.skipped_count += 1;
 
         if (!self.show_progress) {
+            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
+            const current_digits = std.math.log10_int(self.executed_count) + 1;
+            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
+            var i: usize = 0;
+            var padding_str: [16]u8 = undefined;
+            while (i < padding) : (i += 1) {
+                padding_str[i] = ' ';
+            }
             const reason = skip_reason orelse "up to date";
-            std.debug.print("\x1b[90m○\x1b[0m {s}[{s}] action {s} ({s})\n", .{ resource_type, resource_name, action, reason });
+            std.debug.print("{s}\x1b[90m○ [{s}{d}/{d}]  {s}[{s}] action {s} ({s})\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action, reason });
             return;
         }
 
@@ -538,9 +556,9 @@ pub const ModernProvisionDisplay = struct {
             const reason = skip_reason orelse "up to date";
             const message = try std.fmt.allocPrint(self.allocator, "{s} action {s} ({s})", .{ base, action, reason });
             defer self.allocator.free(message);
-            // Add skip icon (hollow circle) before the message for alignment
+            // Add indentation and skip icon (hollow circle) before the message
             // Use gray color (ANSI Bright Black, code 90) for modern terminals
-            const base_with_icon = try std.fmt.allocPrint(self.allocator, "\x1b[90m○ {s}\x1b[0m", .{message});
+            const base_with_icon = try std.fmt.allocPrint(self.allocator, "{s}\x1b[90m○ {s}\x1b[0m", .{ INDENT_RESOURCE, message });
             // Don't free base_with_icon here - it's stored in download_finished_messages
             try self.download_finished_messages.append(self.allocator, base_with_icon);
 
@@ -559,7 +577,15 @@ pub const ModernProvisionDisplay = struct {
         self.failed_count += 1;
 
         if (!self.show_progress) {
-            std.debug.print("\x1b[31m✗\x1b[0m {s}[{s}]: {s}\n", .{ resource_type, resource_name, error_msg });
+            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
+            const current_digits = std.math.log10_int(self.executed_count) + 1;
+            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
+            var i: usize = 0;
+            var padding_str: [16]u8 = undefined;
+            while (i < padding) : (i += 1) {
+                padding_str[i] = ' ';
+            }
+            std.debug.print("{s}\x1b[31m✗ [{s}{d}/{d}]  {s}[{s}]: {s}\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, error_msg });
             return;
         }
 
@@ -572,8 +598,8 @@ pub const ModernProvisionDisplay = struct {
             defer self.allocator.free(suffix);
             const base = try self.buildResourceMessage(resource_type, resource_name, suffix);
             defer self.allocator.free(base);
-            // Add error icon before the message for alignment
-            const base_with_icon = try std.fmt.allocPrint(self.allocator, "✗ {s}", .{base});
+            // Add indentation and error icon before the message
+            const base_with_icon = try std.fmt.allocPrint(self.allocator, "{s}✗ {s}", .{ INDENT_RESOURCE, base });
             defer self.allocator.free(base_with_icon);
 
             const msg = try self.makeColoredMessage(.Red, true, base_with_icon);
@@ -592,7 +618,7 @@ pub const ModernProvisionDisplay = struct {
     /// Show notification
     pub fn showNotification(self: *Self, source_id: []const u8, target: []const u8, action: []const u8) !void {
         if (!self.show_progress) {
-            std.debug.print("\x1b[36m🔔\x1b[0m {s} -> {s} ({s})\n", .{ source_id, target, action });
+            std.debug.print("{s}\x1b[36m🔔 {s} -> {s} ({s})\x1b[0m\n", .{ INDENT_NOTIFICATION, source_id, target, action });
         }
     }
 
