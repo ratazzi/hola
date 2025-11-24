@@ -7,6 +7,7 @@ const modern_display = @import("modern_provision_display.zig");
 const logger = @import("logger.zig");
 const http_utils = @import("http_utils.zig");
 const http_client = @import("http_client.zig");
+const resolv = @import("resolv.zig");
 const json = @import("json.zig");
 const base64 = @import("base64.zig");
 const hola_logger = @import("hola_logger.zig");
@@ -596,6 +597,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         hola_logger.mruby_module_def,
         node_info.mruby_module_def,
         env_access.mruby_module_def,
+        resolv.mruby_module_def,
     };
 
     for (api_modules) |module| {
