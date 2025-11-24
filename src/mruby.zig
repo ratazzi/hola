@@ -30,6 +30,11 @@ pub extern fn mrb_print_error(mrb: *mrb_state) void;
 // Class and method definition
 pub extern fn mrb_define_module(mrb: *mrb_state, name: [*c]const u8) *RClass;
 pub extern fn mrb_define_module_function(mrb: *mrb_state, module: *RClass, name: [*c]const u8, func: mrb_func_t, aspec: mrb_aspec) void;
+pub extern fn mrb_class_get(mrb: *mrb_state, name: [*c]const u8) *RClass;
+pub extern fn mrb_class_get_under(mrb: *mrb_state, outer: *RClass, name: [*c]const u8) *RClass;
+pub extern fn mrb_define_class_method(mrb: *mrb_state, class: *RClass, name: [*c]const u8, func: mrb_func_t, aspec: mrb_aspec) void;
+extern fn zig_mrb_obj_value(obj: *const anyopaque) mrb_value;
+pub const mrb_obj_value = zig_mrb_obj_value;
 
 // Argument parsing
 pub extern fn mrb_get_args(mrb: *mrb_state, format: [*c]const u8, ...) mrb_int;
@@ -41,6 +46,7 @@ pub extern fn mrb_inspect(mrb: *mrb_state, obj: mrb_value) mrb_value;
 // Exception handling (via C helper since mrb->exc is accessed directly)
 extern fn zig_mrb_get_exception(mrb: *mrb_state) mrb_value;
 pub const mrb_get_exception = zig_mrb_get_exception;
+pub extern fn mrb_raise(mrb: *mrb_state, class: *RClass, msg: [*c]const u8) noreturn;
 
 // Block/Proc handling
 pub extern fn mrb_yield(mrb: *mrb_state, b: mrb_value, arg: mrb_value) mrb_value;

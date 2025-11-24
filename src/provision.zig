@@ -13,6 +13,7 @@ const base64 = @import("base64.zig");
 const hola_logger = @import("hola_logger.zig");
 const node_info = @import("node_info.zig");
 const env_access = @import("env_access.zig");
+const file_ext = @import("file_ext.zig");
 const base = @import("base_resource.zig");
 const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
@@ -591,6 +592,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Register modules in dependency order: JSON must be registered before http_client
     // because http_client's Ruby prelude calls JSON.parse in Response#json method
     const api_modules = [_]mruby_module.MRubyModule{
+        file_ext.mruby_module_def, // File.stat and File.mtime extensions
         json.mruby_module_def,
         http_client.mruby_module_def,
         base64.mruby_module_def,
@@ -603,6 +605,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     for (api_modules) |module| {
         try mruby_module.registerModule(mrb_ptr, zig_module, allocator, module, &mrb);
     }
+
+    // Setup File class methods (must be done after registerModule loads the prelude)
+    // This registers File.stat and File.mtime as class methods
+    file_ext.setupFileExtensions(mrb_ptr);
 
     // Load Ruby DSL preludes for resource types
     try mrb.evalString(resources.file.ruby_prelude);

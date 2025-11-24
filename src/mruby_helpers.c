@@ -151,3 +151,8 @@ mrb_value zig_mrb_get_exception(mrb_state *mrb) {
     }
     return mrb_nil_value();
 }
+
+// Helper to convert object pointer to mrb_value
+mrb_value zig_mrb_obj_value(void *obj) {
+    return mrb_obj_value(obj);
+}
