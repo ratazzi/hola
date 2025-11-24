@@ -1,5 +1,6 @@
 const std = @import("std");
 const mruby = @import("mruby.zig");
+const mruby_module = @import("mruby_module.zig");
 const resources = @import("resources.zig");
 const download_manager = @import("download_manager.zig");
 const modern_display = @import("modern_provision_display.zig");
@@ -565,115 +566,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         );
     }
 
-    // Register HTTP client functions
-    // Initialize HTTP client with allocator
-    http_client.setAllocator(allocator);
-
-    // Signature: http_get(url, headers=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "http_get",
-        http_client.zig_http_get,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1),
-    );
-
-    // Signature: http_post(url, body=nil, content_type=nil, headers=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "http_post",
-        http_client.zig_http_post,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
-    );
-
-    // Signature: http_put(url, body=nil, content_type=nil, headers=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "http_put",
-        http_client.zig_http_put,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
-    );
-
-    // Signature: http_delete(url, headers=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "http_delete",
-        http_client.zig_http_delete,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1),
-    );
-
-    // Signature: http_patch(url, body=nil, content_type=nil, headers=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "http_patch",
-        http_client.zig_http_patch,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3),
-    );
-
-    // Register JSON functions
-    json.setAllocator(allocator);
-
-    // Signature: json_encode(obj)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "json_encode",
-        json.zig_json_encode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
-    // Signature: json_decode(str)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "json_decode",
-        json.zig_json_decode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
-    // Register Base64 functions
-    base64.setAllocator(allocator);
-
-    // Signature: base64_encode(str)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "base64_encode",
-        base64.zig_base64_encode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
-    // Signature: base64_decode(str)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "base64_decode",
-        base64.zig_base64_decode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
-    // Signature: base64_urlsafe_encode(str)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "base64_urlsafe_encode",
-        base64.zig_base64_urlsafe_encode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
-    // Signature: base64_urlsafe_decode(str)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "base64_urlsafe_decode",
-        base64.zig_base64_urlsafe_decode,
-        mruby.MRB_ARGS_REQ(1),
-    );
-
     // Register package resource (cross-platform: homebrew on macOS, apt on Linux)
     // Signature: add_package(name, version, options, action, only_if_block=nil, not_if_block=nil, notifications=nil)
     mruby.mrb_define_module_function(
@@ -694,65 +586,23 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(3), // 3 required + 3 optional
     );
 
-    // Register Hola logging functions
-    // Signature: hola_debug(msg), hola_info(msg), hola_warn(msg), hola_error(msg)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "hola_debug",
-        hola_logger.zig_hola_debug,
-        mruby.MRB_ARGS_REQ(1),
-    );
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "hola_info",
-        hola_logger.zig_hola_info,
-        mruby.MRB_ARGS_REQ(1),
-    );
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "hola_warn",
-        hola_logger.zig_hola_warn,
-        mruby.MRB_ARGS_REQ(1),
-    );
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "hola_error",
-        hola_logger.zig_hola_error,
-        mruby.MRB_ARGS_REQ(1),
-    );
+    // Register all API modules using the unified interface
+    // Register modules in dependency order: JSON must be registered before http_client
+    // because http_client's Ruby prelude calls JSON.parse in Response#json method
+    const api_modules = [_]mruby_module.MRubyModule{
+        json.mruby_module_def,
+        http_client.mruby_module_def,
+        base64.mruby_module_def,
+        hola_logger.mruby_module_def,
+        node_info.mruby_module_def,
+        env_access.mruby_module_def,
+    };
 
-    // Register node info functions
-    node_info.setAllocator(allocator);
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_hostname", node_info.zig_get_node_hostname, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_fqdn", node_info.zig_get_node_fqdn, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform", node_info.zig_get_node_platform, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform_family", node_info.zig_get_node_platform_family, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_platform_version", node_info.zig_get_node_platform_version, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_os", node_info.zig_get_node_os, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_kernel_name", node_info.zig_get_node_kernel_name, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_kernel_release", node_info.zig_get_node_kernel_release, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_machine", node_info.zig_get_node_machine, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_cpu_arch", node_info.zig_get_node_cpu_arch, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_network_interfaces", node_info.zig_get_node_network_interfaces, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_default_gateway_ip", node_info.zig_get_node_default_gateway_ip, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_default_interface", node_info.zig_get_node_default_interface, mruby.MRB_ARGS_NONE());
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "get_node_lsb_info", node_info.zig_get_node_lsb_info, mruby.MRB_ARGS_NONE());
+    for (api_modules) |module| {
+        try mruby_module.registerModule(mrb_ptr, zig_module, allocator, module, &mrb);
+    }
 
-    // Register ENV access functions
-    env_access.setAllocator(allocator);
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_get", env_access.zig_env_get, mruby.MRB_ARGS_REQ(1));
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_set", env_access.zig_env_set, mruby.MRB_ARGS_REQ(2));
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_delete", env_access.zig_env_delete, mruby.MRB_ARGS_REQ(1));
-    mruby.mrb_define_module_function(mrb_ptr, zig_module, "env_has_key", env_access.zig_env_has_key, mruby.MRB_ARGS_REQ(1));
-
-    // Future: Register other resources
-    // mruby.mrb_define_module_function(mrb_ptr, zig_module, "add_service", zig_add_service_resource, ...);
-
-    // Load Ruby DSL preludes
+    // Load Ruby DSL preludes for resource types
     try mrb.evalString(resources.file.ruby_prelude);
     try mrb.evalString(resources.execute.ruby_prelude);
     try mrb.evalString(resources.remote_file.ruby_prelude);
@@ -769,24 +619,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
     try mrb.evalString(resources.systemd_unit.ruby_prelude);
-    // Load JSON module (must be before HTTP client)
-    try mrb.evalString(json.ruby_prelude);
-    // Load HTTP client prelude
-    try mrb.evalString(http_client.ruby_prelude);
-    // Load Base64 module
-    try mrb.evalString(base64.ruby_prelude);
-    // Load package resource
+    // Load package and ruby_block resources
     try mrb.evalString(resources.package.ruby_prelude);
-    // Load ruby_block resource
     try mrb.evalString(resources.ruby_block.ruby_prelude);
-    // Load Hola logging module
-    try mrb.evalString(hola_logger.ruby_prelude);
-    // Load node info module
-    try mrb.evalString(node_info.ruby_prelude);
-    // Load ENV access module
-    try mrb.evalString(env_access.ruby_prelude);
-    // Future: Load other resource preludes
-    // try mrb.evalString(resources.service.ruby_prelude);
 
     // Load and execute user's recipe
     // Use evalFile instead of evalString to preserve file path and line numbers in error messages

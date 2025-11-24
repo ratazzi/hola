@@ -120,3 +120,28 @@ pub fn zig_env_has_key(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) m
 
 /// Ruby prelude for ENV object
 pub const ruby_prelude = @embedFile("ruby_prelude/env_access.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const env_access_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "env_get", .func = zig_env_get, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "env_set", .func = zig_env_set, .args = mruby.MRB_ARGS_REQ(2) },
+    .{ .name = "env_delete", .func = zig_env_delete, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "env_has_key", .func = zig_env_has_key, .args = mruby.MRB_ARGS_REQ(1) },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &env_access_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "ENV",
+    .initFn = setAllocator,
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};

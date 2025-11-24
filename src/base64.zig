@@ -109,3 +109,28 @@ pub fn zig_base64_urlsafe_decode(mrb: *mruby.mrb_state, _: mruby.mrb_value) call
 }
 
 pub const ruby_prelude = @embedFile("ruby_prelude/base64.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const base64_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "base64_encode", .func = zig_base64_encode, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "base64_decode", .func = zig_base64_decode, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "base64_urlsafe_encode", .func = zig_base64_urlsafe_encode, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "base64_urlsafe_decode", .func = zig_base64_urlsafe_decode, .args = mruby.MRB_ARGS_REQ(1) },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &base64_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "Base64",
+    .initFn = setAllocator,
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};

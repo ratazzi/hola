@@ -763,3 +763,38 @@ fn addBoolToHash(mrb: *mruby.mrb_state, hash: mruby.mrb_value, key: []const u8, 
 
 /// Ruby prelude for node object
 pub const ruby_prelude = @embedFile("ruby_prelude/node_info.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const node_info_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "get_node_hostname", .func = zig_get_node_hostname, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_fqdn", .func = zig_get_node_fqdn, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_platform", .func = zig_get_node_platform, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_platform_family", .func = zig_get_node_platform_family, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_platform_version", .func = zig_get_node_platform_version, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_os", .func = zig_get_node_os, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_kernel_name", .func = zig_get_node_kernel_name, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_kernel_release", .func = zig_get_node_kernel_release, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_machine", .func = zig_get_node_machine, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_cpu_arch", .func = zig_get_node_cpu_arch, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_network_interfaces", .func = zig_get_node_network_interfaces, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_default_gateway_ip", .func = zig_get_node_default_gateway_ip, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_default_interface", .func = zig_get_node_default_interface, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_lsb_info", .func = zig_get_node_lsb_info, .args = mruby.MRB_ARGS_NONE() },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &node_info_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "Node",
+    .initFn = setAllocator,
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};

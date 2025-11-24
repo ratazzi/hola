@@ -526,3 +526,29 @@ fn createResponseArray(mrb: *mruby.mrb_state, _: std.mem.Allocator, response: *R
 }
 
 pub const ruby_prelude = @embedFile("ruby_prelude/http_client.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const http_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "http_get", .func = zig_http_get, .args = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1) },
+    .{ .name = "http_post", .func = zig_http_post, .args = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3) },
+    .{ .name = "http_put", .func = zig_http_put, .args = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3) },
+    .{ .name = "http_delete", .func = zig_http_delete, .args = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(1) },
+    .{ .name = "http_patch", .func = zig_http_patch, .args = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(3) },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &http_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "HTTP",
+    .initFn = setAllocator,
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};

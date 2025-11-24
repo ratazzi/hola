@@ -68,3 +68,27 @@ pub fn zig_hola_error(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mr
 
 /// Ruby prelude for Hola module
 pub const ruby_prelude = @embedFile("ruby_prelude/hola_logger.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const hola_logger_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "hola_debug", .func = zig_hola_debug, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "hola_info", .func = zig_hola_info, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "hola_warn", .func = zig_hola_warn, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "hola_error", .func = zig_hola_error, .args = mruby.MRB_ARGS_REQ(1) },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &hola_logger_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "Logger",
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};

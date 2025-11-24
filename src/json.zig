@@ -180,3 +180,26 @@ fn jsonValueToMrubyValue(mrb: *mruby.mrb_state, allocator: std.mem.Allocator, va
 }
 
 pub const ruby_prelude = @embedFile("ruby_prelude/json.rb");
+
+// MRuby module registration interface
+const mruby_module = @import("mruby_module.zig");
+
+const json_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "json_encode", .func = zig_json_encode, .args = mruby.MRB_ARGS_REQ(1) },
+    .{ .name = "json_decode", .func = zig_json_decode, .args = mruby.MRB_ARGS_REQ(1) },
+};
+
+fn getFunctions() []const mruby_module.ModuleFunction {
+    return &json_functions;
+}
+
+fn getPrelude() []const u8 {
+    return ruby_prelude;
+}
+
+pub const mruby_module_def = mruby_module.MRubyModule{
+    .name = "JSON",
+    .initFn = setAllocator,
+    .getFunctions = getFunctions,
+    .getPrelude = getPrelude,
+};
