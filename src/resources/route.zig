@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
+const logger = @import("../logger.zig");
 const builtin = @import("builtin");
 
 pub const Resource = struct {
@@ -193,16 +194,20 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
             if (err_val == c.EEXIST) {
                 return false; // Already exists
             }
+
+            // Log detailed error information
+            logger.err("Route add failed for {s}: errno={d}", .{ self.target, err_val });
+
             if (err_val == c.EACCES or err_val == c.EPERM) {
-                std.log.err("Route add failed: Permission denied (root required?) errno={}", .{err_val});
-                return error.RouteAddFailed;
-            }
-            if (err_val == c.EINVAL) {
-                std.log.err("Route add failed: Invalid Argument (bad struct?) errno={}", .{err_val});
-                return error.RouteAddFailed;
+                logger.err("Permission denied. Root/sudo access required to modify routing table.", .{});
+            } else if (err_val == c.EINVAL) {
+                logger.err("Invalid argument. Check target={s}, gateway={s}, netmask={s}", .{
+                    self.target,
+                    self.gateway orelse "none",
+                    self.netmask orelse "none",
+                });
             }
 
-            std.log.err("Route add failed: errno={}", .{err_val});
             return error.RouteAddFailed;
         }
 
@@ -263,6 +268,24 @@ const macos_impl = if (builtin.os.tag == .macos) struct {
             if (err == .SRCH) {
                 return false; // Not found
             }
+
+            // Log detailed error information
+            logger.err("Route delete failed for {s}: errno={d} ({s})", .{
+                self.target,
+                @intFromEnum(err),
+                @tagName(err),
+            });
+
+            if (err == .ACCES or err == .PERM) {
+                logger.err("Permission denied. Root/sudo access required to modify routing table.", .{});
+            } else if (err == .INVAL) {
+                logger.err("Invalid argument. Check target={s}, gateway={s}, netmask={s}", .{
+                    self.target,
+                    self.gateway orelse "none",
+                    self.netmask orelse "none",
+                });
+            }
+
             return error.RouteDeleteFailed;
         }
 
@@ -344,10 +367,31 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
         rt.rt_flags |= c.RTF_UP;
 
         if (c.ioctl(sockfd, c.SIOCADDRT, &rt) < 0) {
-            const err = std.posix.errno(0);
+            const err = std.posix.errno(-1);
             if (err == .EXIST) {
-                return false;
+                return false; // Route already exists
             }
+
+            // Log detailed error information
+            logger.err("Route add failed for {s}: errno={d} ({s})", .{
+                self.target,
+                @intFromEnum(err),
+                @tagName(err),
+            });
+
+            if (err == .ACCES or err == .PERM) {
+                logger.err("Permission denied. Root/sudo access required to modify routing table.", .{});
+            } else if (err == .INVAL) {
+                logger.err("Invalid argument. Check target={s}, gateway={s}, netmask={s}, device={s}", .{
+                    self.target,
+                    self.gateway orelse "none",
+                    self.netmask orelse "none",
+                    self.device orelse "none",
+                });
+            } else if (err == .NETUNREACH) {
+                logger.err("Network is unreachable. Gateway or device may be invalid.", .{});
+            }
+
             return error.RouteAddFailed;
         }
 
@@ -383,10 +427,27 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
         }
 
         if (c.ioctl(sockfd, c.SIOCDELRT, &rt) < 0) {
-            const err = std.posix.errno(0);
+            const err = std.posix.errno(-1);
             if (err == .SRCH) {
-                return false;
+                return false; // Route not found
             }
+
+            // Log detailed error information
+            logger.err("Route delete failed for {s}: errno={d} ({s})", .{
+                self.target,
+                @intFromEnum(err),
+                @tagName(err),
+            });
+
+            if (err == .ACCES or err == .PERM) {
+                logger.err("Permission denied. Root/sudo access required to modify routing table.", .{});
+            } else if (err == .INVAL) {
+                logger.err("Invalid argument. Check target={s}, netmask={s}", .{
+                    self.target,
+                    self.netmask orelse "none",
+                });
+            }
+
             return error.RouteDeleteFailed;
         }
 
