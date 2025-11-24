@@ -1,5 +1,35 @@
 const std = @import("std");
 const mruby = @import("mruby.zig");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+/// Version string for User-Agent from build.zig.zon
+const VERSION = build_options.version;
+
+/// Generate User-Agent string: Hola/version (platform; arch; zig version)
+fn getUserAgent(allocator: std.mem.Allocator) ![]const u8 {
+    const platform = switch (builtin.os.tag) {
+        .macos => "macOS",
+        .linux => "Linux",
+        .windows => "Windows",
+        else => "Unknown",
+    };
+
+    const arch = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "x86_64",
+        else => "unknown",
+    };
+
+    const zig_version = builtin.zig_version_string;
+
+    return std.fmt.allocPrint(allocator, "Hola/{s} ({s}; {s}; Zig {s})", .{
+        VERSION,
+        platform,
+        arch,
+        zig_version,
+    });
+}
 
 /// HTTP Response structure
 pub const Response = struct {
@@ -61,6 +91,11 @@ pub fn request(
         .redirect_behavior = @enumFromInt(10),
     });
     defer req.deinit();
+
+    // Set User-Agent header
+    const user_agent = try getUserAgent(allocator);
+    defer allocator.free(user_agent);
+    req.headers.user_agent = .{ .override = user_agent };
 
     // Set content-type header if provided
     if (content_type) |ct| {
@@ -409,6 +444,11 @@ pub fn requestWithHeaders(
         .redirect_behavior = @enumFromInt(10),
     });
     defer req.deinit();
+
+    // Set User-Agent header
+    const user_agent = try getUserAgent(allocator);
+    defer allocator.free(user_agent);
+    req.headers.user_agent = .{ .override = user_agent };
 
     // Set content-type header if provided
     if (content_type) |ct| {

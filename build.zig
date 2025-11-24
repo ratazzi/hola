@@ -79,6 +79,24 @@ pub fn build(b: *std.Build) !void {
         @tagName(target.result.cpu.arch),
     });
 
+    // Create build options for version info
+    const options = b.addOptions();
+    // Read version from build.zig.zon by parsing the file
+    const version = blk: {
+        const build_zig_zon = @embedFile("build.zig.zon") ++ "";
+        var buffer: [10 * build_zig_zon.len]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buffer);
+        const parsed = std.zon.parse.fromSlice(
+            struct { version: []const u8 },
+            fba.allocator(),
+            build_zig_zon[0 .. :0],
+            null,
+            .{ .ignore_unknown_fields = true },
+        ) catch break :blk "0.0.0";
+        break :blk parsed.version;
+    };
+    options.addOption([]const u8, "version", version);
+
     // Define the main executable
     const exe = b.addExecutable(.{
         .name = exe_name,
@@ -93,6 +111,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "ansi_term", .module = ansi_term_dep.module("ansi_term") },
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "zeit", .module = zeit_dep.module("zeit") },
+                .{ .name = "build_options", .module = options.createModule() },
             },
         }),
     });
