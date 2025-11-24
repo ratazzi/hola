@@ -215,7 +215,7 @@ pub fn zigAddResource(
     resources: *std.ArrayList(Resource),
     allocator: std.mem.Allocator,
 ) mruby.mrb_value {
-    // Parse arguments: path, mode, owner, group, recursive, action, only_if_block, not_if_block, notifications
+    // Parse arguments: path, mode, owner, group, recursive, action, only_if_block, not_if_block, ignore_failure, notifications
     var path_val: mruby.mrb_value = undefined;
     var mode_val: mruby.mrb_value = undefined;
     var owner_val: mruby.mrb_value = undefined;
@@ -224,10 +224,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Format: SSSSbS|ooA (path, mode, owner, group, recursive, action, optional blocks, optional array)
-    _ = mruby.mrb_get_args(mrb, "SSSSbS|ooA", &path_val, &mode_val, &owner_val, &group_val, &recursive_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Format: SSSSbS|oooA (path, mode, owner, group, recursive, action, optional blocks, optional boolean, optional array)
+    _ = mruby.mrb_get_args(mrb, "SSSSbS|oooA", &path_val, &mode_val, &owner_val, &group_val, &recursive_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     // Extract path
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
@@ -269,7 +270,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .path = path,

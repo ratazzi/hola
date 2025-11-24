@@ -12,6 +12,7 @@ class ExecuteResource
     @action = "run"
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -21,7 +22,7 @@ class ExecuteResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, @live_stream, @action, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, @live_stream, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def command(value)
@@ -62,6 +63,10 @@ class ExecuteResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

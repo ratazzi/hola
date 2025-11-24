@@ -12,6 +12,7 @@ class MacOSDefaultsResource
     @action = :write
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -64,7 +65,7 @@ class MacOSDefaultsResource
 
     action_arg = @action.to_s
 
-    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def domain(val)
@@ -97,6 +98,10 @@ class MacOSDefaultsResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

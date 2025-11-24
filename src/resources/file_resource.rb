@@ -11,6 +11,7 @@ class FileResource
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -21,7 +22,7 @@ class FileResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_file(@path, @content, @action, @mode, @owner, @group, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_file(@path, @content, @action, @mode, @owner, @group, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def content(value)
@@ -50,6 +51,10 @@ class FileResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

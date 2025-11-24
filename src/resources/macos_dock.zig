@@ -824,9 +824,10 @@ pub fn zigAddResource(
     var largesize_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Format: A|iSbbiooA
+    // Format: A|iSbbioooA
     // A: required array (apps)
     // |: optional args start
     // i: optional integer (tilesize)
@@ -836,8 +837,9 @@ pub fn zigAddResource(
     // i: optional integer (largesize)
     // o: optional object (only_if)
     // o: optional object (not_if)
+    // o: optional object (ignore_failure)
     // A: optional array (notifications)
-    _ = mruby.mrb_get_args(mrb, "A|iSbbiooA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &notifications_val);
+    _ = mruby.mrb_get_args(mrb, "A|iSbbioooA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     // Parse apps array
     var apps = std.ArrayList([]const u8).initCapacity(allocator, 0) catch std.ArrayList([]const u8).empty;
@@ -890,6 +892,7 @@ pub fn zigAddResource(
     common.mrb_state = mrb;
     common.only_if_block = if (mruby.mrb_test(only_if_val)) only_if_val else null;
     common.not_if_block = if (mruby.mrb_test(not_if_val)) not_if_val else null;
+    common.ignore_failure = mruby.mrb_test(ignore_failure_val);
 
     // Parse notifications array if provided
     if (mruby.mrb_test(notifications_val)) {

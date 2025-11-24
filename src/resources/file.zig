@@ -183,7 +183,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("file_resource.rb");
 
 /// Zig callback: called from Ruby to add a file resource
-/// Format: add_file(path, content, action, mode, owner, group, only_if_block, not_if_block, notifications_array)
+/// Format: add_file(path, content, action, mode, owner, group, only_if_block, not_if_block, ignore_failure, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -200,10 +200,11 @@ pub fn zigAddResource(
     var group_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 6 strings + 2 optional blocks + 1 optional array
-    _ = mruby.mrb_get_args(mrb, "SSSSSS|ooA", &path_val, &content_val, &action_val, &mode_val, &owner_val, &group_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 6 strings + 2 optional blocks + 1 optional boolean + 1 optional array
+    _ = mruby.mrb_get_args(mrb, "SSSSSS|oooA", &path_val, &content_val, &action_val, &mode_val, &owner_val, &group_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const content_cstr = mruby.mrb_str_to_cstr(mrb, content_val);
@@ -241,7 +242,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .path = path,

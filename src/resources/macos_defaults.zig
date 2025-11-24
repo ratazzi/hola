@@ -735,9 +735,10 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Format: SS|Aoo|ooA
+    // Format: SS|Aoo|oooA
     // S: required string (domain)
     // S: required string (key)
     // |: optional args start
@@ -746,8 +747,9 @@ pub fn zigAddResource(
     // |: optional args start
     // o: optional object (only_if)
     // o: optional object (not_if)
+    // o: optional object (ignore_failure)
     // A: optional array (notifications)
-    _ = mruby.mrb_get_args(mrb, "SS|Aoo|ooA", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    _ = mruby.mrb_get_args(mrb, "SS|Aoo|oooA", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     // Extract domain and key
     const domain_cstr = mruby.mrb_str_to_cstr(mrb, domain_val);
@@ -799,7 +801,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .domain = domain,

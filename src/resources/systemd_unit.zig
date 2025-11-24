@@ -270,10 +270,11 @@ pub fn zigAddResource(
     var actions_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Format: SSA|ooA (name, content, actions array, optional blocks, optional notifications)
-    _ = mruby.mrb_get_args(mrb, "SSA|ooA", &name_val, &content_val, &actions_val, &only_if_val, &not_if_val, &notifications_val);
+    // Format: SSA|oooA (name, content, actions array, optional blocks, optional notifications)
+    _ = mruby.mrb_get_args(mrb, "SSA|oooA", &name_val, &content_val, &actions_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     // Extract name
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
@@ -304,7 +305,7 @@ pub fn zigAddResource(
 
         // Build common properties (guards + notifications) for each resource
         var common = base.CommonProps.init(allocator);
-        base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+        base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
         resources.append(allocator, .{
             .name = name,

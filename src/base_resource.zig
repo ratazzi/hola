@@ -16,6 +16,9 @@ pub const CommonProps = struct {
     only_if_block: ?mruby.mrb_value = null,
     not_if_block: ?mruby.mrb_value = null,
 
+    // Error handling
+    ignore_failure: bool = false,
+
     // Notifications
     notifications: std.ArrayList(notification.Notification),
 
@@ -100,12 +103,13 @@ pub const CommonArgs = struct {
     }
 };
 
-/// Populate CommonProps from Ruby args (only_if/not_if/notifications) and protect blocks
+/// Populate CommonProps from Ruby args (only_if/not_if/ignore_failure/notifications) and protect blocks
 pub fn fillCommonFromRuby(
     common: *CommonProps,
     mrb: *mruby.mrb_state,
     only_if_val: mruby.mrb_value,
     not_if_val: mruby.mrb_value,
+    ignore_failure_val: mruby.mrb_value,
     notifications_val: mruby.mrb_value,
     allocator: std.mem.Allocator,
 ) void {
@@ -113,6 +117,7 @@ pub fn fillCommonFromRuby(
     common.mrb_state = mrb;
     common.only_if_block = if (mruby.mrb_test(only_if_val)) only_if_val else null;
     common.not_if_block = if (mruby.mrb_test(not_if_val)) not_if_val else null;
+    common.ignore_failure = mruby.mrb_test(ignore_failure_val);
 
     // Parse notifications array if provided: each item is [target, action, timing]
     if (mruby.mrb_test(notifications_val)) {

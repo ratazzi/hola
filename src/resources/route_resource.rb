@@ -10,6 +10,7 @@ class RouteResource
     @action = :add
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -19,7 +20,7 @@ class RouteResource
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
 
     # Signature: add_route(target, gateway, netmask, device, action, only_if, not_if, notifications)
-    ZigBackend.add_route(@target, @gateway, @netmask, @device, @action.to_s, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_route(@target, @gateway, @netmask, @device, @action.to_s, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def gateway(value)
@@ -44,6 +45,10 @@ class RouteResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

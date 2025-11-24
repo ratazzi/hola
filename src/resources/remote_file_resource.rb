@@ -17,6 +17,7 @@ class RemoteFileResource
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -29,7 +30,7 @@ class RemoteFileResource
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
 
     # Pass headers hash directly to Zig
-    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def source(value)
@@ -86,6 +87,10 @@ class RemoteFileResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

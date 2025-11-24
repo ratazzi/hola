@@ -159,6 +159,22 @@ const ResourceMacOs = union(enum) {
             .ruby_block => |*res| &res.common,
         };
     }
+
+    pub fn shouldIgnoreFailure(self: ResourceMacOs) bool {
+        return switch (self) {
+            .file => |res| res.common.ignore_failure,
+            .execute => |res| res.common.ignore_failure,
+            .remote_file => |res| res.common.ignore_failure,
+            .template => |res| res.common.ignore_failure,
+            .macos_dock => |res| res.common.ignore_failure,
+            .macos_defaults => |res| res.common.ignore_failure,
+            .directory => |res| res.common.ignore_failure,
+            .link => |res| res.common.ignore_failure,
+            .route => |res| res.common.ignore_failure,
+            .package => |res| res.common.ignore_failure,
+            .ruby_block => |res| res.common.ignore_failure,
+        };
+    }
 };
 
 const ResourceGeneric = union(enum) {
@@ -235,6 +251,22 @@ const ResourceGeneric = union(enum) {
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
             .route => |*res| &res.common,
+        };
+    }
+
+    pub fn shouldIgnoreFailure(self: ResourceGeneric) bool {
+        return switch (self) {
+            .file => |res| res.common.ignore_failure,
+            .execute => |res| res.common.ignore_failure,
+            .remote_file => |res| res.common.ignore_failure,
+            .template => |res| res.common.ignore_failure,
+            .directory => |res| res.common.ignore_failure,
+            .link => |res| res.common.ignore_failure,
+            .apt_repository => |res| res.common.ignore_failure,
+            .systemd_unit => |res| res.common.ignore_failure,
+            .package => |res| res.common.ignore_failure,
+            .ruby_block => |res| res.common.ignore_failure,
+            .route => |res| res.common.ignore_failure,
         };
     }
 };

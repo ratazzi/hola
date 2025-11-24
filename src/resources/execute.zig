@@ -282,7 +282,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("execute_resource.rb");
 
 /// Zig callback: called from Ruby to add an execute resource
-/// Format: add_execute(name, command, cwd, user, group, live_stream, action, only_if_block, not_if_block, notifications_array)
+/// Format: add_execute(name, command, cwd, user, group, live_stream, action, only_if_block, not_if_block, ignore_failure, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -300,10 +300,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 5 strings + 1 bool + 1 string + 3 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "SSSSSoS|ooA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &live_stream_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 5 strings + 1 bool + 1 string + 3 optional (2 blocks + 1 bool + 1 array)
+    _ = mruby.mrb_get_args(mrb, "SSSSSoS|oooA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &live_stream_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const command_cstr = mruby.mrb_str_to_cstr(mrb, command_val);
@@ -343,7 +344,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .name = name,

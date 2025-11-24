@@ -451,10 +451,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get array + 3 strings + 3 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "ASSS|ooA", &names_val, &version_val, &options_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get array + 3 strings + 4 optional (blocks + array)
+    _ = mruby.mrb_get_args(mrb, "ASSS|oooA", &names_val, &version_val, &options_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     // Parse names array
     var names = std.ArrayList([]const u8).empty;
@@ -494,7 +495,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .names = names,

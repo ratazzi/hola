@@ -502,7 +502,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("template_resource.rb");
 
 /// Zig callback: called from Ruby to add a template resource
-/// Format: add_template(path, source, mode, owner, group, variables_array, action, only_if_block, not_if_block, notifications_array)
+/// Format: add_template(path, source, mode, owner, group, variables_array, action, only_if_block, not_if_block, ignore_failure, notifications_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -520,10 +520,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get 5 strings + 1 array (variables) + 1 string (action) + 2 optional blocks + 1 optional array
-    _ = mruby.mrb_get_args(mrb, "SSSSSAS|ooA", &path_val, &source_val, &mode_val, &owner_val, &group_val, &variables_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get 5 strings + 1 array (variables) + 1 string (action) + 2 optional blocks + 1 optional boolean + 1 optional array
+    _ = mruby.mrb_get_args(mrb, "SSSSSAS|oooA", &path_val, &source_val, &mode_val, &owner_val, &group_val, &variables_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const source_cstr = mruby.mrb_str_to_cstr(mrb, source_val);
@@ -602,7 +603,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .path = path,

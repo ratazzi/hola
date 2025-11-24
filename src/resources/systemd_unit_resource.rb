@@ -9,6 +9,7 @@ class SystemdUnitResource
     @verify = true
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -22,7 +23,7 @@ class SystemdUnitResource
     # Convert actions to strings
     actions_arg = Array(@action).map(&:to_s)
 
-    ZigBackend.add_systemd_unit(@name, @content, actions_arg, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_systemd_unit(@name, @content, actions_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def content(value)
@@ -43,6 +44,10 @@ class SystemdUnitResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)

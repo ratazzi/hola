@@ -124,10 +124,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // Get name (string), block (proc), action (string), and 3 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "SoS|ooA", &name_val, &block_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // Get name (string), block (proc), action (string), and 4 optional (blocks + array)
+    _ = mruby.mrb_get_args(mrb, "SoS|oooA", &name_val, &block_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
@@ -145,7 +146,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     // Register block with GC to prevent collection
     if (block_proc) |proc| {

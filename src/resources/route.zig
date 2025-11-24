@@ -415,10 +415,11 @@ pub fn zigAddResource(
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
+    var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
 
-    // add_route(target, gateway, netmask, device, action, only_if, not_if, notifications)
-    _ = mruby.mrb_get_args(mrb, "SSSSS|ooA", &target_val, &gateway_val, &netmask_val, &device_val, &action_val, &only_if_val, &not_if_val, &notifications_val);
+    // add_route(target, gateway, netmask, device, action, only_if, not_if, ignore_failure, notifications)
+    _ = mruby.mrb_get_args(mrb, "SSSSS|oooA", &target_val, &gateway_val, &netmask_val, &device_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
 
     const target_cstr = mruby.mrb_str_to_cstr(mrb, target_val);
     const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch return mruby.mrb_nil_value();
@@ -440,7 +441,7 @@ pub fn zigAddResource(
     const action: Resource.Action = if (std.mem.eql(u8, action_str, "delete")) .delete else .add;
 
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
 
     resources.append(allocator, .{
         .target = target,

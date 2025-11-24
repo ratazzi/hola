@@ -11,6 +11,7 @@ class MacosDockResource
     @largesize = nil
     @only_if_proc = nil
     @not_if_proc = nil
+    @ignore_failure = false
     @notifications = []
     instance_eval(&block) if block
 
@@ -25,7 +26,7 @@ class MacosDockResource
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
 
-    ZigBackend.add_macos_dock(@apps, @tilesize, @orientation, @autohide, @magnification, @largesize, only_if_arg, not_if_arg, notifications_arg)
+    ZigBackend.add_macos_dock(@apps, @tilesize, @orientation, @autohide, @magnification, @largesize, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
   end
 
   def apps(app_list)
@@ -58,6 +59,10 @@ class MacosDockResource
 
   def not_if(&block)
     @not_if_proc = block if block
+  end
+
+  def ignore_failure(value)
+    @ignore_failure = value
   end
 
   def notifies(target_resource, action: :restart, timing: :delayed)
