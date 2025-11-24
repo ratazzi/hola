@@ -630,6 +630,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load package and ruby_block resources
     try mrb.evalString(resources.package.ruby_prelude);
     try mrb.evalString(resources.ruby_block.ruby_prelude);
+    // Load Ruby-only custom resources
+    try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 
     // Load and execute user's recipe
     // Use evalFile instead of evalString to preserve file path and line numbers in error messages
