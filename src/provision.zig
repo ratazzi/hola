@@ -756,12 +756,15 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                 defer allocator.free(resource_id);
 
                 var task_index: ?usize = null;
+                // Use mutex-protected access to tasks
+                download_mgr.mutex.lock();
                 for (download_mgr.tasks.items, 0..) |*task, idx| {
                     if (std.mem.eql(u8, task.resource_id, resource_id)) {
                         task_index = idx;
                         break;
                     }
                 }
+                download_mgr.mutex.unlock();
 
                 if (task_index) |idx| {
                     // Wait for this specific download task to complete
@@ -772,8 +775,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                         std.Thread.sleep(50 * std.time.ns_per_ms);
 
                         // Check if this specific task is done (status != 0 means completed or failed)
-                        // Use atomic load with acquire ordering to ensure we see the latest value
-                        const current_status = download_mgr.tasks.items[idx].status.load(.acquire);
+                        // Use thread-safe access method to get task status
+                        const current_status = session.getTaskStatus(idx) catch |err| {
+                            const msg = try std.fmt.allocPrint(allocator, "Download status lookup failed for {s}: {s}", .{ resource_id, @errorName(err) });
+                            defer allocator.free(msg);
+                            try display.showInfo(msg);
+                            return err;
+                        };
                         if (current_status != 0) {
                             break;
                         }
@@ -781,7 +789,12 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                     }
 
                     // Check if the download failed
-                    const final_status = download_mgr.tasks.items[idx].status.load(.acquire);
+                    const final_status = session.getTaskStatus(idx) catch |err| {
+                        const msg = try std.fmt.allocPrint(allocator, "Download status lookup failed for {s}: {s}", .{ resource_id, @errorName(err) });
+                        defer allocator.free(msg);
+                        try display.showInfo(msg);
+                        return err;
+                    };
                     if (final_status == 2) { // 2 typically means failed
                         // Wait for all threads to complete before returning error to avoid segfault
                         if (session.is_active) {

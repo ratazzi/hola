@@ -57,6 +57,8 @@ pub const DownloadManager = struct {
     condition: std.Thread.Condition,
     shutdown: bool,
     next_task_index: usize, // Index of next task to process
+    completed_counter: std.atomic.Value(usize),
+    failed_counter: std.atomic.Value(usize),
 
     pub const Config = struct {
         max_concurrent: usize = 2,
@@ -80,6 +82,8 @@ pub const DownloadManager = struct {
             .condition = .{},
             .shutdown = false,
             .next_task_index = 0,
+            .completed_counter = std.atomic.Value(usize).init(0),
+            .failed_counter = std.atomic.Value(usize).init(0),
         };
     }
 
@@ -102,6 +106,8 @@ pub const DownloadManager = struct {
     }
 
     pub fn addTask(self: *Self, task: DownloadTask) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.tasks.append(self.allocator, task);
     }
 
@@ -111,27 +117,35 @@ pub const DownloadManager = struct {
     }
 
     fn updateDownloadProgress(self: *Self, task_index: usize, bytes_downloaded: usize, total_bytes: usize, status: u8) void {
-        if (task_index >= self.tasks.items.len) return;
+        self.mutex.lock();
+        const display = self.display;
+
+        if (task_index >= self.tasks.items.len) {
+            self.mutex.unlock();
+            return;
+        }
 
         var task = &self.tasks.items[task_index];
         const previous_status = task.status.load(.acquire);
         const previous_total_bytes = task.total_bytes;
+        const display_name = task.display_name;
         task.status.store(status, .release);
         task.bytes_downloaded = bytes_downloaded;
         task.total_bytes = total_bytes;
+        self.mutex.unlock();
 
-        if (self.display) |display| {
+        if (display) |disp| {
             if (status == 0 and previous_status == 0 and bytes_downloaded == 0) {
-                display.addDownload(task.display_name, total_bytes) catch {};
+                disp.addDownload(display_name, total_bytes) catch {};
             } else if (status == 0) {
                 if (total_bytes > 0 and previous_total_bytes == 0) {
-                    display.addDownload(task.display_name, total_bytes) catch {};
+                    disp.addDownload(display_name, total_bytes) catch {};
                 }
-                display.updateDownload(task.display_name, bytes_downloaded) catch {};
+                disp.updateDownload(display_name, bytes_downloaded) catch {};
             } else if (status == 1 and previous_status != 1) {
-                display.finishDownload(task.display_name, true) catch {};
+                disp.finishDownload(display_name, true) catch {};
             } else if (status == 2 and previous_status != 2) {
-                display.finishDownload(task.display_name, false) catch {};
+                disp.finishDownload(display_name, false) catch {};
             }
         }
     }
@@ -139,11 +153,13 @@ pub const DownloadManager = struct {
     /// Start parallel downloads
     pub fn startParallelDownloads(self: *Self) !DownloadSession {
         if (self.tasks.items.len == 0) {
+            self.completed_counter.store(0, .seq_cst);
+            self.failed_counter.store(0, .seq_cst);
             return DownloadSession{
                 .threads = &[_]std.Thread{},
                 .thread_count = 0,
-                .completed = std.atomic.Value(usize).init(0),
-                .failed = std.atomic.Value(usize).init(0),
+                .completed = &self.completed_counter,
+                .failed = &self.failed_counter,
                 .is_active = false,
                 .allocator = self.allocator,
                 .download_mgr = self,
@@ -157,14 +173,14 @@ pub const DownloadManager = struct {
         const worker_count = @min(self.max_concurrent, self.tasks.items.len);
         self.workers = try self.allocator.alloc(std.Thread, worker_count);
 
-        var completed = std.atomic.Value(usize).init(0);
-        var failed = std.atomic.Value(usize).init(0);
+        self.completed_counter.store(0, .seq_cst);
+        self.failed_counter.store(0, .seq_cst);
 
         for (self.workers, 0..) |*worker, i| {
             const context = WorkerContext{
                 .worker_id = i,
-                .completed = &completed,
-                .failed = &failed,
+                .completed = &self.completed_counter,
+                .failed = &self.failed_counter,
                 .download_mgr = self,
             };
             worker.* = try std.Thread.spawn(.{}, workerLoop, .{context});
@@ -173,8 +189,8 @@ pub const DownloadManager = struct {
         return DownloadSession{
             .threads = self.workers,
             .thread_count = worker_count,
-            .completed = completed,
-            .failed = failed,
+            .completed = &self.completed_counter,
+            .failed = &self.failed_counter,
             .is_active = true,
             .allocator = self.allocator,
             .download_mgr = self,
@@ -207,10 +223,12 @@ pub const DownloadManager = struct {
             context.download_mgr.next_task_index += 1;
             context.download_mgr.mutex.unlock();
 
-            // Download task (without lock)
+            // Get task data with lock
             context.download_mgr.updateDownloadProgress(task_index, 0, 0, 0);
 
+            context.download_mgr.mutex.lock();
             const task = context.download_mgr.tasks.items[task_index];
+            context.download_mgr.mutex.unlock();
             downloadWithProgress(task, context.download_mgr.allocator, context.download_mgr, task_index) catch |err| {
                 const error_name = @errorName(err);
                 const error_msg_with_url = std.fmt.allocPrint(context.download_mgr.allocator, "{s}: {s}", .{ error_name, task.url }) catch {
@@ -226,7 +244,12 @@ pub const DownloadManager = struct {
                 };
                 @memcpy(error_msg_z, error_msg_with_url);
                 context.download_mgr.allocator.free(error_msg_with_url);
-                context.download_mgr.tasks.items[task_index].error_message.store(error_msg_z, .release);
+
+                context.download_mgr.mutex.lock();
+                if (task_index < context.download_mgr.tasks.items.len) {
+                    context.download_mgr.tasks.items[task_index].error_message.store(error_msg_z, .release);
+                }
+                context.download_mgr.mutex.unlock();
 
                 context.download_mgr.updateDownloadProgress(task_index, 0, 0, 2);
                 _ = context.failed.fetchAdd(1, .seq_cst);
@@ -349,14 +372,26 @@ pub const DownloadManager = struct {
         }
     }
 
+    /// Session handle for parallel downloads
     pub const DownloadSession = struct {
         threads: []std.Thread,
         thread_count: usize,
-        completed: std.atomic.Value(usize),
-        failed: std.atomic.Value(usize),
+        completed: *std.atomic.Value(usize),
+        failed: *std.atomic.Value(usize),
         is_active: bool,
         allocator: std.mem.Allocator,
         download_mgr: *DownloadManager,
+
+        /// Thread-safe access to task status
+        pub fn getTaskStatus(self: *DownloadSession, task_index: usize) !u8 {
+            self.download_mgr.mutex.lock();
+            defer self.download_mgr.mutex.unlock();
+
+            if (task_index >= self.download_mgr.tasks.items.len) {
+                return error.InvalidTaskIndex;
+            }
+            return self.download_mgr.tasks.items[task_index].status.load(.acquire);
+        }
 
         pub fn deinit(_: *DownloadSession) void {
             // Threads are owned by download_mgr, don't free here
