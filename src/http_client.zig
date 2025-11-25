@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("mruby.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const logger = @import("logger.zig");
 
 /// Version string for User-Agent from build.zig.zon
 const VERSION = build_options.version;
@@ -159,7 +160,7 @@ pub fn request(
 
     while (true) {
         const bytes_read = body_reader.readSliceShort(&buffer) catch |err| {
-            std.log.warn("Error reading HTTP body: {}", .{err});
+            logger.warn("Error reading HTTP body: {}", .{err});
             break;
         };
         if (bytes_read == 0) break;
@@ -526,7 +527,7 @@ pub fn requestWithHeaders(
 
     while (true) {
         const bytes_read = body_reader.readSliceShort(&buffer) catch |err| {
-            std.log.warn("Error reading HTTP body: {}", .{err});
+            logger.warn("Error reading HTTP body: {}", .{err});
             break;
         };
         if (bytes_read == 0) break;

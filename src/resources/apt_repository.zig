@@ -97,7 +97,7 @@ pub const Resource = struct {
 
             // Create keyrings directory if it doesn't exist
             std.fs.cwd().makePath("/etc/apt/keyrings") catch |err| {
-                logger.warn("Failed to create /etc/apt/keyrings: {}\n", .{err});
+                logger.warn("Failed to create /etc/apt/keyrings: {}", .{err});
             };
 
             // Check if key already exists
@@ -110,7 +110,7 @@ pub const Resource = struct {
             };
 
             if (!key_exists) {
-                logger.info("Downloading GPG key from {s} to {s}\n", .{ key_url, key_path });
+                logger.info("Downloading GPG key from {s} to {s}", .{ key_url, key_path });
                 const download_res = try http_utils.downloadFile(allocator, key_url, key_path, .{});
                 defer if (download_res.etag) |etag| allocator.free(etag);
                 if (download_res.status != .downloaded) {
@@ -226,7 +226,7 @@ pub const Resource = struct {
         };
 
         if (needs_update) {
-            logger.info("Writing repository configuration to {s}\n", .{sources_list_path});
+            logger.info("Writing repository configuration to {s}", .{sources_list_path});
             const file = try std.fs.createFileAbsolute(sources_list_path, .{});
             defer file.close();
             try file.writeAll(new_content);
@@ -235,7 +235,7 @@ pub const Resource = struct {
 
         // Step 3: Run apt update if something changed
         if (updated) {
-            logger.info("Running apt update\n", .{});
+            logger.info("Running apt update", .{});
             try runAptUpdate(allocator);
         }
 
@@ -269,7 +269,7 @@ pub const Resource = struct {
 
         // Run apt update
         if (updated) {
-            logger.info("Running apt update after removing repository\n", .{});
+            logger.info("Running apt update after removing repository", .{});
             try runAptUpdate(allocator);
         }
 
@@ -301,7 +301,7 @@ pub const Resource = struct {
     fn runAptUpdate(allocator: std.mem.Allocator) !void {
         // Find apt-get or apt
         const apt_path = findAptExecutable(allocator) catch {
-            logger.warn("apt/apt-get not found, skipping apt update\n", .{});
+            logger.warn("apt/apt-get not found, skipping apt update", .{});
             return;
         };
         defer allocator.free(apt_path);
@@ -321,16 +321,16 @@ pub const Resource = struct {
 
         // Log output
         if (stdout.len > 0) {
-            logger.debug("apt update stdout: {s}\n", .{stdout});
+            logger.debug("apt update stdout: {s}", .{stdout});
         }
         if (stderr.len > 0) {
-            logger.warn("apt update stderr: {s}\n", .{stderr});
+            logger.warn("apt update stderr: {s}", .{stderr});
         }
 
         switch (term) {
             .Exited => |code| {
                 if (code != 0) {
-                    logger.err("apt update failed with exit code {d}\n", .{code});
+                    logger.err("apt update failed with exit code {d}", .{code});
                     return error.AptUpdateFailed;
                 }
             },

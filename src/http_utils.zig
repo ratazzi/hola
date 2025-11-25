@@ -1,6 +1,7 @@
 const std = @import("std");
 const math = std.math;
 const http_client = @import("http_client.zig");
+const logger = @import("logger.zig");
 
 /// Format byte size using binary units (KiB, MiB, GiB, TiB) with configurable decimals
 /// Uses logarithmic calculation to elegantly determine the appropriate unit
@@ -98,7 +99,7 @@ pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []
 
     if (options.headers) |headers_json| {
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, headers_json, .{}) catch |err| {
-            std.log.warn("Failed to parse headers JSON: {}", .{err});
+            logger.warn("Failed to parse headers JSON: {}", .{err});
             return err;
         };
         defer parsed.deinit();

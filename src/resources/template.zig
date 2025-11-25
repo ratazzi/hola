@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
+const logger = @import("../logger.zig");
 
 /// Template resource data structure
 pub const Resource = struct {
@@ -156,7 +157,7 @@ pub const Resource = struct {
         // Apply owner/group after file is closed
         if (self.attrs.owner != null or self.attrs.group != null) {
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
-                std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+                logger.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
             };
         }
 
@@ -335,9 +336,6 @@ pub const Resource = struct {
         // Execute Ruby code
         const code_str = try ruby_code.toOwnedSlice(std.heap.c_allocator);
         defer std.heap.c_allocator.free(code_str);
-
-        // Debug: print generated Ruby code (for debugging)
-        // std.debug.print("Generated Ruby code:\n{s}\n", .{code_str});
 
         // Create null-terminated string for mruby
         const code_with_null = try std.heap.c_allocator.alloc(u8, code_str.len + 1);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
+const logger = @import("../logger.zig");
 
 // External helper for checking nil values and exceptions
 extern fn zig_mrb_nil_p(val: mruby.mrb_value) c_int;
@@ -93,7 +94,7 @@ pub const Resource = struct {
                 const err_msg = std.mem.span(err_msg_cstr);
 
                 // Log the error message
-                std.log.err("Ruby block execution failed: {s}", .{err_msg});
+                logger.err("Ruby block execution failed: {s}", .{err_msg});
 
                 // Also print to stderr for consistency
                 mruby.mrb_print_error(mrb);

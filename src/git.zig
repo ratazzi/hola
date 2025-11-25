@@ -1,6 +1,5 @@
 const std = @import("std");
-
-const log = std.log.scoped(.git);
+const logger = @import("logger.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -87,7 +86,7 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
         defer c.git_repository_free(repo);
     }
 
-    log.info("Cloned {s} -> {s}", .{ url, destination });
+    logger.info("Cloned {s} -> {s}", .{ url, destination });
 }
 
 fn check(code: c_int, err: Error) Error!void {
@@ -103,11 +102,11 @@ fn logLibGit2Error(code: c_int) void {
         if (err.message != null) {
             const msg_ptr: [*:0]const u8 = @ptrCast(err.message);
             const msg = std.mem.span(msg_ptr);
-            log.err("libgit2 ({d}): {s}", .{ code, msg });
+            logger.err("libgit2 ({d}): {s}", .{ code, msg });
             return;
         }
     }
-    log.err("libgit2 ({d}): <no details>", .{code});
+    logger.err("libgit2 ({d}): <no details>", .{code});
 }
 
 /// Credential callback used by libgit2 for both SSH and HTTPS.

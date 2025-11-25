@@ -404,7 +404,7 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
     defer parser.deinit();
 
     const parsed = parser.parseString(content) catch |err| {
-        std.log.warn("Failed to parse {s}: {s}, using defaults", .{ config_path, @errorName(err) });
+        logger.warn("Failed to parse {s}: {s}, using defaults", .{ config_path, @errorName(err) });
         return null;
     };
     defer parsed.deinit();

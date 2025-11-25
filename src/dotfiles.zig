@@ -2,8 +2,8 @@ const std = @import("std");
 const fmt = std.fmt;
 const table = @import("table.zig");
 const glob = @import("glob.zig");
+const logger = @import("logger.zig");
 
-const log = std.log.scoped(.dotfiles);
 const Ansi = table.Ansi;
 const CellStyle = table.CellStyle;
 
@@ -466,13 +466,13 @@ const Planner = struct {
 
         if (std.fs.path.dirname(target_abs)) |dir| {
             std.fs.cwd().makePath(dir) catch |err| {
-                log.err("Failed to create parent directories for {s}: {s}", .{ target_abs, @errorName(err) });
+                logger.err("Failed to create parent directories for {s}: {s}", .{ target_abs, @errorName(err) });
                 return .skipped;
             };
         }
 
         std.fs.symLinkAbsolute(source_abs, target_abs, .{}) catch |err| {
-            log.err("Failed to create symlink {s}: {s}", .{ target_abs, @errorName(err) });
+            logger.err("Failed to create symlink {s}: {s}", .{ target_abs, @errorName(err) });
             return .skipped;
         };
 

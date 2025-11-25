@@ -119,7 +119,7 @@ pub const Resource = struct {
         if (to_install.items.len == 0) {
             const names_str = try self.joinNames(allocator);
             defer allocator.free(names_str);
-            logger.info("package[{s}]: already installed\n", .{names_str});
+            logger.info("package[{s}]: already installed", .{names_str});
             return base.ApplyResult{
                 .was_updated = true,
                 .action = "install",
@@ -155,7 +155,7 @@ pub const Resource = struct {
         if (to_remove.items.len == 0) {
             const names_str = try self.joinNames(allocator);
             defer allocator.free(names_str);
-            logger.info("package[{s}]: not installed\n", .{names_str});
+            logger.info("package[{s}]: not installed", .{names_str});
             return base.ApplyResult{
                 .was_updated = true,
                 .action = "remove",
@@ -278,7 +278,7 @@ pub const Resource = struct {
 
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
-        logger.info("package[{s}]: installing via {s}\n", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
+        logger.info("package[{s}]: installing via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
         try self.runCommand(allocator, cmd);
     }
 
@@ -293,7 +293,7 @@ pub const Resource = struct {
 
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
-        logger.info("package[{s}]: removing via {s}\n", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
+        logger.info("package[{s}]: removing via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
         try self.runCommand(allocator, cmd);
     }
 
@@ -308,7 +308,7 @@ pub const Resource = struct {
 
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
-        logger.info("package[{s}]: upgrading via {s}\n", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
+        logger.info("package[{s}]: upgrading via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
         try self.runCommand(allocator, cmd);
     }
 
@@ -398,14 +398,14 @@ pub const Resource = struct {
         if (stdout.len > 0) {
             const trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
             if (trimmed.len > 0) {
-                logger.debug("  stdout: {s}\n", .{trimmed});
+                logger.debug("  stdout: {s}", .{trimmed});
             }
         }
 
         if (stderr.len > 0) {
             const trimmed = std.mem.trim(u8, stderr, &std.ascii.whitespace);
             if (trimmed.len > 0) {
-                logger.warn("  stderr: {s}\n", .{trimmed});
+                logger.warn("  stderr: {s}", .{trimmed});
             }
         }
 
@@ -413,19 +413,19 @@ pub const Resource = struct {
         switch (term) {
             .Exited => |code| {
                 if (code != 0) {
-                    std.debug.print("[package] command failed with code {d}\n", .{code});
+                    logger.err("[package] command failed with code {d}", .{code});
                     if (stderr.len > 0) {
-                        std.debug.print("   {s}\n", .{stderr});
+                        logger.err("   {s}", .{stderr});
                     }
                     return error.PackageOperationFailed;
                 }
             },
             .Signal => |sig| {
-                std.debug.print("[package] command killed by signal {d}\n", .{sig});
+                logger.err("[package] command killed by signal {d}", .{sig});
                 return error.CommandKilled;
             },
             else => {
-                std.debug.print("[package] command failed with unknown status\n", .{});
+                logger.err("[package] command failed with unknown status", .{});
                 return error.CommandFailed;
             },
         }

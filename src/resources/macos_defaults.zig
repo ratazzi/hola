@@ -92,15 +92,15 @@ pub const Resource = struct {
     }
 
     pub fn apply(self: Resource) !base.ApplyResult {
-        logger.debug("macos_defaults apply: domain={s}, key={s}, action={}\n", .{ self.domain, self.key, self.action });
+        logger.debug("macos_defaults apply: domain={s}, key={s}, action={}", .{ self.domain, self.key, self.action });
 
         // Log the desired value stored in the resource
         switch (self.value) {
-            .boolean => |b| logger.debug("macos_defaults desired value = boolean: {}\n", .{b}),
-            .integer => |i| logger.debug("macos_defaults desired value = integer: {}\n", .{i}),
-            .float => |f| logger.debug("macos_defaults desired value = float: {d}\n", .{f}),
-            .string => |s| logger.debug("macos_defaults desired value = string: {s}\n", .{s}),
-            else => logger.debug("macos_defaults desired value = other type\n", .{}),
+            .boolean => |b| logger.debug("macos_defaults desired value = boolean: {}", .{b}),
+            .integer => |i| logger.debug("macos_defaults desired value = integer: {}", .{i}),
+            .float => |f| logger.debug("macos_defaults desired value = float: {d}", .{f}),
+            .string => |s| logger.debug("macos_defaults desired value = string: {s}", .{s}),
+            else => logger.debug("macos_defaults desired value = other type", .{}),
         }
 
         const skip_reason = try self.common.shouldRun();
@@ -123,9 +123,9 @@ pub const Resource = struct {
 
         switch (self.action) {
             .write => {
-                logger.debug("macos_defaults calling applyWrite...\n", .{});
+                logger.debug("macos_defaults calling applyWrite...", .{});
                 const was_updated = try applyWrite(self);
-                logger.debug("macos_defaults applyWrite returned: {}\n", .{was_updated});
+                logger.debug("macos_defaults applyWrite returned: {}", .{was_updated});
                 return base.ApplyResult{
                     .was_updated = was_updated,
                     .action = action_name,
@@ -355,7 +355,7 @@ pub const Resource = struct {
     }
 
     fn readDefault(allocator: std.mem.Allocator, domain: []const u8, key: []const u8) !?Value {
-        logger.debug("macos_defaults readDefault: domain={s}, key={s}\n", .{ domain, key });
+        logger.debug("macos_defaults readDefault: domain={s}, key={s}", .{ domain, key });
 
         // Convert domain and key to CFString
         const domain_cf = c.CFStringCreateWithCString(null, domain.ptr, c.kCFStringEncodingUTF8);
@@ -374,7 +374,7 @@ pub const Resource = struct {
         // Also synchronize the specific domain to ensure we get fresh data
         _ = c.CFPreferencesSynchronize(domain_cf, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
 
-        logger.debug("macos_defaults after synchronization, calling CFPreferencesCopyValue...\n", .{});
+        logger.debug("macos_defaults after synchronization, calling CFPreferencesCopyValue...", .{});
 
         const value_cf = c.CFPreferencesCopyValue(key_cf, domain_cf, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
         const from_anyhost = true;
@@ -383,9 +383,9 @@ pub const Resource = struct {
         // CurrentHost is for host-specific cache, not the actual plist file
 
         if (value_cf) |val| {
-            logger.debug("macos_defaults value_cf found: {*}\n", .{val});
+            logger.debug("macos_defaults value_cf found: {*}", .{val});
         } else {
-            logger.debug("macos_defaults value_cf is NULL (key doesn't exist)\n", .{});
+            logger.debug("macos_defaults value_cf is NULL (key doesn't exist)", .{});
         }
 
         if (value_cf == null) {
@@ -492,7 +492,7 @@ pub const Resource = struct {
     fn cfValueToValue(allocator: std.mem.Allocator, cf_value: anytype) !Value {
         const type_id = c.CFGetTypeID(cf_value);
 
-        logger.debug("macos_defaults cfValueToValue: cf_value ptr={*}\n", .{cf_value});
+        logger.debug("macos_defaults cfValueToValue: cf_value ptr={*}", .{cf_value});
 
         if (type_id == c.CFNumberGetTypeID()) {
             const num = @as(c.CFNumberRef, @ptrCast(cf_value));
@@ -507,7 +507,7 @@ pub const Resource = struct {
             return error.UnsupportedNumberType;
         } else if (type_id == c.CFBooleanGetTypeID()) {
             const bool_val = c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(cf_value)));
-            logger.debug("macos_defaults CFBoolean raw value: {}, converted: {}\n", .{ bool_val, bool_val != 0 });
+            logger.debug("macos_defaults CFBoolean raw value: {}, converted: {}", .{ bool_val, bool_val != 0 });
             const result_bool = bool_val != 0;
             return Value{ .boolean = result_bool };
         } else if (type_id == c.CFStringGetTypeID()) {
@@ -593,12 +593,12 @@ pub const Resource = struct {
                 return @ptrCast(@constCast(num));
             },
             .boolean => |b| {
-                logger.debug("macos_defaults valueToCFValue: converting boolean {} to CFBoolean\n", .{b});
+                logger.debug("macos_defaults valueToCFValue: converting boolean {} to CFBoolean", .{b});
                 const bool_val = if (b) c.kCFBooleanTrue else c.kCFBooleanFalse;
                 _ = c.CFRetain(bool_val);
                 const result: *anyopaque = @ptrCast(@constCast(bool_val));
                 const check_val = c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(result)));
-                logger.debug("macos_defaults valueToCFValue: CFBoolean result value: {}\n", .{check_val});
+                logger.debug("macos_defaults valueToCFValue: CFBoolean result value: {}", .{check_val});
                 return result;
             },
             .float => |f| {

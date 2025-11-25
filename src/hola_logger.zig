@@ -13,7 +13,7 @@ pub fn zig_hola_debug(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mr
     }
 
     const msg = str_ptr[0..@intCast(str_len)];
-    logger.debug("{s}\n", .{msg});
+    logger.debug("{s}", .{msg});
 
     return mruby.mrb_nil_value();
 }
@@ -29,7 +29,7 @@ pub fn zig_hola_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mru
     }
 
     const msg = str_ptr[0..@intCast(str_len)];
-    logger.info("{s}\n", .{msg});
+    logger.info("{s}", .{msg});
 
     return mruby.mrb_nil_value();
 }
@@ -45,7 +45,7 @@ pub fn zig_hola_warn(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mru
     }
 
     const msg = str_ptr[0..@intCast(str_len)];
-    logger.warn("{s}\n", .{msg});
+    logger.warn("{s}", .{msg});
 
     return mruby.mrb_nil_value();
 }
@@ -61,7 +61,7 @@ pub fn zig_hola_error(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mr
     }
 
     const msg = str_ptr[0..@intCast(str_len)];
-    logger.err("{s}\n", .{msg});
+    logger.err("{s}", .{msg});
 
     return mruby.mrb_nil_value();
 }

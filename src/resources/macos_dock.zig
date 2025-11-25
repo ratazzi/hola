@@ -95,7 +95,7 @@ pub const Resource = struct {
 
         var needs_update = false;
 
-        logger.debug("macos_dock: starting configuration check\n", .{});
+        logger.debug("macos_dock: starting configuration check", .{});
 
         // Configure Dock properties using CFPreferences API
         // This ensures CFPreferences cache is updated correctly
@@ -110,13 +110,13 @@ pub const Resource = struct {
                 }
             } else true;
 
-            logger.debug("macos_dock: tilesize requested={d}, current={?}, needs_change={}\n", .{ size, current_size_value, needs_change });
+            logger.debug("macos_dock: tilesize requested={d}, current={?}, needs_change={}", .{ size, current_size_value, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "tilesize", .{ .integer = size });
                 try mutable_dict.set("tilesize", .{ .integer = size });
                 needs_update = true;
-                logger.info("macos_dock: tilesize updated to {d}\n", .{size});
+                logger.info("macos_dock: tilesize updated to {d}", .{size});
             }
         }
 
@@ -131,7 +131,7 @@ pub const Resource = struct {
                 break :blk !std.mem.eql(u8, current_orient, orient);
             } else true;
 
-            logger.debug("macos_dock: orientation requested={s}, current={?}, needs_change={}\n", .{ orient, current_orient_value, needs_change });
+            logger.debug("macos_dock: orientation requested={s}, current={?}, needs_change={}", .{ orient, current_orient_value, needs_change });
 
             if (needs_change) {
                 const orient_copy = try allocator.dupe(u8, orient);
@@ -139,7 +139,7 @@ pub const Resource = struct {
                 try updateDockPrefWithCFPreferences(allocator, "orientation", .{ .string = orient_copy });
                 try mutable_dict.set("orientation", .{ .string = orient_copy });
                 needs_update = true;
-                logger.info("macos_dock: orientation updated to {s}\n", .{orient});
+                logger.info("macos_dock: orientation updated to {s}", .{orient});
             }
         }
 
@@ -154,13 +154,13 @@ pub const Resource = struct {
                 break :blk current_autohide != hide;
             } else true;
 
-            logger.debug("macos_dock: autohide requested={}, current={?}, needs_change={}\n", .{ hide, current_autohide_value, needs_change });
+            logger.debug("macos_dock: autohide requested={}, current={?}, needs_change={}", .{ hide, current_autohide_value, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "autohide", .{ .boolean = hide });
                 try mutable_dict.set("autohide", .{ .boolean = hide });
                 needs_update = true;
-                logger.info("macos_dock: autohide updated to {}\n", .{hide});
+                logger.info("macos_dock: autohide updated to {}", .{hide});
             }
         }
 
@@ -175,13 +175,13 @@ pub const Resource = struct {
                 break :blk current_mag != mag;
             } else true;
 
-            logger.debug("macos_dock: magnification requested={}, current={?}, needs_change={}\n", .{ mag, current_mag_value, needs_change });
+            logger.debug("macos_dock: magnification requested={}, current={?}, needs_change={}", .{ mag, current_mag_value, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "magnification", .{ .boolean = mag });
                 try mutable_dict.set("magnification", .{ .boolean = mag });
                 needs_update = true;
-                logger.info("macos_dock: magnification updated to {}\n", .{mag});
+                logger.info("macos_dock: magnification updated to {}", .{mag});
             }
         }
 
@@ -196,13 +196,13 @@ pub const Resource = struct {
                 break :blk current_size != size;
             } else true;
 
-            logger.debug("macos_dock: largesize requested={d}, current={?}, needs_change={}\n", .{ size, current_size_value, needs_change });
+            logger.debug("macos_dock: largesize requested={d}, current={?}, needs_change={}", .{ size, current_size_value, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "largesize", .{ .integer = size });
                 try mutable_dict.set("largesize", .{ .integer = size });
                 needs_update = true;
-                logger.info("macos_dock: largesize updated to {d}\n", .{size});
+                logger.info("macos_dock: largesize updated to {d}", .{size});
             }
         }
 
@@ -271,7 +271,7 @@ pub const Resource = struct {
                 if (app_entry == null) {
                     app_entry = createAppEntry(allocator, app_path) catch |err| switch (err) {
                         error.AppNotFound => {
-                            logger.warn("macos_dock: app path does not exist, skipping: {s}\n", .{app_path});
+                            logger.warn("macos_dock: app path does not exist, skipping: {s}", .{app_path});
                             continue :app_loop;
                         },
                         else => return err,
@@ -340,11 +340,11 @@ pub const Resource = struct {
             }
         }
 
-        logger.debug("macos_dock: final check needs_update={}, apps_changed={}\n", .{ needs_update, apps_changed });
+        logger.debug("macos_dock: final check needs_update={}, apps_changed={}", .{ needs_update, apps_changed });
 
         // Save if changes were made
         if (needs_update) {
-            logger.info("macos_dock: configuration changed, restarting Dock\n", .{});
+            logger.info("macos_dock: configuration changed, restarting Dock", .{});
 
             // Use CFPreferences API to set values (like dockutil does)
             // This is more reliable than directly modifying plist files
@@ -360,7 +360,7 @@ pub const Resource = struct {
             // For persistent-apps, directly get the CFArray from mutable_dict's cf_dict
             // Only set persistent-apps if apps were actually changed
             if (apps_changed) {
-                logger.debug("macos_dock: setting persistent-apps via CFPreferences\n", .{});
+                logger.debug("macos_dock: setting persistent-apps via CFPreferences", .{});
                 const cf_key = c.CFStringCreateWithCString(null, "persistent-apps", c.kCFStringEncodingUTF8);
                 if (cf_key != null) {
                     defer c.CFRelease(cf_key);
@@ -375,14 +375,14 @@ pub const Resource = struct {
 
             // CRITICAL: Kill Dock BEFORE setting preferences!
             // If we set preferences while Dock is running, it will overwrite them when it exits
-            logger.debug("macos_dock: killing Dock with SIGKILL\n", .{});
+            logger.debug("macos_dock: killing Dock with SIGKILL", .{});
             try killDockWithSignal9();
 
             // Wait for Dock to fully exit
             std.Thread.sleep(500_000_000); // 0.5 seconds
 
             // NOW set the preferences (Dock is not running, so it can't overwrite)
-            logger.debug("macos_dock: synchronizing preferences\n", .{});
+            logger.debug("macos_dock: synchronizing preferences", .{});
             _ = c.CFPreferencesSynchronize(domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
 
             // Verify that the value was actually saved
@@ -398,12 +398,12 @@ pub const Resource = struct {
             // Dock will automatically restart after being killed
             std.Thread.sleep(1_000_000_000); // 1 second
 
-            logger.info("macos_dock: Dock restart completed\n", .{});
+            logger.info("macos_dock: Dock restart completed", .{});
             return true;
         }
 
         // No changes needed, Dock doesn't need to be restarted
-        logger.debug("macos_dock: no changes needed, skipping Dock restart\n", .{});
+        logger.debug("macos_dock: no changes needed, skipping Dock restart", .{});
         return false;
     }
 

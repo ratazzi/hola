@@ -148,16 +148,24 @@ pub const Logger = struct {
         const seconds: i64 = @mod(seconds_today, 60);
 
         const prefix_str = level.prefix();
+
+        // Format timestamp on stack
+        var time_buf: [32]u8 = undefined;
+        const time_str = try std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}", .{
+            @abs(hours),
+            @abs(minutes),
+            @abs(seconds),
+            @abs(microseconds),
+        });
+
+        // Format message with allocation
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(msg);
 
-        // Format: [HH:MM:SS.uuuuuu] [LEVEL] message
-        var time_buf: [32]u8 = undefined;
-        const time_str = try std.fmt.bufPrint(&time_buf, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}", .{ @abs(hours), @abs(minutes), @abs(seconds), @abs(microseconds) });
-
+        // Format full message: [HH:MM:SS.uuuuuu] [LEVEL] message\n
         const full_msg = try std.fmt.allocPrint(
             self.allocator,
-            "[{s}] {s}{s}",
+            "[{s}] {s}{s}\n",
             .{ time_str, prefix_str, msg },
         );
         defer self.allocator.free(full_msg);
@@ -174,19 +182,18 @@ pub const Logger = struct {
             break :blk if (code == 0) Level.info else Level.err;
         } else Level.info;
 
-        const exit_msg = if (exit_code) |code| blk: {
-            const msg = try std.fmt.allocPrint(self.allocator, " (exit: {d})", .{code});
-            break :blk msg;
-        } else try self.allocator.dupe(u8, "");
-        defer self.allocator.free(exit_msg);
-
-        try self.log(level, "Command: {s}{s}\n", .{ command, exit_msg });
+        // Log command with exit code
+        if (exit_code) |code| {
+            try self.log(level, "Command: {s} (exit: {d})", .{ command, code });
+        } else {
+            try self.log(level, "Command: {s}", .{command});
+        }
 
         // Log stdout if present
         if (stdout.len > 0) {
             const stdout_trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
             if (stdout_trimmed.len > 0) {
-                try self.log(.debug, "  stdout: {s}\n", .{stdout_trimmed});
+                try self.log(.debug, "  stdout: {s}", .{stdout_trimmed});
             }
         }
 
@@ -194,7 +201,7 @@ pub const Logger = struct {
         if (stderr.len > 0) {
             const stderr_trimmed = std.mem.trim(u8, stderr, &std.ascii.whitespace);
             if (stderr_trimmed.len > 0) {
-                try self.log(.warn, "  stderr: {s}\n", .{stderr_trimmed});
+                try self.log(.warn, "  stderr: {s}", .{stderr_trimmed});
             }
         }
     }

@@ -87,6 +87,6 @@ pub fn installPackages(
         );
         defer allocator.free(warning_msg);
         try display.showInfo(warning_msg);
-        logger.warn("apt-get install failed: {}\n", .{err});
+        logger.warn("apt-get install failed: {}", .{err});
     };
 }

@@ -3,6 +3,7 @@ const modern_display = @import("modern_provision_display.zig");
 const http_utils = @import("http_utils.zig");
 const base_resource = @import("base_resource.zig");
 const http_client = @import("http_client.zig");
+const logger = @import("logger.zig");
 
 // Thread-local storage for current DownloadManager
 threadlocal var current_manager: ?*DownloadManager = null;
@@ -279,7 +280,7 @@ pub const DownloadManager = struct {
 
         if (task.headers) |headers_json| {
             const parsed = std.json.parseFromSlice(std.json.Value, allocator, headers_json, .{}) catch |err| {
-                std.log.warn("Failed to parse headers JSON: {}", .{err});
+                logger.warn("Failed to parse headers JSON: {}", .{err});
                 return err;
             };
             defer parsed.deinit();

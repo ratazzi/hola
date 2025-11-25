@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const http_utils = @import("../http_utils.zig");
 const download_manager = @import("../download_manager.zig");
+const logger = @import("../logger.zig");
 const json_helpers = @import("../json.zig");
 
 /// Remote file resource data structure
@@ -162,7 +163,7 @@ pub const Resource = struct {
 
             // Apply file attributes (mode, owner, group)
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
-                std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+                logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
             };
 
             // Clean up the temp path string
@@ -181,7 +182,7 @@ pub const Resource = struct {
 
             // If server reported not modified but we have no local file, fall back to unconditional download
             if (!outcome.downloaded and !local_exists) {
-                std.log.debug("Server returned not_modified but local file doesn't exist, retrying without conditions", .{});
+                logger.debug("Server returned not_modified but local file doesn't exist, retrying without conditions", .{});
                 const retry = try self.downloadDirect(allocator, null, null);
                 if (!retry.downloaded) {
                     return error.HttpError;
@@ -197,7 +198,7 @@ pub const Resource = struct {
 
             // Apply file attributes (mode, owner, group)
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
-                std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+                logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
             };
 
             // Verify checksum if provided
@@ -376,7 +377,7 @@ pub const Resource = struct {
 
         // Apply file attributes (mode, owner, group)
         base.applyFileAttributes(self.path, self.attrs) catch |err| {
-            std.log.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+            logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
         };
 
         const etag_copy: ?[]const u8 = if (download_result.etag) |etag| try allocator.dupe(u8, etag) else null;

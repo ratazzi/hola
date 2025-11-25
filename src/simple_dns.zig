@@ -1,4 +1,5 @@
 const std = @import("std");
+const logger = @import("logger.zig");
 
 /// Simple DNS query implementation for A and AAAA records
 /// This is a minimal implementation to support custom DNS servers
@@ -29,7 +30,7 @@ pub fn query(
 ) !DNSResult {
     // First, resolve the nameserver address if it's a hostname
     const ns_addr = resolveNameserver(allocator, nameserver) catch |err| {
-        std.log.warn("Failed to resolve nameserver {s}: {}", .{ nameserver, err });
+        logger.warn("Failed to resolve nameserver {s}: {}", .{ nameserver, err });
         return err;
     };
     defer allocator.free(ns_addr);

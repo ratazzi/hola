@@ -129,13 +129,13 @@ pub const Resource = struct {
             // Get user info if user is specified
             if (ctx.user) |user| {
                 const username_z = std.posix.toPosixPath(user) catch |err| {
-                    std.debug.print("[execute] failed to convert username '{s}': {}\n", .{ user, err });
+                    logger.err("[execute] failed to convert username '{s}': {}", .{ user, err });
                     return error.UserInfoFailed;
                 };
 
                 const pwd = c.getpwnam(&username_z);
                 if (pwd == null) {
-                    std.debug.print("[execute] user '{s}' not found\n", .{user});
+                    logger.err("[execute] user '{s}' not found", .{user});
                     return error.UserNotFound;
                 }
 
@@ -146,13 +146,13 @@ pub const Resource = struct {
             // Override with group if specified
             if (ctx.group) |group| {
                 const groupname_z = std.posix.toPosixPath(group) catch |err| {
-                    std.debug.print("[execute] failed to convert groupname '{s}': {}\n", .{ group, err });
+                    logger.err("[execute] failed to convert groupname '{s}': {}", .{ group, err });
                     return error.GroupInfoFailed;
                 };
 
                 const grp = c.getgrnam(&groupname_z);
                 if (grp == null) {
-                    std.debug.print("[execute] group '{s}' not found\n", .{group});
+                    logger.err("[execute] group '{s}' not found", .{group});
                     return error.GroupNotFound;
                 }
 
@@ -228,14 +228,14 @@ pub const Resource = struct {
         if (stdout.len > 0) {
             const stdout_trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
             if (stdout_trimmed.len > 0) {
-                logger.debug("  stdout: {s}\n", .{stdout_trimmed});
+                logger.debug("  stdout: {s}", .{stdout_trimmed});
             }
         }
 
         if (stderr.len > 0) {
             const stderr_trimmed = std.mem.trim(u8, stderr, &std.ascii.whitespace);
             if (stderr_trimmed.len > 0) {
-                logger.warn("  stderr: {s}\n", .{stderr_trimmed});
+                logger.warn("  stderr: {s}", .{stderr_trimmed});
             }
         }
 
@@ -256,25 +256,23 @@ pub const Resource = struct {
         switch (term) {
             .Exited => |code| {
                 if (code != 0) {
-                    std.debug.print("[execute] command exited with code {d}\n", .{code});
+                    logger.err("[execute] command exited with code {d}", .{code});
                     return error.CommandFailed;
                 }
             },
             .Signal => |sig| {
-                std.debug.print("[execute] command killed by signal {d}\n", .{sig});
+                logger.err("[execute] command killed by signal {d}", .{sig});
                 return error.CommandKilled;
             },
             .Stopped => |sig| {
-                std.debug.print("[execute] command stopped by signal {d}\n", .{sig});
+                logger.err("[execute] command stopped by signal {d}", .{sig});
                 return error.CommandStopped;
             },
             .Unknown => |unknown_status| {
-                std.debug.print("[execute] command exited with unknown status {d}\n", .{unknown_status});
+                logger.err("[execute] command exited with unknown status {d}", .{unknown_status});
                 return error.CommandFailed;
             },
         }
-
-        // std.debug.print("[execute] command completed successfully\n", .{});
     }
 };
 

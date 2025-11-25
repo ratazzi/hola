@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const builtin = @import("builtin");
+const logger = @import("../logger.zig");
 
 /// Systemd unit resource data structure
 pub const Resource = struct {
@@ -228,9 +229,9 @@ pub const Resource = struct {
         switch (term) {
             .Exited => |code| {
                 if (code != 0) {
-                    std.debug.print("[systemd_unit] systemctl {s} failed with code {d}\n", .{ args[0], code });
+                    logger.debug("[systemd_unit] systemctl {s} failed with code {d}\n", .{ args[0], code });
                     if (stderr.len > 0) {
-                        std.debug.print("  stderr: {s}\n", .{stderr});
+                        logger.err("  stderr: {s}\n", .{stderr});
                     }
                     return error.SystemctlFailed;
                 }

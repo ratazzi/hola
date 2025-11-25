@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
+const logger = @import("../logger.zig");
 
 /// Directory resource data structure
 pub const Resource = struct {
@@ -110,7 +111,7 @@ pub const Resource = struct {
             // Apply owner/group if specified (without mode, as we handled it above)
             if (self.attrs.owner != null or self.attrs.group != null) {
                 base.setFileOwnerAndGroup(self.path, self.attrs.owner, self.attrs.group) catch |err| {
-                    std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+                    logger.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
                 };
                 needs_update = true;
             }
@@ -140,7 +141,7 @@ pub const Resource = struct {
         // Apply owner/group if specified
         if (self.attrs.owner != null or self.attrs.group != null) {
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
-                std.log.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
+                logger.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
             };
         }
 

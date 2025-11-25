@@ -358,7 +358,7 @@ fn installBrewPackages(allocator: std.mem.Allocator, _: []const u8, display: *mo
         );
         defer allocator.free(warning_msg);
         try display.showInfo(warning_msg);
-        logger.warn("brew bundle --global failed: {}\n", .{err});
+        logger.warn("brew bundle --global failed: {}", .{err});
     };
 }
 
@@ -580,7 +580,7 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
     defer parser.deinit();
 
     const parsed = parser.parseString(content) catch |err| {
-        std.log.warn("Failed to parse {s}: {s}, using defaults", .{ config_path, @errorName(err) });
+        logger.warn("Failed to parse {s}: {s}, using defaults", .{ config_path, @errorName(err) });
         return null;
     };
     defer parsed.deinit();
