@@ -972,7 +972,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
 
     // Usage section (Bun style with colon on same line)
     help_formatter.HelpFormatter.usageHeader();
-    help_formatter.HelpFormatter.printUsage("hola", "<command> [...flags>");
+    help_formatter.HelpFormatter.printUsage("hola", "<command> [...flags]");
     help_formatter.HelpFormatter.newline();
 
     // Commands section with table alignment
