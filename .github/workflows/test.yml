@@ -1,0 +1,74 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: jdx/mise-action@v2
+
+      - name: Check formatting
+        run: mise lint
+
+  test:
+    name: Run Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install libgit2 mruby openssl@3
+
+      - name: Setup Zig
+        uses: jdx/mise-action@v2
+
+      - name: Run tests
+        run: |
+          MRUBY_PATH=$(brew --prefix mruby)
+          echo "Running tests with mruby at: $MRUBY_PATH"
+          zig build test -Dmruby_path="$MRUBY_PATH"
+
+      - name: Build (sanity check)
+        run: |
+          MRUBY_PATH=$(brew --prefix mruby)
+          echo "Building to verify compilation"
+          zig build -Dmruby_path="$MRUBY_PATH"
+
+  build-check:
+    name: Build Check (${{ matrix.target.name }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - name: macOS
+            triple: aarch64-macos
+          - name: Linux
+            triple: x86_64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install libgit2 mruby openssl@3
+
+      - name: Setup Zig
+        uses: jdx/mise-action@v2
+
+      - name: Build for ${{ matrix.target.name }}
+        run: |
+          MRUBY_PATH=$(brew --prefix mruby)
+          echo "Building for target: ${{ matrix.target.triple }}"
+          zig build -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }}
+
+      - name: Verify binary
+        run: |
+          ls -lh zig-out/bin/
+          file zig-out/bin/hola-*
