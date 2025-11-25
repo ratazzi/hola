@@ -81,6 +81,11 @@ pub fn build(b: *std.Build) !void {
 
     // Create build options for version info
     const options = b.addOptions();
+
+    // Add nightly build option
+    const is_nightly = b.option(bool, "nightly", "Build as nightly version") orelse false;
+    options.addOption(bool, "is_nightly", is_nightly);
+
     // Read version from build.zig.zon by parsing the file
     const version = blk: {
         const build_zig_zon = @embedFile("build.zig.zon") ++ "";

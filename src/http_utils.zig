@@ -1,5 +1,6 @@
 const std = @import("std");
 const math = std.math;
+const http_client = @import("http_client.zig");
 
 /// Format byte size using binary units (KiB, MiB, GiB, TiB) with configurable decimals
 /// Uses logarithmic calculation to elegantly determine the appropriate unit
@@ -153,6 +154,11 @@ pub fn downloadFile(allocator: std.mem.Allocator, url: []const u8, dest_path: []
         .extra_headers = headers_list.items,
     });
     errdefer req.deinit();
+
+    // Set User-Agent header
+    const user_agent = try http_client.getUserAgent(allocator);
+    defer allocator.free(user_agent);
+    req.headers.user_agent = .{ .override = user_agent };
 
     // Send request
     try req.sendBodiless();

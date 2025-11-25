@@ -2,6 +2,7 @@ const std = @import("std");
 const modern_display = @import("modern_provision_display.zig");
 const http_utils = @import("http_utils.zig");
 const base_resource = @import("base_resource.zig");
+const http_client = @import("http_client.zig");
 
 // Thread-local storage for current DownloadManager
 threadlocal var current_manager: ?*DownloadManager = null;
@@ -281,6 +282,11 @@ pub const DownloadManager = struct {
             .extra_headers = headers_list.items,
         });
         defer req.deinit();
+
+        // Set User-Agent header
+        const user_agent = try http_client.getUserAgent(allocator);
+        defer allocator.free(user_agent);
+        req.headers.user_agent = .{ .override = user_agent };
 
         try req.sendBodiless();
 

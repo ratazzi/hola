@@ -5,9 +5,10 @@ const build_options = @import("build_options");
 
 /// Version string for User-Agent from build.zig.zon
 const VERSION = build_options.version;
+const IS_NIGHTLY = build_options.is_nightly;
 
 /// Generate User-Agent string: Hola/version (platform; arch; zig version)
-fn getUserAgent(allocator: std.mem.Allocator) ![]const u8 {
+pub fn getUserAgent(allocator: std.mem.Allocator) ![]const u8 {
     const platform = switch (builtin.os.tag) {
         .macos => "macOS",
         .linux => "Linux",
@@ -22,9 +23,11 @@ fn getUserAgent(allocator: std.mem.Allocator) ![]const u8 {
     };
 
     const zig_version = builtin.zig_version_string;
+    const nightly_suffix = if (IS_NIGHTLY) "-nightly" else "";
 
-    return std.fmt.allocPrint(allocator, "Hola/{s} ({s}; {s}; Zig {s})", .{
+    return std.fmt.allocPrint(allocator, "Hola/{s}{s} ({s}; {s}; Zig {s})", .{
         VERSION,
+        nightly_suffix,
         platform,
         arch,
         zig_version,

@@ -64,7 +64,7 @@ jobs:
           echo "Using mruby path: $MRUBY_PATH"
           echo "Building for target: ${{ matrix.target.triple }}"
 
-          mise build -- -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }}
+          mise build -- -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }} -Dnightly=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
