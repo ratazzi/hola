@@ -12,6 +12,7 @@ const toml = @import("toml");
 const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
 const node_info = @import("node_info.zig");
+const build_options = @import("build_options");
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
@@ -957,8 +958,17 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         help_formatter.HelpFormatter.newline();
     }
 
-    // Header with branding (Bun style)
-    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise.toml + dotfiles = your dev environment\n");
+    // Header with branding and version info (Bun style)
+    const ansi_constants = @import("ansi_constants.zig");
+    const version_info = std.fmt.allocPrint(
+        gpa,
+        "Brewfile + mise.toml + dotfiles = your dev environment {s}({s}+{s}){s}",
+        .{ ansi_constants.ANSI.DIM, build_options.version, build_options.git_commit, ansi_constants.ANSI.RESET },
+    ) catch "Brewfile + mise.toml + dotfiles = your dev environment";
+    defer if (!std.mem.eql(u8, version_info, "Brewfile + mise.toml + dotfiles = your dev environment")) gpa.free(version_info);
+
+    help_formatter.HelpFormatter.printHeader("Hola", version_info);
+    help_formatter.HelpFormatter.newline();
 
     // Usage section (Bun style with colon on same line)
     help_formatter.HelpFormatter.usageHeader();

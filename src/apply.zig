@@ -9,6 +9,7 @@ const logger = @import("logger.zig");
 const notifications = @import("notifications.zig");
 const help_formatter = @import("help_formatter.zig");
 const command_runner = @import("command_runner.zig");
+const build_options = @import("build_options");
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
@@ -135,8 +136,15 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
     var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
     defer display.deinit();
 
-    // Print banner using help formatter
-    help_formatter.HelpFormatter.printHeader("Hola", "Brewfile + mise.toml + dotfiles = your dev environment");
+    // Print banner with version info using help formatter
+    const ansi_constants = @import("ansi_constants.zig");
+    var version_buf: [256]u8 = undefined;
+    const version_info = std.fmt.bufPrint(
+        &version_buf,
+        "Brewfile + mise.toml + dotfiles = your dev environment {s}({s}+{s}){s}",
+        .{ ansi_constants.ANSI.DIM, build_options.version, build_options.git_commit, ansi_constants.ANSI.RESET },
+    ) catch "Brewfile + mise.toml + dotfiles = your dev environment";
+    help_formatter.HelpFormatter.printHeader("Hola", version_info);
 
     // Phase 1: Link dotfiles
     try linkDotfiles(allocator, opts.config_root, opts.dry_run, &display);

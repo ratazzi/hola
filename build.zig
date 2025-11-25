@@ -102,6 +102,15 @@ pub fn build(b: *std.Build) !void {
     };
     options.addOption([]const u8, "version", version);
 
+    // Get git commit hash
+    const git_commit = blk: {
+        const result = b.run(&.{ "git", "rev-parse", "--short=7", "HEAD" });
+        const commit = std.mem.trim(u8, result, &std.ascii.whitespace);
+        if (commit.len == 0) break :blk "unknown";
+        break :blk b.dupe(commit);
+    };
+    options.addOption([]const u8, "git_commit", git_commit);
+
     // Define the main executable
     const exe = b.addExecutable(.{
         .name = exe_name,
