@@ -3,13 +3,13 @@
 > **Brewfile + mise.toml + dotfiles = Done**
 
 Set up your Mac in minutes.
-Hola is a zero-dependency configuration manager written in Zig. It installs Homebrew packages, sets up dotfiles, and configures macOS defaults—all from a single command.
+Hola is a single-binary configuration manager written in Zig. It installs Homebrew packages, sets up dotfiles, and configures macOS defaults—all from a single command.
 
 ## What You Need
 
 Create `username/dotfiles` on GitHub with three simple files:
 
-### 1. 🍺 **Brewfile** (Homebrew's native format)
+### 1. 🍺 **~/.Brewfile** (Homebrew's native format)
 
 ```ruby
 brew "tmux"
@@ -31,7 +31,7 @@ python = "3.14"
 
 Lock your tool versions. Never drift.
 
-### 3. 📂 **dotfiles/** (your dotfiles)
+### 3. 📂 **~/.dotfiles/** (your dotfiles)
 
 ```
 dotfiles/.zshrc      → ~/.zshrc
@@ -65,7 +65,7 @@ hola apply
 
 ---
 
-## Advanced: resources.rb (Optional)
+## Advanced: ~/.config/hola/provision.rb (Optional)
 
 **90% of users only need Brewfile + mise.toml + dotfiles/.**
 
