@@ -73,6 +73,10 @@ pub const Resource = struct {
         try base.ensureParentDir(self.path);
         const is_abs = std.fs.path.isAbsolute(self.path);
 
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
         // Check if file exists and content matches
         const file_exists = blk: {
             if (is_abs) {
@@ -92,6 +96,7 @@ pub const Resource = struct {
         var existing_content: ?[]u8 = null;
         defer if (existing_content) |c| std.heap.c_allocator.free(c);
 
+        var current_mode: ?u32 = null;
         if (file_exists) {
             // Read existing file and compare content
             const existing_file = if (is_abs)
@@ -102,17 +107,27 @@ pub const Resource = struct {
 
             existing_content = try existing_file.readToEndAlloc(std.heap.c_allocator, std.math.maxInt(usize));
 
+            if (self.attrs.mode) |_| {
+                const stat = try existing_file.stat();
+                current_mode = stat.mode & 0o777;
+            }
+
             if (std.mem.eql(u8, existing_content.?, self.content)) {
                 // Content matches, check attributes if specified
-                if (self.attrs.mode) |m| {
-                    const stat = try existing_file.stat();
-                    const current_mode = stat.mode & 0o777;
-                    if (current_mode == m) {
-                        return false; // File exists with same content and mode
-                    }
-                } else {
-                    return false; // File exists with same content
+                const mode_matches = if (self.attrs.mode) |m|
+                    current_mode != null and current_mode.? == m
+                else
+                    true;
+
+                if (mode_matches) {
+                    return false; // File exists with same content and mode
                 }
+
+                // Only mode differs; fix attributes without rewriting
+                base.applyFileAttributes(self.path, self.attrs) catch |err| {
+                    logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+                };
+                return true;
             }
         }
 
@@ -138,27 +153,49 @@ pub const Resource = struct {
             }
         }
 
-        var file = if (is_abs)
-            try std.fs.createFileAbsolute(self.path, .{ .truncate = true })
+        const dir_path = std.fs.path.dirname(self.path);
+        const timestamp = std.time.nanoTimestamp();
+        const pid = std.c.getpid();
+        const temp_name = try std.fmt.allocPrint(allocator, ".hola-tmp-{d}-{d}", .{ timestamp, pid });
+        const temp_path = if (dir_path) |d|
+            try std.fs.path.join(allocator, &.{ d, temp_name })
         else
-            try std.fs.cwd().createFile(self.path, .{ .truncate = true });
+            temp_name;
 
-        try file.writeAll(self.content);
+        var temp_file = if (is_abs)
+            try std.fs.createFileAbsolute(temp_path, .{ .truncate = true, .exclusive = true })
+        else
+            try std.fs.cwd().createFile(temp_path, .{ .truncate = true, .exclusive = true });
 
-        // Apply file mode if specified
-        if (self.attrs.mode) |m| {
-            std.posix.fchmod(file.handle, @as(std.posix.mode_t, @intCast(m))) catch {};
+        var temp_cleanup = true;
+        var temp_file_closed = false;
+        defer if (temp_cleanup) {
+            if (!temp_file_closed) temp_file.close();
+            if (is_abs) {
+                std.fs.deleteFileAbsolute(temp_path) catch {};
+            } else {
+                std.fs.cwd().deleteFile(temp_path) catch {};
+            }
+        };
+
+        try temp_file.writeAll(self.content);
+        try temp_file.sync();
+        temp_file.close();
+        temp_file_closed = true;
+
+        if (is_abs) {
+            try std.fs.renameAbsolute(temp_path, self.path);
+        } else {
+            try std.fs.cwd().rename(temp_path, self.path);
         }
 
-        // Close file before changing ownership (needed for some systems)
-        file.close();
+        // Temp file has been moved; avoid double cleanup
+        temp_cleanup = false;
 
-        // Apply owner/group after file is closed
-        if (self.attrs.owner != null or self.attrs.group != null) {
-            base.applyFileAttributes(self.path, self.attrs) catch |err| {
-                logger.warn("Failed to set owner/group for {s}: {}", .{ self.path, err });
-            };
-        }
+        // Apply file attributes after atomic rename
+        base.applyFileAttributes(self.path, self.attrs) catch |err| {
+            logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+        };
 
         return true; // File was created or updated
     }
