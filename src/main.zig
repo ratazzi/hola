@@ -1022,7 +1022,7 @@ fn runProvisionCommand(allocator: std.mem.Allocator, iter: *std.process.ArgItera
 
     if (res.args.help != 0) return printProvisionHelp(null);
 
-    const script_path = res.positionals[0] orelse return printProvisionHelp("Missing provision file path.");
+    const script_path_or_url = res.positionals[0] orelse return printProvisionHelp("Missing provision file path or URL.");
 
     // Determine output mode
     var use_pretty_output = true; // Default to pretty
@@ -1037,6 +1037,68 @@ fn runProvisionCommand(allocator: std.mem.Allocator, iter: *std.process.ArgItera
             return error.InvalidOutputMode;
         }
     }
+
+    // Check if input is a URL
+    const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
+        std.mem.startsWith(u8, script_path_or_url, "https://");
+
+    var temp_file_path: ?[]const u8 = null;
+    defer if (temp_file_path) |path| {
+        std.fs.deleteFileAbsolute(path) catch {};
+        allocator.free(path);
+    };
+
+    const script_path = if (is_url) blk: {
+        // Parse URL to check for Basic Auth
+        const uri = std.Uri.parse(script_path_or_url) catch |err| {
+            std.debug.print("Error: Invalid URL: {}\n", .{err});
+            return error.InvalidUrl;
+        };
+
+        // Build display URL (mask password if present)
+        const display_url = if (uri.password != null) display_blk: {
+            const user_part = if (uri.user) |u| u.percent_encoded else "";
+            const host_part = if (uri.host) |h| h.percent_encoded else "";
+            break :display_blk try std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
+                uri.scheme,
+                user_part,
+                host_part,
+                uri.path.percent_encoded,
+            });
+        } else script_path_or_url;
+        defer if (uri.password != null) allocator.free(display_url);
+
+        std.debug.print("[fetch] Downloading provision script from {s}\n", .{display_url});
+
+        // Get system temporary directory ($TMPDIR or fallback to /tmp)
+        const temp_dir = std.process.getEnvVarOwned(allocator, "TMPDIR") catch
+            try allocator.dupe(u8, "/tmp");
+        defer allocator.free(temp_dir);
+
+        // Create temporary file with unique name
+        const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}.rb", .{ temp_dir, std.time.timestamp() });
+        temp_file_path = temp_file;
+
+        // Use http_utils to download
+        const http_utils = @import("http_utils.zig");
+        const result = http_utils.downloadFile(allocator, script_path_or_url, temp_file, .{}) catch |err| {
+            std.debug.print("\nError: Failed to download provision script: {}\n", .{err});
+            std.debug.print("URL: {s}\n", .{display_url});
+            std.debug.print("\nPossible reasons:\n", .{});
+            std.debug.print("  • URL is not accessible\n", .{});
+            std.debug.print("  • Network connectivity issues\n", .{});
+            std.debug.print("  • Invalid credentials (if using Basic Auth)\n", .{});
+            std.debug.print("  • Server returned an error\n", .{});
+            return error.DownloadFailed;
+        };
+
+        // Clean up result
+        if (result.etag) |etag| allocator.free(etag);
+        if (result.last_modified) |lm| allocator.free(lm);
+
+        std.debug.print("[fetch] Downloaded to {s}\n", .{temp_file});
+        break :blk temp_file;
+    } else script_path_or_url;
 
     provision.run(allocator, .{
         .script_path = script_path,
@@ -1054,28 +1116,45 @@ fn printProvisionHelp(reason: ?[]const u8) !void {
     }
     try out.writeAll(
         \\provision
-        \\  hola provision [OPTIONS] <file>
+        \\  hola provision [OPTIONS] <file-or-url>
         \\
         \\Run a provisioning script that defines infrastructure resources.
+        \\Supports both local files and remote URLs.
         \\
         \\Options:
         \\  -o, --output MODE    Output mode: pretty (default) or plain
         \\
-        \\Example
+        \\Examples
+        \\  # Local file
         \\  hola provision provision.rb
+        \\  hola provision ~/.config/hola/provision.rb
+        \\
+        \\  # Remote URL
+        \\  hola provision https://example.com/provision.rb
+        \\  hola provision https://username:password@example.com/provision.rb
+        \\  hola provision https://raw.githubusercontent.com/user/dotfiles/master/.config/hola/provision.rb
+        \\
+        \\  # With output mode
         \\  hola provision --output plain provision.rb
         \\
         \\Ruby DSL:
         \\  file "/tmp/config" do
-        \\    content "hello\\n"
+        \\    content "hello\n"
         \\    mode "0644"
-        \\    notifies "execute[reload]", timing: :delayed
+        \\    notifies :run, "execute[reload]", :delayed
         \\  end
         \\
         \\  execute "deploy" do
         \\    command "bash deploy.sh"
         \\    cwd "/opt/app"
         \\    only_if { File.exist?("/opt/app") }
+        \\  end
+        \\
+        \\  # Subscribes (alternative to notifies)
+        \\  execute "restart" do
+        \\    command "systemctl restart app"
+        \\    action :nothing
+        \\    subscribes :run, "file[/etc/app/config]", :delayed
         \\  end
         \\
     );
