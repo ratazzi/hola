@@ -91,22 +91,23 @@ fn addResourceWithMetadata(
     // If nothing was added, just return the result from the resource handler
     if (tmp_resources.items.len == 0) return result;
 
-    const res = tmp_resources.items[0];
+    // Process all resources in tmp_resources (some resources like systemd_unit create multiple)
+    for (tmp_resources.items) |res| {
+        // Build ResourceId
+        const id = build_id(g_allocator, &res) catch return mruby.mrb_nil_value();
 
-    // Build ResourceId
-    const id = build_id(g_allocator, &res) catch return mruby.mrb_nil_value();
+        // Copy notifications from common props into metadata
+        const notifications = cloneNotificationsFromCommon(g_allocator, &res.common) catch return mruby.mrb_nil_value();
 
-    // Copy notifications from common props into metadata
-    const notifications = cloneNotificationsFromCommon(g_allocator, &res.common) catch return mruby.mrb_nil_value();
+        // Wrap into unified Resource enum
+        const res_with_meta = resources.ResourceWithMetadata{
+            .resource = wrap(res),
+            .id = id,
+            .notifications = notifications,
+        };
 
-    // Wrap into unified Resource enum
-    const res_with_meta = resources.ResourceWithMetadata{
-        .resource = wrap(res),
-        .id = id,
-        .notifications = notifications,
-    };
-
-    g_resources.append(g_allocator, res_with_meta) catch return mruby.mrb_nil_value();
+        g_resources.append(g_allocator, res_with_meta) catch return mruby.mrb_nil_value();
+    }
 
     return result;
 }

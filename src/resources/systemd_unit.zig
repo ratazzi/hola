@@ -289,9 +289,12 @@ pub fn zigAddResource(
     // Parse actions array
     const actions_len = mruby.mrb_ary_len(mrb, actions_val);
 
+    logger.debug("[systemd_unit] actions_len = {d}", .{actions_len});
+
     // For each action, create a separate resource
-    var i: usize = 0;
+    var i: mruby.mrb_int = 0;
     while (i < actions_len) : (i += 1) {
+        logger.debug("[systemd_unit] processing action {d}/{d}", .{ i + 1, actions_len });
         const action_val = mruby.mrb_ary_ref(mrb, actions_val, @intCast(i));
         const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
         const action_str = std.mem.span(action_cstr);
