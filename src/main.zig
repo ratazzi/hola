@@ -68,11 +68,17 @@ const applescript_parsers = .{
 const apply_params = clap.parseParamsComptime(
     \\-h, --help                 Show help for apply
     \\--dotfiles <dotfiles_dir>  Dotfiles repository location (default ~/.dotfiles)
+    \\--github <repo>            Clone from GitHub via SSH (format: username/repo)
+    \\--repo <url>               Clone from full repository URL (any protocol)
+    \\--branch <name>            Git branch to checkout (default: repository's default branch)
     \\--dry-run                  Show what would be done without actually doing it
     \\
 );
 const apply_parsers = .{
     .dotfiles_dir = clap.parsers.string,
+    .repo = clap.parsers.string,
+    .url = clap.parsers.string,
+    .name = clap.parsers.string,
 };
 
 const provision_params = clap.parseParamsComptime(
@@ -769,12 +775,166 @@ fn runApplyCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator)
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
+    const dry_run = @field(res.args, "dry-run") != 0;
+
+    // Check if both --github and --repo are specified
+    if (res.args.github != null and res.args.repo != null) {
+        std.debug.print("Error: Cannot specify both --github and --repo\n", .{});
+        std.debug.print("Use --github for GitHub repos (username/repo format)\n", .{});
+        std.debug.print("Use --repo for full URLs (any git URL)\n", .{});
+        return error.ConflictingOptions;
+    }
+
+    // Handle --github flag: clone from GitHub via SSH
+    if (res.args.github) |github_repo| {
+        // Validate format (should be username/repo)
+        if (std.mem.indexOfScalar(u8, github_repo, '/') == null) {
+            std.debug.print("Error: --github must be in format 'username/repo'\n", .{});
+            std.debug.print("Example: --github user/dotfiles\n", .{});
+            return error.InvalidGithubFormat;
+        }
+
+        // Determine clone destination: use --dotfiles if specified, otherwise ~/.dotfiles
+        const clone_dest = if (res.args.dotfiles) |dotfiles_path|
+            try resolvePathForLink(allocator, dotfiles_path, home)
+        else
+            try std.fs.path.join(allocator, &.{ home, ".dotfiles" });
+        defer allocator.free(clone_dest);
+
+        // Check if destination already exists and is not empty
+        if (std.fs.openDirAbsolute(clone_dest, .{ .iterate = true })) |dir_handle| {
+            var dir = dir_handle;
+            defer dir.close();
+
+            var iter_dir = dir.iterate();
+            if (try iter_dir.next()) |_| {
+                // Directory exists and has contents
+                std.debug.print("Warning: {s} already exists and is not empty\n", .{clone_dest});
+                std.debug.print("Please remove it first or use --dotfiles to specify a different location\n", .{});
+                return error.DotfilesAlreadyExists;
+            }
+        } else |_| {
+            // Directory doesn't exist, we'll clone
+        }
+
+        if (!dry_run) {
+            // Build GitHub URL (using SSH format: git@github.com:user/repo.git)
+            const github_url = try std.fmt.allocPrint(allocator, "git@github.com:{s}.git", .{github_repo});
+            defer allocator.free(github_url);
+
+            std.debug.print("[clone] {s} -> {s}\n", .{ github_url, clone_dest });
+
+            // Clone using our git client
+            var client = try git.Client.init();
+            defer client.deinit();
+
+            var clone_options: git.CloneOptions = .{};
+            if (res.args.branch) |branch_name| {
+                clone_options.branch = branch_name;
+            }
+
+            client.clone(allocator, github_url, clone_dest, clone_options) catch |err| {
+                std.debug.print("\n\x1b[31mError: Failed to clone repository\x1b[0m\n", .{});
+                std.debug.print("Repository: {s}\n", .{github_url});
+                std.debug.print("Destination: {s}\n", .{clone_dest});
+                std.debug.print("\nPossible reasons:\n", .{});
+                std.debug.print("  • Repository does not exist or is private\n", .{});
+                std.debug.print("  • SSH key not set up or not added to ssh-agent\n", .{});
+                std.debug.print("  • SSH key not added to GitHub account\n", .{});
+                std.debug.print("  • Network connectivity issues\n", .{});
+                if (res.args.branch) |branch| {
+                    std.debug.print("  • Branch '{s}' does not exist\n", .{branch});
+                }
+                std.debug.print("\nTo set up SSH authentication:\n", .{});
+                std.debug.print("  1. Generate SSH key: ssh-keygen -t ed25519 -C \"your@email.com\"\n", .{});
+                std.debug.print("  2. Add to ssh-agent: ssh-add ~/.ssh/id_ed25519\n", .{});
+                std.debug.print("  3. Add public key to GitHub: https://github.com/settings/keys\n", .{});
+                std.debug.print("  4. Test connection: ssh -T git@github.com\n", .{});
+                std.debug.print("\nCheck the log file for detailed error information.\n", .{});
+                if (logger.getLogPath()) |log_path| {
+                    std.debug.print("Log file: {s}\n", .{log_path});
+                }
+                return err;
+            };
+            std.debug.print("[done] Cloned {s}\n\n", .{github_repo});
+        } else {
+            // Build GitHub URL for dry-run display
+            const github_url = try std.fmt.allocPrint(allocator, "git@github.com:{s}.git", .{github_repo});
+            defer allocator.free(github_url);
+            std.debug.print("[dry-run] Would clone {s} to {s}\n", .{ github_url, clone_dest });
+        }
+    }
+
+    // Handle --repo flag: clone from full repository URL
+    if (res.args.repo) |repo_url| {
+        // Determine clone destination: use --dotfiles if specified, otherwise ~/.dotfiles
+        const clone_dest = if (res.args.dotfiles) |dotfiles_path|
+            try resolvePathForLink(allocator, dotfiles_path, home)
+        else
+            try std.fs.path.join(allocator, &.{ home, ".dotfiles" });
+        defer allocator.free(clone_dest);
+
+        // Check if destination already exists and is not empty
+        if (std.fs.openDirAbsolute(clone_dest, .{ .iterate = true })) |dir_handle| {
+            var dir = dir_handle;
+            defer dir.close();
+
+            var iter_dir = dir.iterate();
+            if (try iter_dir.next()) |_| {
+                // Directory exists and has contents
+                std.debug.print("Warning: {s} already exists and is not empty\n", .{clone_dest});
+                std.debug.print("Please remove it first or use --dotfiles to specify a different location\n", .{});
+                return error.DotfilesAlreadyExists;
+            }
+        } else |_| {
+            // Directory doesn't exist, we'll clone
+        }
+
+        if (!dry_run) {
+            std.debug.print("[clone] {s} -> {s}\n", .{ repo_url, clone_dest });
+
+            // Clone using our git client
+            var client = try git.Client.init();
+            defer client.deinit();
+
+            var clone_options: git.CloneOptions = .{};
+            if (res.args.branch) |branch_name| {
+                clone_options.branch = branch_name;
+            }
+
+            client.clone(allocator, repo_url, clone_dest, clone_options) catch |err| {
+                std.debug.print("\n\x1b[31mError: Failed to clone repository\x1b[0m\n", .{});
+                std.debug.print("Repository: {s}\n", .{repo_url});
+                std.debug.print("Destination: {s}\n", .{clone_dest});
+                std.debug.print("\nPossible reasons:\n", .{});
+                std.debug.print("  • Repository does not exist or is private\n", .{});
+                std.debug.print("  • Invalid repository URL\n", .{});
+                std.debug.print("  • Authentication required (check credentials)\n", .{});
+                std.debug.print("  • Network connectivity issues\n", .{});
+                if (res.args.branch) |branch| {
+                    std.debug.print("  • Branch '{s}' does not exist\n", .{branch});
+                }
+                std.debug.print("\nFor SSH URLs (git@host:path), make sure:\n", .{});
+                std.debug.print("  • SSH key is set up and added to ssh-agent\n", .{});
+                std.debug.print("  • Public key is added to the Git hosting service\n", .{});
+                std.debug.print("\nFor HTTPS URLs, you may need to configure credentials.\n", .{});
+                std.debug.print("\nCheck the log file for detailed error information.\n", .{});
+                if (logger.getLogPath()) |log_path| {
+                    std.debug.print("Log file: {s}\n", .{log_path});
+                }
+                return err;
+            };
+            std.debug.print("[done] Cloned repository\n\n", .{});
+        } else {
+            std.debug.print("[dry-run] Would clone {s} to {s}\n", .{ repo_url, clone_dest });
+        }
+    }
+
     // Determine dotfiles root
     const config_root = if (res.args.dotfiles) |dotfiles_path| blk: {
         // User specified a dotfiles path, resolve it
         const resolved = try resolvePathForLink(allocator, dotfiles_path, home);
         // Save this preference for future use (unless dry-run)
-        const dry_run = @field(res.args, "dry-run") != 0;
         if (!dry_run) {
             try saveDotfilesPreference(allocator, resolved, home);
         }
@@ -784,8 +944,6 @@ fn runApplyCommand(allocator: std.mem.Allocator, iter: *std.process.ArgIterator)
         break :blk try getDefaultDotfilesPath(allocator, home);
     };
     defer allocator.free(config_root);
-
-    const dry_run = @field(res.args, "dry-run") != 0;
 
     try apply_module.run(allocator, .{
         .config_root = config_root,
@@ -806,24 +964,47 @@ fn printApplyHelp(reason: ?[]const u8) !void {
     }
     try out.writeAll(
         \\apply
-        \\  hola apply [--dotfiles <path>] [--dry-run]
+        \\  hola apply [OPTIONS]
         \\
         \\Execute the full bootstrap sequence:
-        \\  1. Link dotfiles
-        \\  2. Install Homebrew (if needed)
-        \\  3. Install Homebrew packages and casks (parallel)
-        \\  4. Install mise (if needed)
-        \\  5. Install mise tools (parallel)
-        \\  6. Run provision script (provision.rb)
+        \\  1. Clone dotfiles (if --github or --repo specified)
+        \\  2. Link dotfiles
+        \\  3. Install Homebrew (if needed)
+        \\  4. Install Homebrew packages and casks (parallel)
+        \\  5. Install mise (if needed)
+        \\  6. Install mise tools (parallel)
+        \\  7. Run provision script (provision.rb)
         \\
         \\Flags
+        \\  --github <repo>    Clone from GitHub via SSH (format: username/dotfiles)
+        \\                     Shorthand for git@github.com:username/dotfiles.git
+        \\  --repo <url>       Clone from full repository URL (any protocol)
+        \\                     Supports SSH, HTTPS, and other Git protocols
+        \\  --branch <name>    Git branch to checkout
+        \\                     If not specified, uses repository's default branch
         \\  --dotfiles <path>  Dotfiles repository location (default ~/.dotfiles)
         \\  --dry-run          Show what would be done without actually doing it
         \\
-        \\Example
-        \\  hola apply
-        \\  hola apply --dotfiles ~/workspace/dotfiles
-        \\  hola apply --dry-run
+        \\Examples
+        \\  # GitHub via SSH (recommended)
+        \\  hola apply --github username/dotfiles
+        \\  hola apply --github username/dotfiles --branch develop
+        \\
+        \\  # Full URLs (any Git hosting)
+        \\  hola apply --repo git@github.com:username/dotfiles.git
+        \\  hola apply --repo https://github.com/username/dotfiles.git
+        \\
+        \\  # Use local directory
+        \\  hola apply --dotfiles ~/Dropbox/dotfiles
+        \\
+        \\  # Preview changes
+        \\  hola apply --github username/dotfiles --dry-run
+        \\
+        \\Note: SSH URLs require SSH key authentication:
+        \\  • Generate key: ssh-keygen -t ed25519 -C "your@email.com"
+        \\  • Add to agent: ssh-add ~/.ssh/id_ed25519
+        \\  • Add to GitHub/GitLab: Settings > SSH keys
+        \\  • Test: ssh -T git@github.com
         \\
     );
 }
@@ -1000,7 +1181,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .prefix = "AppleScript file:", .command = "applescript --file script.applescript" },
         .{ .prefix = "Infrastructure:", .command = "provision provision.rb" },
         .{ .prefix = "Node information:", .command = "node-info" },
-        .{ .prefix = "Full bootstrap:", .command = "apply" },
+        .{ .prefix = "Full bootstrap:", .command = "apply --github user/dotfiles" },
         .{ .prefix = "Dry run:", .command = "apply --dry-run" },
     };
     help_formatter.HelpFormatter.printExamples(&examples);
