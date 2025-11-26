@@ -62,7 +62,7 @@ pub const DownloadManager = struct {
     failed_counter: std.atomic.Value(usize),
 
     pub const Config = struct {
-        max_concurrent: usize = 2,
+        max_concurrent: usize = 5,
     };
 
     pub fn init(allocator: std.mem.Allocator, show_progress: bool) !Self {
@@ -78,7 +78,7 @@ pub const DownloadManager = struct {
             .allocator = allocator,
             .show_progress = show_progress,
             .workers = &.{},
-            .max_concurrent = 2,
+            .max_concurrent = 5,
             .mutex = .{},
             .condition = .{},
             .shutdown = false,
