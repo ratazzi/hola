@@ -6,7 +6,6 @@ const apt_bootstrap = if (builtin.os.tag == .linux) @import("apt_bootstrap.zig")
 const provision = @import("provision.zig");
 const modern_display = @import("modern_provision_display.zig");
 const logger = @import("logger.zig");
-const notifications = @import("notifications.zig");
 const help_formatter = @import("help_formatter.zig");
 const command_runner = @import("command_runner.zig");
 const build_options = @import("build_options");
@@ -200,11 +199,6 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
 
     // Show celebration message
     std.debug.print("\n\x1b[1m\x1b[32m🎉 All done! You're ready to code.\x1b[0m\n\n", .{});
-
-    // Send completion notification
-    notifications.notifySimple(allocator, "Hola Apply Complete", "🎉 All done! You're ready to code.") catch |err| {
-        std.debug.print("Warning: Failed to send notification: {}\n", .{err});
-    };
 }
 
 /// Execute the full bootstrap sequence for the current platform.
