@@ -54,11 +54,11 @@ class PackageResource
     @ignore_failure = value
   end
 
-  def notifies(target_resource, action: :restart, timing: :delayed)
+  def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
       action: action.to_s,
-      timing: timing.to_s
+      timing: timer.to_s
     }
   end
 end
