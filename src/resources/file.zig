@@ -109,7 +109,7 @@ pub const Resource = struct {
 
             if (self.attrs.mode) |_| {
                 const stat = try existing_file.stat();
-                current_mode = stat.mode & 0o777;
+                current_mode = @intCast(stat.mode & 0o777);
             }
 
             if (std.mem.eql(u8, existing_content.?, self.content)) {
