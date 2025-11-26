@@ -13,6 +13,7 @@ class MacosDockResource
     @not_if_proc = nil
     @ignore_failure = false
     @notifications = []
+    @subscriptions = []
     instance_eval(&block) if block
 
     # If the Zig backend for macos_dock is not available (non-macOS build),
@@ -25,8 +26,9 @@ class MacosDockResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
+    subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
-    ZigBackend.add_macos_dock(@apps, @tilesize, @orientation, @autohide, @magnification, @largesize, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
+    ZigBackend.add_macos_dock(@apps, @tilesize, @orientation, @autohide, @magnification, @largesize, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def apps(app_list)
@@ -68,6 +70,14 @@ class MacosDockResource
   def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
+      action: action.to_s,
+      timing: timer.to_s
+    }
+  end
+
+  def subscribes(action, source_resource, timer = :delayed)
+    @subscriptions << {
+      target: source_resource,
       action: action.to_s,
       timing: timer.to_s
     }

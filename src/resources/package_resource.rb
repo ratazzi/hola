@@ -12,6 +12,7 @@ class PackageResource
     @not_if_proc = nil
     @ignore_failure = false
     @notifications = []
+    @subscriptions = []
     instance_eval(&block) if block
 
     # Call Zig function with all package names at once
@@ -20,9 +21,10 @@ class PackageResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
+    subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
     # Register all packages as a single resource (batch install)
-    ZigBackend.add_package(@names, @version, @options, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
+    ZigBackend.add_package(@names, @version, @options, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   # Allow overriding package names in block
@@ -57,6 +59,14 @@ class PackageResource
   def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
+      action: action.to_s,
+      timing: timer.to_s
+    }
+  end
+
+  def subscribes(action, source_resource, timer = :delayed)
+    @subscriptions << {
+      target: source_resource,
       action: action.to_s,
       timing: timer.to_s
     }

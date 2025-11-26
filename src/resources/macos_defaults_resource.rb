@@ -14,6 +14,7 @@ class MacOSDefaultsResource
     @not_if_proc = nil
     @ignore_failure = false
     @notifications = []
+    @subscriptions = []
     instance_eval(&block) if block
 
     # Validate required parameters
@@ -36,6 +37,7 @@ class MacOSDefaultsResource
     only_if_arg = @only_if_proc || nil
     not_if_arg = @not_if_proc || nil
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
+    subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
     # Auto-detect type from value if not explicitly specified
     if @type.nil? && @value != nil
@@ -65,7 +67,7 @@ class MacOSDefaultsResource
 
     action_arg = @action.to_s
 
-    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
+    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def domain(val)
@@ -107,6 +109,14 @@ class MacOSDefaultsResource
   def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
+      action: action.to_s,
+      timing: timer.to_s
+    }
+  end
+
+  def subscribes(action, source_resource, timer = :delayed)
+    @subscriptions << {
+      target: source_resource,
       action: action.to_s,
       timing: timer.to_s
     }

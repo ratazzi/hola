@@ -13,6 +13,7 @@ class FileResource
     @not_if_proc = nil
     @ignore_failure = false
     @notifications = []
+    @subscriptions = []
     instance_eval(&block) if block
 
     # Call Zig function with procs and notifications
@@ -22,7 +23,8 @@ class FileResource
 
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
-    ZigBackend.add_file(@path, @content, @action, @mode, @owner, @group, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
+    subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
+    ZigBackend.add_file(@path, @content, @action, @mode, @owner, @group, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def content(value)
@@ -60,6 +62,14 @@ class FileResource
   def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
+      action: action.to_s,
+      timing: timer.to_s
+    }
+  end
+
+  def subscribes(action, source_resource, timer = :delayed)
+    @subscriptions << {
+      target: source_resource,
       action: action.to_s,
       timing: timer.to_s
     }

@@ -744,6 +744,36 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     var delayed_notifications = std.ArrayList(PendingNotification).empty;
     defer delayed_notifications.deinit(allocator);
 
+    // Phase 0: Convert subscriptions to reverse notifications
+    // When resource A subscribes to resource B, we add a notification from B to A
+    for (g_resources.items) |*subscriber_res| {
+        const common = subscriber_res.resource.getCommonProps();
+        for (common.subscriptions.items) |sub| {
+            // Find the source resource that this resource is subscribing to
+            const source_id_parsed = base.notification.ResourceId.parse(allocator, sub.target_resource_id) catch continue;
+            defer source_id_parsed.deinit(allocator);
+
+            // Find the source resource in our list
+            for (g_resources.items) |*source_res| {
+                if (std.mem.eql(u8, source_res.id.type_name, source_id_parsed.type_name) and
+                    std.mem.eql(u8, source_res.id.name, source_id_parsed.name))
+                {
+                    // Add a notification from source to subscriber
+                    const subscriber_id = try subscriber_res.id.toString(allocator);
+                    const notif = base.notification.Notification{
+                        .target_resource_id = subscriber_id,
+                        .action = .{ .action_name = try allocator.dupe(u8, sub.action.action_name) },
+                        .timing = sub.timing,
+                    };
+
+                    const source_common = source_res.resource.getCommonProps();
+                    try source_common.notifications.append(allocator, notif);
+                    break;
+                }
+            }
+        }
+    }
+
     // Phase 1: Execute resources and collect notifications
     for (g_resources.items) |*res| {
         try display.startResource(res.id.type_name, res.id.name);

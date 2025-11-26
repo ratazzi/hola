@@ -198,8 +198,9 @@ pub fn zigAddResource(
     var not_if_val: mruby.mrb_value = undefined;
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
+    var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Format: S|SooooA
+    // Format: S|SooooAA
     // S: required string (path)
     // |: optional arguments start
     // S: optional string (target)
@@ -208,7 +209,8 @@ pub fn zigAddResource(
     // o: optional object (not_if)
     // o: optional object (ignore_failure)
     // A: optional array (notifications)
-    _ = mruby.mrb_get_args(mrb, "S|SooooA", &path_val, &target_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
+    // A: optional array (subscriptions)
+    _ = mruby.mrb_get_args(mrb, "S|SooooAA", &path_val, &target_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     // Extract path
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
@@ -230,7 +232,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
 
     resources.append(allocator, .{
         .path = path,

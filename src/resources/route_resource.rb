@@ -12,15 +12,17 @@ class RouteResource
     @not_if_proc = nil
     @ignore_failure = false
     @notifications = []
+    @subscriptions = []
     instance_eval(&block) if block
 
     # Call Zig function
     only_if_arg = @only_if_proc || nil
     not_if_arg = @not_if_proc || nil
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
+    subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
-    # Signature: add_route(target, gateway, netmask, device, action, only_if, not_if, notifications)
-    ZigBackend.add_route(@target, @gateway, @netmask, @device, @action.to_s, only_if_arg, not_if_arg, @ignore_failure, notifications_arg)
+    # Signature: add_route(target, gateway, netmask, device, action, only_if, not_if, notifications, subscriptions)
+    ZigBackend.add_route(@target, @gateway, @netmask, @device, @action.to_s, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def gateway(value)
@@ -54,6 +56,14 @@ class RouteResource
   def notifies(action, target_resource, timer = :delayed)
     @notifications << {
       target: target_resource,
+      action: action.to_s,
+      timing: timer.to_s
+    }
+  end
+
+  def subscribes(action, source_resource, timer = :delayed)
+    @subscriptions << {
+      target: source_resource,
       action: action.to_s,
       timing: timer.to_s
     }

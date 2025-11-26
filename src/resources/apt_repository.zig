@@ -391,9 +391,10 @@ pub fn zigAddResource(
     var not_if_val: mruby.mrb_value = undefined;
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
+    var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Get 10 strings + 4 optional (blocks + array)
-    _ = mruby.mrb_get_args(mrb, "SSSSSSSSSS|oooA", &name_val, &uri_val, &key_url_val, &key_path_val, &distribution_val, &components_val, &arch_val, &options_val, &repo_type_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
+    // Get 10 strings + 4 optional (blocks + arrays)
+    _ = mruby.mrb_get_args(mrb, "SSSSSSSSSS|oooAA", &name_val, &uri_val, &key_url_val, &key_path_val, &distribution_val, &components_val, &arch_val, &options_val, &repo_type_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const uri_cstr = mruby.mrb_str_to_cstr(mrb, uri_val);
@@ -461,7 +462,7 @@ pub fn zigAddResource(
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, allocator);
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
 
     resources.append(allocator, .{
         .name = name,

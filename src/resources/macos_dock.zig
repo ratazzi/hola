@@ -826,8 +826,9 @@ pub fn zigAddResource(
     var not_if_val: mruby.mrb_value = undefined;
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
+    var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Format: A|iSbbioooA
+    // Format: A|iSbbioooAA
     // A: required array (apps)
     // |: optional args start
     // i: optional integer (tilesize)
@@ -839,7 +840,8 @@ pub fn zigAddResource(
     // o: optional object (not_if)
     // o: optional object (ignore_failure)
     // A: optional array (notifications)
-    _ = mruby.mrb_get_args(mrb, "A|iSbbioooA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val);
+    // A: optional array (subscriptions)
+    _ = mruby.mrb_get_args(mrb, "A|iSbbioooAA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     // Parse apps array
     var apps = std.ArrayList([]const u8).initCapacity(allocator, 0) catch std.ArrayList([]const u8).empty;
@@ -887,45 +889,9 @@ pub fn zigAddResource(
         largesize = @as(i64, @intCast(@as(i32, @bitCast(@as(u32, @intCast(largesize_val.w & 0xFFFFFFFF))))));
     }
 
-    // Build common properties
+    // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
-    common.mrb_state = mrb;
-    common.only_if_block = if (mruby.mrb_test(only_if_val)) only_if_val else null;
-    common.not_if_block = if (mruby.mrb_test(not_if_val)) not_if_val else null;
-    common.ignore_failure = mruby.mrb_test(ignore_failure_val);
-
-    // Parse notifications array if provided
-    if (mruby.mrb_test(notifications_val)) {
-        const notif_len = mruby.mrb_ary_len(mrb, notifications_val);
-        for (0..@intCast(notif_len)) |i| {
-            const notif_val = mruby.mrb_ary_ref(mrb, notifications_val, @intCast(i));
-            if (mruby.mrb_ary_len(mrb, notif_val) >= 3) {
-                const target_val = mruby.mrb_ary_ref(mrb, notif_val, 0);
-                const action_val = mruby.mrb_ary_ref(mrb, notif_val, 1);
-                const timing_val = mruby.mrb_ary_ref(mrb, notif_val, 2);
-
-                const target_cstr = mruby.mrb_str_to_cstr(mrb, target_val);
-                const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
-                const timing_cstr = mruby.mrb_str_to_cstr(mrb, timing_val);
-
-                const target_id = allocator.dupe(u8, std.mem.span(target_cstr)) catch continue;
-                const action_name = allocator.dupe(u8, std.mem.span(action_cstr)) catch continue;
-                const timing_str = std.mem.span(timing_cstr);
-
-                const timing: base.notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
-                    .immediate
-                else
-                    .delayed;
-
-                const notif = base.notification.Notification{
-                    .target_resource_id = target_id,
-                    .action = .{ .action_name = action_name },
-                    .timing = timing,
-                };
-                common.notifications.append(allocator, notif) catch continue;
-            }
-        }
-    }
+    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
 
     resources.append(allocator, Resource{
         .apps = apps,

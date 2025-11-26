@@ -22,12 +22,16 @@ pub const CommonProps = struct {
     // Notifications
     notifications: std.ArrayList(notification.Notification),
 
+    // Subscriptions (will be converted to notifications during processing)
+    subscriptions: std.ArrayList(notification.Notification),
+
     // mruby state for calling blocks
     mrb_state: ?*mruby.mrb_state = null,
 
     pub fn init(allocator: std.mem.Allocator) CommonProps {
         return .{
             .notifications = std.ArrayList(notification.Notification).initCapacity(allocator, 0) catch std.ArrayList(notification.Notification).empty,
+            .subscriptions = std.ArrayList(notification.Notification).initCapacity(allocator, 0) catch std.ArrayList(notification.Notification).empty,
         };
     }
 
@@ -47,6 +51,12 @@ pub const CommonProps = struct {
             notif.deinit(allocator);
         }
         self.notifications.deinit(allocator);
+
+        // Free subscriptions
+        for (self.subscriptions.items) |sub| {
+            sub.deinit(allocator);
+        }
+        self.subscriptions.deinit(allocator);
     }
 
     /// Evaluate guards (only_if/not_if) to determine if resource should run
@@ -103,7 +113,7 @@ pub const CommonArgs = struct {
     }
 };
 
-/// Populate CommonProps from Ruby args (only_if/not_if/ignore_failure/notifications) and protect blocks
+/// Populate CommonProps from Ruby args (only_if/not_if/ignore_failure/notifications/subscriptions) and protect blocks
 pub fn fillCommonFromRuby(
     common: *CommonProps,
     mrb: *mruby.mrb_state,
@@ -111,6 +121,7 @@ pub fn fillCommonFromRuby(
     not_if_val: mruby.mrb_value,
     ignore_failure_val: mruby.mrb_value,
     notifications_val: mruby.mrb_value,
+    subscriptions_val: mruby.mrb_value,
     allocator: std.mem.Allocator,
 ) void {
     // Attach mruby state and optional guard blocks
@@ -150,6 +161,40 @@ pub fn fillCommonFromRuby(
             };
 
             common.notifications.append(allocator, notif) catch continue;
+        }
+    }
+
+    // Parse subscriptions array if provided: each item is [target, action, timing]
+    if (mruby.mrb_test(subscriptions_val)) {
+        const arr_len = mruby.mrb_ary_len(mrb, subscriptions_val);
+        var i: mruby.mrb_int = 0;
+        while (i < arr_len) : (i += 1) {
+            const sub_arr = mruby.mrb_ary_ref(mrb, subscriptions_val, i);
+
+            const target_val = mruby.mrb_ary_ref(mrb, sub_arr, 0);
+            const action_val_s = mruby.mrb_ary_ref(mrb, sub_arr, 1);
+            const timing_val = mruby.mrb_ary_ref(mrb, sub_arr, 2);
+
+            const target_cstr = mruby.mrb_str_to_cstr(mrb, target_val);
+            const action_cstr_s = mruby.mrb_str_to_cstr(mrb, action_val_s);
+            const timing_cstr = mruby.mrb_str_to_cstr(mrb, timing_val);
+
+            const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch continue;
+            const action_name = allocator.dupe(u8, std.mem.span(action_cstr_s)) catch continue;
+            const timing_str = std.mem.span(timing_cstr);
+
+            const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
+                .immediate
+            else
+                .delayed;
+
+            const sub = notification.Notification{
+                .target_resource_id = target,
+                .action = .{ .action_name = action_name },
+                .timing = timing,
+            };
+
+            common.subscriptions.append(allocator, sub) catch continue;
         }
     }
 
