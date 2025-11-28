@@ -11,6 +11,7 @@ pub const template = @import("resources/template.zig");
 pub const directory = @import("resources/directory.zig");
 pub const link = @import("resources/link.zig");
 pub const route = @import("resources/route.zig");
+pub const git = @import("resources/git.zig");
 
 // macOS-only resources
 pub const macos_dock = if (builtin.os.tag == .macos)
@@ -95,6 +96,7 @@ const ResourceMacOs = union(enum) {
     route: route.Resource,
     package: package.Resource,
     ruby_block: ruby_block.Resource,
+    git: git.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -109,6 +111,7 @@ const ResourceMacOs = union(enum) {
             .route => |res| res.deinit(allocator),
             .package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
+            .git => |res| res.deinit(allocator),
         }
     }
 
@@ -125,6 +128,7 @@ const ResourceMacOs = union(enum) {
             .route => |res| try res.apply(),
             .package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
+            .git => |res| try res.apply(),
         };
     }
 
@@ -141,6 +145,7 @@ const ResourceMacOs = union(enum) {
             .route => |res| res.target,
             .package => |res| res.displayName(),
             .ruby_block => |res| res.name,
+            .git => |res| res.destination,
         };
     }
 
@@ -157,6 +162,7 @@ const ResourceMacOs = union(enum) {
             .route => |*res| &res.common,
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
+            .git => |*res| &res.common,
         };
     }
 
@@ -173,6 +179,7 @@ const ResourceMacOs = union(enum) {
             .route => |res| res.common.ignore_failure,
             .package => |res| res.common.ignore_failure,
             .ruby_block => |res| res.common.ignore_failure,
+            .git => |res| res.common.ignore_failure,
         };
     }
 };
@@ -189,6 +196,7 @@ const ResourceGeneric = union(enum) {
     package: package.Resource,
     ruby_block: ruby_block.Resource,
     route: route.Resource,
+    git: git.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -203,6 +211,7 @@ const ResourceGeneric = union(enum) {
             .package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
             .route => |res| res.deinit(allocator),
+            .git => |res| res.deinit(allocator),
         }
     }
 
@@ -219,6 +228,7 @@ const ResourceGeneric = union(enum) {
             .package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
             .route => |res| try res.apply(),
+            .git => |res| try res.apply(),
         };
     }
 
@@ -235,6 +245,7 @@ const ResourceGeneric = union(enum) {
             .package => |res| res.displayName(),
             .ruby_block => |res| res.name,
             .route => |res| res.target,
+            .git => |res| res.destination,
         };
     }
 
@@ -251,6 +262,7 @@ const ResourceGeneric = union(enum) {
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
             .route => |*res| &res.common,
+            .git => |*res| &res.common,
         };
     }
 
@@ -267,6 +279,7 @@ const ResourceGeneric = union(enum) {
             .package => |res| res.common.ignore_failure,
             .ruby_block => |res| res.common.ignore_failure,
             .route => |res| res.common.ignore_failure,
+            .git => |res| res.common.ignore_failure,
         };
     }
 };

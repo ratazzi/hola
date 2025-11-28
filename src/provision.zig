@@ -215,6 +215,13 @@ fn wrapRubyBlock(res: resources.ruby_block.Resource) resources.Resource {
     return .{ .ruby_block = res };
 }
 
+fn buildGitId(allocator: std.mem.Allocator, res: *const resources.git.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "git", res.destination);
+}
+fn wrapGit(res: resources.git.Resource) resources.Resource {
+    return .{ .git = res };
+}
+
 /// Get a short filename from URL for display
 fn getShortFileNameFromUrl(url: []const u8) []const u8 {
     if (std.mem.lastIndexOf(u8, url, "/")) |last_slash| {
@@ -432,6 +439,18 @@ export fn zig_add_ruby_block_resource(mrb: *mruby.mrb_state, self: mruby.mrb_val
     );
 }
 
+// Zig callback for git resource (cross-platform)
+export fn zig_add_git_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.git.Resource,
+        mrb,
+        self,
+        resources.git.zigAddResource,
+        buildGitId,
+        wrapGit,
+    );
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -589,6 +608,19 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), // 3 required + 4 optional
     );
 
+    // Register git resource (cross-platform)
+    // Signature: add_git(repository, destination, revision, checkout_branch, remote, depth,
+    //   enable_checkout, enable_submodules, ssh_key, enable_strict_host_key_checking,
+    //   user, group, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil,
+    //   notifications=nil, subscriptions=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_git",
+        zig_add_git_resource,
+        mruby.MRB_ARGS_REQ(13) | mruby.MRB_ARGS_OPT(5), // 13 required + 5 optional
+    );
+
     // Register all API modules using the unified interface
     // Register modules in dependency order: JSON must be registered before http_client
     // because http_client's Ruby prelude calls JSON.parse in Response#json method
@@ -631,6 +663,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load package and ruby_block resources
     try mrb.evalString(resources.package.ruby_prelude);
     try mrb.evalString(resources.ruby_block.ruby_prelude);
+    // Load git resource
+    try mrb.evalString(resources.git.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 
