@@ -1,4 +1,5 @@
 const std = @import("std");
+const types = @import("../types.zig");
 
 /// Download task status
 pub const Status = enum(u8) {

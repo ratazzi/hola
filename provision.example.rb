@@ -28,10 +28,48 @@ template '/tmp/config.yml' do
   })
 end
 
-# Download files
+# Download files from HTTP/HTTPS
 remote_file '/tmp/goreman' do
   url 'https://example.com/releases/goreman'
   mode '0755'
+  checksum 'sha256:abc123...'  # Optional: verify file integrity
+  use_etag true                 # Optional: conditional download (default: true)
+end
+
+# Download with HTTP Basic Auth
+remote_file '/tmp/private-file.zip' do
+  source 'https://private.example.com/file.zip'
+  remote_user 'username'
+  remote_password 'password'
+  mode '0644'
+end
+
+# Download from SFTP
+remote_file '/tmp/backup.tar.gz' do
+  source 'sftp://backup.example.com/backups/latest.tar.gz'
+  remote_user 'deploy'
+  ssh_private_key File.expand_path('~/.ssh/id_rsa')
+  ssh_known_hosts File.expand_path('~/.ssh/known_hosts')
+  mode '0600'
+end
+
+# Download from S3
+remote_file '/tmp/data.json' do
+  source 's3://my-bucket/data/file.json'
+  aws_access_key ENV['AWS_ACCESS_KEY_ID']
+  aws_secret_key ENV['AWS_SECRET_ACCESS_KEY']
+  aws_region 'us-east-1'
+  mode '0644'
+end
+
+# Download from S3-compatible service (e.g., R2, MinIO)
+remote_file '/tmp/asset.tar.gz' do
+  source 's3://my-bucket/assets/archive.tar.gz'
+  aws_access_key ENV['R2_ACCESS_KEY_ID']
+  aws_secret_key ENV['R2_SECRET_ACCESS_KEY']
+  aws_endpoint 'https://abc123.r2.cloudflarestorage.com'
+  aws_region 'auto'
+  mode '0644'
 end
 
 # Execute commands

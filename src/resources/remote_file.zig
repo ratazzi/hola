@@ -5,6 +5,14 @@ const http = @import("../http.zig");
 const logger = @import("../logger.zig");
 const json_helpers = @import("../json.zig");
 const xdg_mod = @import("../xdg.zig");
+const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
+
+/// Download outcome for downloadDirect
+const DownloadOutcome = struct {
+    downloaded: bool,
+    etag: ?[]const u8 = null,
+    last_modified: ?[]const u8 = null,
+};
 
 /// Remote file resource data structure
 pub const Resource = struct {
@@ -15,9 +23,26 @@ pub const Resource = struct {
     checksum: ?[]const u8 = null, // Expected checksum (SHA256, MD5, etc.)
     backup: ?[]const u8 = null, // Backup extension before overwriting
     headers: ?[]const u8 = null, // JSON-encoded HTTP headers
-    use_etag: bool = false, // Whether to use ETag for conditional downloads
-    use_last_modified: bool = false, // Whether to use Last-Modified for conditional downloads
+    use_etag: bool = true, // Whether to use ETag for conditional downloads (Chef default: true)
+    use_last_modified: bool = true, // Whether to use Last-Modified for conditional downloads (Chef default: true)
     force_unlink: bool = false, // Delete destination before placing downloaded file
+
+    // Authentication (Chef-compatible parameters)
+    remote_user: ?[]const u8 = null, // Username for SFTP authentication
+    remote_password: ?[]const u8 = null, // Password for SFTP authentication
+    remote_domain: ?[]const u8 = null, // Domain for Windows authentication (reserved, not used)
+
+    // Hola-specific: SSH key authentication for SFTP
+    ssh_private_key: ?[]const u8 = null, // Path to SSH private key
+    ssh_public_key: ?[]const u8 = null, // Path to SSH public key
+    ssh_known_hosts: ?[]const u8 = null, // Path to SSH known_hosts file
+
+    // Hola-specific: AWS S3 authentication
+    aws_access_key: ?[]const u8 = null, // AWS Access Key ID
+    aws_secret_key: ?[]const u8 = null, // AWS Secret Access Key
+    aws_region: ?[]const u8 = null, // AWS region (default: "auto")
+    aws_endpoint: ?[]const u8 = null, // AWS S3 endpoint URL (required for s3:// URLs)
+
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -37,6 +62,22 @@ pub const Resource = struct {
         if (self.checksum) |checksum| allocator.free(checksum);
         if (self.backup) |backup| allocator.free(backup);
         if (self.headers) |headers| allocator.free(headers);
+
+        // Authentication fields
+        if (self.remote_user) |user| allocator.free(user);
+        if (self.remote_password) |pass| allocator.free(pass);
+        if (self.remote_domain) |domain| allocator.free(domain);
+
+        // SSH fields
+        if (self.ssh_private_key) |key| allocator.free(key);
+        if (self.ssh_public_key) |key| allocator.free(key);
+        if (self.ssh_known_hosts) |hosts| allocator.free(hosts);
+
+        // AWS fields
+        if (self.aws_access_key) |key| allocator.free(key);
+        if (self.aws_secret_key) |key| allocator.free(key);
+        if (self.aws_region) |region| allocator.free(region);
+        if (self.aws_endpoint) |endpoint| allocator.free(endpoint);
 
         // Deinit common props
         var common = self.common;
@@ -171,12 +212,38 @@ pub const Resource = struct {
         } else {
             // File not pre-downloaded (likely has conditions)
             // Download directly (conditional downloads are not batched)
-            var outcome = try self.downloadDirect(allocator, previous_etag, previous_last_modified);
+            // Use AsyncExecutor to avoid blocking the main thread
+            const DownloadContext = struct {
+                resource: Resource,
+                allocator: std.mem.Allocator,
+                previous_etag: ?[]const u8,
+                previous_last_modified: ?[]const u8,
+            };
+            const download_ctx = DownloadContext{
+                .resource = self,
+                .allocator = allocator,
+                .previous_etag = previous_etag,
+                .previous_last_modified = previous_last_modified,
+            };
+            const downloadAsync = struct {
+                fn run(ctx: DownloadContext) !DownloadOutcome {
+                    const outcome = try ctx.resource.downloadDirect(ctx.allocator, ctx.previous_etag, ctx.previous_last_modified);
+                    return outcome;
+                }
+            }.run;
+
+            var outcome = try AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, download_ctx, downloadAsync);
 
             // If server reported not modified but we have no local file, fall back to unconditional download
             if (!outcome.downloaded and !local_exists) {
                 logger.debug("Server returned not_modified but local file doesn't exist, retrying without conditions", .{});
-                const retry = try self.downloadDirect(allocator, null, null);
+                const retry_ctx = DownloadContext{
+                    .resource = self,
+                    .allocator = allocator,
+                    .previous_etag = null,
+                    .previous_last_modified = null,
+                };
+                const retry = try AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, retry_ctx, downloadAsync);
                 if (!retry.downloaded) {
                     return error.HttpError;
                 }
@@ -306,12 +373,6 @@ pub const Resource = struct {
         return true;
     }
 
-    const DownloadOutcome = struct {
-        downloaded: bool,
-        etag: ?[]const u8 = null,
-        last_modified: ?[]const u8 = null,
-    };
-
     fn downloadDirect(self: Resource, allocator: std.mem.Allocator, previous_etag: ?[]const u8, previous_last_modified: ?[]const u8) !DownloadOutcome {
         const temp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{self.path});
         defer allocator.free(temp_path);
@@ -330,10 +391,27 @@ pub const Resource = struct {
             hm.deinit();
         };
 
+        // Build authentication config from resource parameters
+        var auth_config: ?http.types.AuthConfig = null;
+        if (self.remote_user != null or self.ssh_private_key != null or self.aws_access_key != null) {
+            auth_config = http.types.AuthConfig{
+                .username = self.remote_user,
+                .password = self.remote_password,
+                .ssh_private_key = self.ssh_private_key,
+                .ssh_public_key = self.ssh_public_key,
+                .ssh_known_hosts = self.ssh_known_hosts,
+                .aws_access_key = self.aws_access_key,
+                .aws_secret_key = self.aws_secret_key,
+                .aws_region = self.aws_region orelse "auto",
+                .aws_endpoint = self.aws_endpoint,
+            };
+        }
+
         const download_result = try http.downloadFile(allocator, self.source, temp_path, .{
             .headers = headers_map,
-            .if_none_match = previous_etag,
-            .if_modified_since = previous_last_modified,
+            .if_none_match = if (self.use_etag) previous_etag else null,
+            .if_modified_since = if (self.use_last_modified) previous_last_modified else null,
+            .auth = auth_config,
         });
         defer {
             var mut_result = download_result;
@@ -503,8 +581,20 @@ pub fn zigAddResource(
     var subscriptions_val: mruby.mrb_value = undefined;
     var force_unlink_val: mruby.mrb_bool = undefined;
 
-    // Get 7 strings + 1 object (hash) + 3 bools + 1 string + 3 optional (2 blocks + 1 bool + 2 arrays)
-    _ = mruby.mrb_get_args(mrb, "SSSSSSSobbbS|oooAA", &path_val, &source_val, &mode_val, &owner_val, &group_val, &checksum_val, &backup_val, &headers_val, &use_etag_val, &use_last_modified_val, &force_unlink_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // Authentication parameters
+    var remote_user_val: mruby.mrb_value = undefined;
+    var remote_password_val: mruby.mrb_value = undefined;
+    var remote_domain_val: mruby.mrb_value = undefined;
+    var ssh_private_key_val: mruby.mrb_value = undefined;
+    var ssh_public_key_val: mruby.mrb_value = undefined;
+    var ssh_known_hosts_val: mruby.mrb_value = undefined;
+    var aws_access_key_val: mruby.mrb_value = undefined;
+    var aws_secret_key_val: mruby.mrb_value = undefined;
+    var aws_region_val: mruby.mrb_value = undefined;
+    var aws_endpoint_val: mruby.mrb_value = undefined;
+
+    // Get 7 strings + 1 object (hash) + 3 bools + 1 string + 3 optional (2 blocks + 1 bool + 2 arrays) + 10 auth objects (can be nil)
+    _ = mruby.mrb_get_args(mrb, "SSSSSSSobbbS|oooAAoooooooooo", &path_val, &source_val, &mode_val, &owner_val, &group_val, &checksum_val, &backup_val, &headers_val, &use_etag_val, &use_last_modified_val, &force_unlink_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val, &remote_user_val, &remote_password_val, &remote_domain_val, &ssh_private_key_val, &ssh_public_key_val, &ssh_known_hosts_val, &aws_access_key_val, &aws_secret_key_val, &aws_region_val, &aws_endpoint_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const source_cstr = mruby.mrb_str_to_cstr(mrb, source_val);
@@ -554,6 +644,57 @@ pub fn zigAddResource(
     const use_last_modified = use_last_modified_val != 0;
     const force_unlink = force_unlink_val != 0;
 
+    // Parse authentication parameters
+    const remote_user = if (zig_mrb_nil_p(remote_user_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, remote_user_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const remote_password = if (zig_mrb_nil_p(remote_password_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, remote_password_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const remote_domain = if (zig_mrb_nil_p(remote_domain_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, remote_domain_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const ssh_private_key = if (zig_mrb_nil_p(ssh_private_key_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, ssh_private_key_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const ssh_public_key = if (zig_mrb_nil_p(ssh_public_key_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, ssh_public_key_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const ssh_known_hosts = if (zig_mrb_nil_p(ssh_known_hosts_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, ssh_known_hosts_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const aws_access_key = if (zig_mrb_nil_p(aws_access_key_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_access_key_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const aws_secret_key = if (zig_mrb_nil_p(aws_secret_key_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_secret_key_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const aws_region = if (zig_mrb_nil_p(aws_region_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_region_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
+    const aws_endpoint = if (zig_mrb_nil_p(aws_endpoint_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_endpoint_val));
+        break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
+    };
+
     // Convert Ruby Hash to JSON string for headers
     const headers: ?[]const u8 = if (zig_mrb_nil_p(headers_val) != 0)
         null
@@ -595,6 +736,16 @@ pub fn zigAddResource(
         .use_etag = use_etag,
         .use_last_modified = use_last_modified,
         .force_unlink = force_unlink,
+        .remote_user = remote_user,
+        .remote_password = remote_password,
+        .remote_domain = remote_domain,
+        .ssh_private_key = ssh_private_key,
+        .ssh_public_key = ssh_public_key,
+        .ssh_known_hosts = ssh_known_hosts,
+        .aws_access_key = aws_access_key,
+        .aws_secret_key = aws_secret_key,
+        .aws_region = aws_region,
+        .aws_endpoint = aws_endpoint,
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();

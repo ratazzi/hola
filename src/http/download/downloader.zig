@@ -18,6 +18,9 @@ pub const Options = struct {
     /// If-Modified-Since
     if_modified_since: ?[]const u8 = null,
 
+    /// Authentication configuration
+    auth: ?types.AuthConfig = null,
+
     /// Progress callback
     progress_callback: ?types.ProgressCallback = null,
     progress_context: ?*anyopaque = null,
@@ -70,6 +73,9 @@ pub fn downloadFileWithClient(
     // Build request
     var req = types.Request.init(.GET, url);
     defer req.deinit();
+
+    // Set authentication if provided
+    req.auth = opts.auth;
 
     // Add custom headers
     if (opts.headers) |custom_headers| {
@@ -187,7 +193,11 @@ pub fn downloadFileWithClient(
     }
 
     // Check HTTP status code (only accept 2xx)
-    if (stream_result.status < 200 or stream_result.status >= 300) {
+    // Note: Non-HTTP protocols (SFTP, S3) return status=0 on success
+    const is_http = stream_result.status > 0;
+    if (is_http and (stream_result.status < 200 or stream_result.status >= 300)) {
+        // Log error with status code
+        logger.err("Download failed with HTTP status {d} for URL: {s}", .{ stream_result.status, url });
         // Error or unexpected status code
         // Temp file will be cleaned up by defer automatically
         // For resume mode, explicitly delete the corrupted file

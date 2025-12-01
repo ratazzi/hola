@@ -1,5 +1,48 @@
 const std = @import("std");
 
+/// Supported protocols (detected from URL scheme)
+pub const Protocol = enum {
+    HTTP,
+    HTTPS,
+    SFTP,
+    SCP,
+    S3,
+
+    /// Detect protocol from URL
+    pub fn fromUrl(url: []const u8) Protocol {
+        if (std.mem.startsWith(u8, url, "https://")) return .HTTPS;
+        if (std.mem.startsWith(u8, url, "http://")) return .HTTP;
+        if (std.mem.startsWith(u8, url, "sftp://")) return .SFTP;
+        if (std.mem.startsWith(u8, url, "scp://")) return .SCP;
+        if (std.mem.startsWith(u8, url, "s3://")) return .S3;
+        // Default to HTTPS if no scheme
+        return .HTTPS;
+    }
+};
+
+/// Authentication configuration for different protocols
+pub const AuthConfig = struct {
+    /// SSH private key path for SFTP
+    ssh_private_key: ?[]const u8 = null,
+    /// SSH public key path for SFTP
+    ssh_public_key: ?[]const u8 = null,
+    /// SSH known hosts file path
+    ssh_known_hosts: ?[]const u8 = null,
+    /// Username for SFTP
+    username: ?[]const u8 = null,
+    /// Password for SFTP
+    password: ?[]const u8 = null,
+
+    /// AWS Access Key ID for S3
+    aws_access_key: ?[]const u8 = null,
+    /// AWS Secret Access Key for S3
+    aws_secret_key: ?[]const u8 = null,
+    /// AWS region for S3 (default: "auto")
+    aws_region: []const u8 = "auto",
+    /// AWS S3 endpoint URL (e.g., "https://s3.us-west-2.amazonaws.com" or custom endpoint for S3-compatible services)
+    aws_endpoint: ?[]const u8 = null,
+};
+
 /// HTTP methods
 pub const Method = enum {
     GET,
@@ -33,6 +76,7 @@ pub const Request = struct {
     timeout_ms: ?u32 = null,
     follow_redirects: bool = true,
     max_redirects: u32 = 10,
+    auth: ?AuthConfig = null,
 
     pub fn init(method: Method, url: []const u8) Request {
         return .{

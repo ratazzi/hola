@@ -11,9 +11,19 @@ class RemoteFileResource
     @checksum = ""
     @backup = ""
     @headers = {}
-    @use_etag = false
-    @use_last_modified = false
+    @use_etag = true
+    @use_last_modified = true
     @force_unlink = false
+    @remote_user = nil
+    @remote_password = nil
+    @remote_domain = nil
+    @ssh_private_key = nil
+    @ssh_public_key = nil
+    @ssh_known_hosts = nil
+    @aws_access_key = nil
+    @aws_secret_key = nil
+    @aws_region = nil
+    @aws_endpoint = nil
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -32,7 +42,7 @@ class RemoteFileResource
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
     # Pass headers hash directly to Zig
-    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg, @remote_user, @remote_password, @remote_domain, @ssh_private_key, @ssh_public_key, @ssh_known_hosts, @aws_access_key, @aws_secret_key, @aws_region, @aws_endpoint)
   end
 
   def source(value)
@@ -109,6 +119,49 @@ class RemoteFileResource
       action: action.to_s,
       timing: timer.to_s
     }
+  end
+
+  # Authentication parameters (Chef-compatible)
+  def remote_user(value)
+    @remote_user = value.to_s
+  end
+
+  def remote_password(value)
+    @remote_password = value.to_s
+  end
+
+  def remote_domain(value)
+    @remote_domain = value.to_s
+  end
+
+  # Hola-specific: SSH key authentication for SFTP
+  def ssh_private_key(value)
+    @ssh_private_key = value.to_s
+  end
+
+  def ssh_public_key(value)
+    @ssh_public_key = value.to_s
+  end
+
+  def ssh_known_hosts(value)
+    @ssh_known_hosts = value.to_s
+  end
+
+  # Hola-specific: AWS S3 authentication
+  def aws_access_key(value)
+    @aws_access_key = value.to_s
+  end
+
+  def aws_secret_key(value)
+    @aws_secret_key = value.to_s
+  end
+
+  def aws_region(value)
+    @aws_region = value.to_s
+  end
+
+  def aws_endpoint(value)
+    @aws_endpoint = value.to_s
   end
 end
 

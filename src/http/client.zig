@@ -81,8 +81,26 @@ pub const Client = struct {
         handle: *curl.CURL,
         req: Request,
     ) !?*curl.curl_slist {
+        // URL transformation for S3 protocol
+        // Convert s3://bucket/path to https://endpoint/bucket/path
+        const protocol = types.Protocol.fromUrl(req.url);
+        const actual_url = if (protocol == .S3 and req.auth != null and req.auth.?.aws_endpoint != null) blk: {
+            // Extract bucket and path from s3://bucket/path
+            const s3_prefix = "s3://";
+            if (std.mem.startsWith(u8, req.url, s3_prefix)) {
+                const path = req.url[s3_prefix.len..];
+                const endpoint = req.auth.?.aws_endpoint.?;
+                // Build full URL: endpoint/bucket/path
+                break :blk try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ endpoint, path });
+            }
+            break :blk try self.allocator.dupe(u8, req.url);
+        } else blk: {
+            break :blk try self.allocator.dupe(u8, req.url);
+        };
+        defer self.allocator.free(actual_url);
+
         // URL (must be null-terminated)
-        const url_z = try self.allocator.dupeZ(u8, req.url);
+        const url_z = try self.allocator.dupeZ(u8, actual_url);
         defer self.allocator.free(url_z);
         _ = curl.curl_easy_setopt(handle, .CURLOPT_URL, url_z.ptr);
 
@@ -158,6 +176,71 @@ pub const Client = struct {
         const verify_host = if (self.config.verify_ssl) @as(c_long, 2) else @as(c_long, 0);
         _ = curl.curl_easy_setopt(handle, .CURLOPT_SSL_VERIFYPEER, verify_peer);
         _ = curl.curl_easy_setopt(handle, .CURLOPT_SSL_VERIFYHOST, verify_host);
+
+        // Protocol-specific configuration (reuse protocol variable from URL transformation above)
+        switch (protocol) {
+            .SFTP, .SCP => {
+                // Both SFTP and SCP use SSH authentication (same configuration)
+                if (req.auth) |auth| {
+                    // Username/password for SFTP/SCP
+                    if (auth.username) |username| {
+                        const userpwd_str = if (auth.password) |password|
+                            try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password })
+                        else
+                            try std.fmt.allocPrint(self.allocator, "{s}:", .{username});
+                        defer self.allocator.free(userpwd_str);
+                        const userpwd_z = try self.allocator.dupeZ(u8, userpwd_str);
+                        defer self.allocator.free(userpwd_z);
+                        _ = curl.curl_easy_setopt(handle, .CURLOPT_USERPWD, userpwd_z.ptr);
+                    }
+
+                    // SSH private key
+                    if (auth.ssh_private_key) |key_path| {
+                        const key_z = try self.allocator.dupeZ(u8, key_path);
+                        defer self.allocator.free(key_z);
+                        _ = curl.curl_easy_setopt(handle, .CURLOPT_SSH_PRIVATE_KEYFILE, key_z.ptr);
+                    }
+
+                    // SSH public key
+                    if (auth.ssh_public_key) |key_path| {
+                        const key_z = try self.allocator.dupeZ(u8, key_path);
+                        defer self.allocator.free(key_z);
+                        _ = curl.curl_easy_setopt(handle, .CURLOPT_SSH_PUBLIC_KEYFILE, key_z.ptr);
+                    }
+
+                    // SSH known hosts
+                    if (auth.ssh_known_hosts) |hosts_path| {
+                        const hosts_z = try self.allocator.dupeZ(u8, hosts_path);
+                        defer self.allocator.free(hosts_z);
+                        _ = curl.curl_easy_setopt(handle, .CURLOPT_SSH_KNOWNHOSTS, hosts_z.ptr);
+                    }
+                }
+            },
+            .S3 => {
+                if (req.auth) |auth| {
+                    // AWS credentials for S3
+                    if (auth.aws_access_key) |access_key| {
+                        if (auth.aws_secret_key) |secret_key| {
+                            const userpwd_str = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ access_key, secret_key });
+                            defer self.allocator.free(userpwd_str);
+                            const userpwd_z = try self.allocator.dupeZ(u8, userpwd_str);
+                            defer self.allocator.free(userpwd_z);
+                            _ = curl.curl_easy_setopt(handle, .CURLOPT_USERPWD, userpwd_z.ptr);
+
+                            // Enable AWS SigV4 signing
+                            const aws_sig_str = try std.fmt.allocPrint(self.allocator, "aws:amz:{s}:s3", .{auth.aws_region});
+                            defer self.allocator.free(aws_sig_str);
+                            const aws_sig_z = try self.allocator.dupeZ(u8, aws_sig_str);
+                            defer self.allocator.free(aws_sig_z);
+                            _ = curl.curl_easy_setopt(handle, .CURLOPT_AWS_SIGV4, aws_sig_z.ptr);
+                        }
+                    }
+                }
+            },
+            .HTTP, .HTTPS => {
+                // HTTP/HTTPS use default settings (already configured above)
+            },
+        }
 
         // Proxy
         if (self.config.proxy) |proxy| {
