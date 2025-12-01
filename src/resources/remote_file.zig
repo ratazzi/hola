@@ -1,10 +1,10 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
-const http_utils = @import("../http_utils.zig");
-const download_manager = @import("../download_manager.zig");
+const http = @import("../http.zig");
 const logger = @import("../logger.zig");
 const json_helpers = @import("../json.zig");
+const xdg_mod = @import("../xdg.zig");
 
 /// Remote file resource data structure
 pub const Resource = struct {
@@ -170,15 +170,8 @@ pub const Resource = struct {
             allocator.free(temp_path);
         } else {
             // File not pre-downloaded (likely has conditions)
-            // Try to use DownloadManager if available
-            var outcome: DownloadOutcome = undefined;
-            if (download_manager.DownloadManager.getCurrent()) |dl_mgr| {
-                // Submit to download manager and wait for completion
-                outcome = try downloadViaManager(self, dl_mgr, allocator, previous_etag, previous_last_modified);
-            } else {
-                // Fallback to direct download (no manager available)
-                outcome = try self.downloadDirect(allocator, previous_etag, previous_last_modified);
-            }
+            // Download directly (conditional downloads are not batched)
+            var outcome = try self.downloadDirect(allocator, previous_etag, previous_last_modified);
 
             // If server reported not modified but we have no local file, fall back to unconditional download
             if (!outcome.downloaded and !local_exists) {
@@ -203,7 +196,7 @@ pub const Resource = struct {
 
             // Verify checksum if provided
             if (self.checksum) |expected_checksum| {
-                const actual_checksum = try http_utils.calculateSha256(allocator, self.path);
+                const actual_checksum = try http.calculateSha256(allocator, self.path);
                 defer allocator.free(actual_checksum);
                 if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
                     return error.ChecksumMismatch;
@@ -228,11 +221,12 @@ pub const Resource = struct {
     /// Find a pre-downloaded file by matching the slugified final path
     fn findPreDownloadedFile(final_path: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
         // Get the download temp directory
-        const temp_dir = try download_manager.DownloadManager.getDownloadTempDir(allocator);
+        const xdg_instance = xdg_mod.XDG.init(allocator);
+        const temp_dir = try xdg_instance.getDownloadsDir();
         defer allocator.free(temp_dir);
 
         // Slugify the final path to match the naming scheme in provision.zig
-        const path_slug = try http_utils.slugifyPath(allocator, final_path);
+        const path_slug = try http.slugifyPath(allocator, final_path);
         defer allocator.free(path_slug);
 
         // Expected filename is just the slugified path (no prefix needed)
@@ -318,84 +312,33 @@ pub const Resource = struct {
         last_modified: ?[]const u8 = null,
     };
 
-    fn downloadViaManager(
-        self: Resource,
-        dl_mgr: *download_manager.DownloadManager,
-        allocator: std.mem.Allocator,
-        previous_etag: ?[]const u8,
-        previous_last_modified: ?[]const u8,
-    ) !DownloadOutcome {
-        // Generate slugified path for temp file
-        const path_slug = try http_utils.slugifyPath(allocator, self.path);
-        defer allocator.free(path_slug);
-
-        // Generate temporary file path
-        const temp_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dl_mgr.temp_dir, path_slug });
-
-        // Download directly to temp path (manager controls concurrency via its semaphore/queue)
-        // For simplicity, we'll just download directly here
-        // The DownloadManager's worker pool is for pre-downloads only
-        // On-demand downloads go through the direct path but could use a semaphore for concurrency control
-
-        const download_result = try http_utils.downloadFile(allocator, self.source, temp_path, .{
-            .headers = self.headers,
-            .if_none_match = previous_etag,
-            .if_modified_since = previous_last_modified,
-        });
-        defer allocator.free(temp_path);
-        defer if (download_result.etag) |etag| allocator.free(etag);
-        defer if (download_result.last_modified) |lm| allocator.free(lm);
-
-        if (download_result.status == .not_modified) {
-            return DownloadOutcome{ .downloaded = false, .etag = null };
-        }
-
-        // Verify checksum if provided
-        if (self.checksum) |expected_checksum| {
-            const actual_checksum = try http_utils.calculateSha256(allocator, temp_path);
-            defer allocator.free(actual_checksum);
-            if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
-                return error.ChecksumMismatch;
-            }
-        }
-
-        // Create backup if specified
-        if (self.backup) |backup_ext| {
-            try base.createBackup(allocator, self.path, backup_ext);
-        }
-
-        // Create parent directory if needed
-        if (std.fs.path.dirname(self.path)) |dir| {
-            try std.fs.cwd().makePath(dir);
-        }
-
-        // Move to final location
-        if (self.force_unlink) {
-            self.deleteTargetIfExists() catch {};
-        }
-        try std.fs.cwd().rename(temp_path, self.path);
-
-        // Apply file attributes (mode, owner, group)
-        base.applyFileAttributes(self.path, self.attrs) catch |err| {
-            logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
-        };
-
-        const etag_copy: ?[]const u8 = if (download_result.etag) |etag| try allocator.dupe(u8, etag) else null;
-        const lm_copy: ?[]const u8 = if (download_result.last_modified) |lm| try allocator.dupe(u8, lm) else null;
-        return DownloadOutcome{ .downloaded = true, .etag = etag_copy, .last_modified = lm_copy };
-    }
-
     fn downloadDirect(self: Resource, allocator: std.mem.Allocator, previous_etag: ?[]const u8, previous_last_modified: ?[]const u8) !DownloadOutcome {
         const temp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{self.path});
         defer allocator.free(temp_path);
 
-        const download_result = try http_utils.downloadFile(allocator, self.source, temp_path, .{
-            .headers = self.headers,
+        // Parse headers from JSON if provided
+        var headers_map: ?std.StringHashMap([]const u8) = null;
+        if (self.headers) |headers_json| {
+            headers_map = try http.parseHeadersFromJson(allocator, headers_json);
+        }
+        defer if (headers_map) |*hm| {
+            var it = hm.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            hm.deinit();
+        };
+
+        const download_result = try http.downloadFile(allocator, self.source, temp_path, .{
+            .headers = headers_map,
             .if_none_match = previous_etag,
             .if_modified_since = previous_last_modified,
         });
-        defer if (download_result.etag) |etag| allocator.free(etag);
-        defer if (download_result.last_modified) |lm| allocator.free(lm);
+        defer {
+            var mut_result = download_result;
+            mut_result.deinit(allocator);
+        }
 
         if (download_result.status == .not_modified) {
             // Cleanup temp path if created (ignore missing)
@@ -405,7 +348,7 @@ pub const Resource = struct {
 
         // Verify checksum before touching destination
         if (self.checksum) |expected_checksum| {
-            const actual_checksum = try http_utils.calculateSha256(allocator, temp_path);
+            const actual_checksum = try http.calculateSha256(allocator, temp_path);
             defer allocator.free(actual_checksum);
             if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
                 std.fs.cwd().deleteFile(temp_path) catch {};
@@ -434,7 +377,7 @@ pub const Resource = struct {
         const state_home = try xdg.getStateHome();
         defer allocator.free(state_home);
 
-        const slug = try http_utils.slugifyPath(allocator, self.path);
+        const slug = try http.slugifyPath(allocator, self.path);
         defer allocator.free(slug);
 
         return std.fs.path.join(allocator, &.{ state_home, "etag", "remote_file", slug });
@@ -476,7 +419,7 @@ pub const Resource = struct {
         const state_home = try xdg.getStateHome();
         defer allocator.free(state_home);
 
-        const slug = try http_utils.slugifyPath(allocator, self.path);
+        const slug = try http.slugifyPath(allocator, self.path);
         defer allocator.free(slug);
 
         return std.fs.path.join(allocator, &.{ state_home, "last_modified", "remote_file", slug });

@@ -1,7 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
-const http_utils = @import("../http_utils.zig");
+const http = @import("../http.zig");
 const logger = @import("../logger.zig");
 
 /// APT repository resource data structure
@@ -111,10 +111,10 @@ pub const Resource = struct {
 
             if (!key_exists) {
                 logger.info("Downloading GPG key from {s} to {s}", .{ key_url, key_path });
-                const download_res = try http_utils.downloadFile(allocator, key_url, key_path, .{});
-                defer if (download_res.etag) |etag| allocator.free(etag);
-                if (download_res.status != .downloaded) {
-                    return error.HttpError;
+                const result = try http.downloadFile(allocator, key_url, key_path, .{});
+                defer {
+                    var mut_result = result;
+                    mut_result.deinit(allocator);
                 }
                 updated = true;
             }

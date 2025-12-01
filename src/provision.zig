@@ -2,11 +2,9 @@ const std = @import("std");
 const mruby = @import("mruby.zig");
 const mruby_module = @import("mruby_module.zig");
 const resources = @import("resources.zig");
-const download_manager = @import("download_manager.zig");
 const modern_display = @import("modern_provision_display.zig");
 const logger = @import("logger.zig");
-const http_utils = @import("http_utils.zig");
-const http_client = @import("http_client.zig");
+const http = @import("http.zig");
 const resolv = @import("resolv.zig");
 const json = @import("json.zig");
 const base64 = @import("base64.zig");
@@ -627,7 +625,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     const api_modules = [_]mruby_module.MRubyModule{
         file_ext.mruby_module_def, // File.stat and File.mtime extensions
         json.mruby_module_def,
-        http_client.mruby_module_def,
+        http.mruby_module_def,
         base64.mruby_module_def,
         hola_logger.mruby_module_def,
         node_info.mruby_module_def,
@@ -694,11 +692,69 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Phase 0: Start parallel downloads for remote files
     // Initialize download manager with the specified output mode
-    var download_mgr = try download_manager.DownloadManager.init(allocator, opts.use_pretty_output);
+    const download_config = http.download.Manager.Config{
+        .max_concurrent = 5,
+        .http_config = .{},
+    };
+    var download_mgr = try http.download.Manager.init(allocator, download_config);
     defer download_mgr.deinit();
 
-    // Set the display for download manager to use indicatif
-    download_mgr.setDisplay(&display);
+    // Set up progress callback for display
+    const ProgressContext = struct {
+        display: *modern_display.ModernProvisionDisplay,
+        allocator: std.mem.Allocator,
+        tasks: *std.ArrayList(http.download.Task),
+        mutex: *std.Thread.Mutex,
+        initialized: [256]std.atomic.Value(bool),  // Fixed size array with atomic values
+
+        fn callback(ctx_ptr: *anyopaque, task_index: usize, downloaded: usize, total: usize) void {
+            const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
+
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+
+            if (task_index >= ctx.tasks.items.len or task_index >= 256) return;
+
+            const task = &ctx.tasks.items[task_index];
+            const display_name = task.display_name;
+
+            // Check if we've initialized the display for this task
+            const is_initialized = ctx.initialized[task_index].load(.acquire);
+
+            if (total > 0) {
+                if (!is_initialized) {
+                    // First time seeing total > 0, initialize download display
+                    ctx.display.addDownload(display_name, total) catch {};
+                    ctx.initialized[task_index].store(true, .release);
+                } else if (downloaded > 0) {
+                    // Subsequent updates with progress
+                    ctx.display.updateDownload(display_name, downloaded) catch {};
+                }
+            }
+
+            // Mark as complete
+            if (downloaded >= total and total > 0) {
+                ctx.display.finishDownload(display_name, true) catch {};
+            }
+        }
+    };
+
+    var progress_mutex = std.Thread.Mutex{};
+    const progress_ctx = try allocator.create(ProgressContext);
+    defer allocator.destroy(progress_ctx);
+    progress_ctx.* = .{
+        .display = &display,
+        .allocator = allocator,
+        .tasks = &download_mgr.tasks,
+        .mutex = &progress_mutex,
+        .initialized = undefined,  // Will initialize below
+    };
+    // Initialize all atomic values to false
+    for (&progress_ctx.initialized) |*init| {
+        init.* = std.atomic.Value(bool).init(false);
+    }
+
+    download_mgr.setDisplay(@ptrCast(progress_ctx), ProgressContext.callback);
 
     // Collect all remote_file resources for parallel download
     // Only pre-download simple files (no conditions like only_if/not_if, and action is :create)
@@ -722,27 +778,60 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             }
 
             // Generate slugified version of the final path for unique temp filename
-            const path_slug = try http_utils.slugifyPath(allocator, remote_res.path);
+            const path_slug = try http.slugifyPath(allocator, remote_res.path);
             defer allocator.free(path_slug);
 
-            // Generate temporary file path with slugified path (no prefix needed, already in dedicated temp dir)
-            const temp_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ download_mgr.temp_dir, path_slug });
+            // Get temp dir from xdg
+            const xdg_instance = @import("xdg.zig").XDG.init(allocator);
+            const temp_dir = try xdg_instance.getDownloadsDir();
+            defer allocator.free(temp_dir);
 
-            // Use full destination path for display (truncated later if needed)
+            // Generate temporary file path with slugified path
+            const temp_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ temp_dir, path_slug });
+            defer allocator.free(temp_path);
+
+            // Use full destination path for display
             const display_name = remote_res.path;
+            const resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name });
+            defer allocator.free(resource_id);
 
-            // Create download task
-            const task = download_manager.DownloadTask{
-                .url = try allocator.dupe(u8, remote_res.source),
-                .temp_path = temp_path,
-                .final_path = try allocator.dupe(u8, remote_res.path),
-                .mode = if (remote_res.attrs.mode) |mode| try std.fmt.allocPrint(allocator, "{o}", .{mode}) else null,
-                .checksum = if (remote_res.checksum) |checksum| try allocator.dupe(u8, checksum) else null,
-                .backup = if (remote_res.backup) |backup| try allocator.dupe(u8, backup) else null,
-                .headers = if (remote_res.headers) |headers| try allocator.dupe(u8, headers) else null,
-                .resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name }),
-                .display_name = try allocator.dupe(u8, display_name),
-            };
+            // Create download task using new API
+            var task = try http.download.Task.init(
+                allocator,
+                resource_id,
+                remote_res.source,
+                display_name,
+                temp_path,
+                remote_res.path,
+            );
+
+            // Set optional fields
+            task.mode = if (remote_res.attrs.mode) |mode| try std.fmt.allocPrint(allocator, "{o}", .{mode}) else null;
+            task.checksum = if (remote_res.checksum) |checksum| try allocator.dupe(u8, checksum) else null;
+            task.backup = if (remote_res.backup) |backup| try allocator.dupe(u8, backup) else null;
+
+            // Parse JSON headers to StringHashMap
+            if (remote_res.headers) |headers_json| {
+                var headers_map = std.StringHashMap([]const u8).init(allocator);
+                errdefer headers_map.deinit();
+
+                const parsed = try std.json.parseFromSlice(std.json.Value, allocator, headers_json, .{});
+                defer parsed.deinit();
+
+                if (parsed.value == .object) {
+                    var it = parsed.value.object.iterator();
+                    while (it.next()) |entry| {
+                        const key = try allocator.dupe(u8, entry.key_ptr.*);
+                        errdefer allocator.free(key);
+                        const value_str = if (entry.value_ptr.* == .string) entry.value_ptr.*.string else "";
+                        const value = try allocator.dupe(u8, value_str);
+                        errdefer allocator.free(value);
+                        try headers_map.put(key, value);
+                    }
+                }
+
+                task.headers = headers_map;
+            }
 
             try download_mgr.addTask(task);
         }
@@ -760,11 +849,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         try display.reserveDownloadSlots(download_names);
     }
 
-    var download_session: ?download_manager.DownloadManager.DownloadSession = null;
-    errdefer if (download_session) |*session| session.deinit();
-
+    // Start background download processing if we have tasks
+    var download_thread: ?std.Thread = null;
     if (download_mgr.tasks.items.len > 0) {
-        download_session = try download_mgr.startParallelDownloads();
+        const DownloadThread = struct {
+            fn run(mgr: *http.download.Manager) void {
+                mgr.processAll() catch |err| {
+                    logger.err("Download processing failed: {}", .{err});
+                };
+            }
+        };
+        download_thread = try std.Thread.spawn(.{}, DownloadThread.run, .{&download_mgr});
     }
 
     // Start resource execution phase
@@ -814,62 +909,44 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         try display.startResource(res.id.type_name, res.id.name);
         try display.update();
 
-        if (download_session) |*session| {
-            if (res.resource == .remote_file and session.is_active) {
-                // Find the download task for this specific remote_file resource
-                const resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name });
-                defer allocator.free(resource_id);
+        // Wait for download task if this is a remote_file resource
+        if (res.resource == .remote_file and download_thread != null) {
+            // Find the download task for this specific remote_file resource
+            const resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name });
+            defer allocator.free(resource_id);
 
-                var task_index: ?usize = null;
-                // Use mutex-protected access to tasks
-                download_mgr.mutex.lock();
-                for (download_mgr.tasks.items, 0..) |*task, idx| {
-                    if (std.mem.eql(u8, task.resource_id, resource_id)) {
-                        task_index = idx;
-                        break;
-                    }
-                }
-                download_mgr.mutex.unlock();
+            if (download_mgr.getTask(resource_id)) |task| {
+                // Check current status first
+                const initial_status = task.status.load(.acquire);
 
-                if (task_index) |idx| {
+                // Only wait if the task is still in progress
+                if (initial_status == .queued or initial_status == .downloading) {
                     // Wait for this specific download task to complete
-                    var max_wait_iterations: usize = 600; // 30 seconds max wait (50ms * 600)
-                    while (session.is_active and max_wait_iterations > 0) {
-                        try display.update();
-                        std.Thread.yield() catch {}; // Yield to allow download thread to update status
-                        std.Thread.sleep(50 * std.time.ns_per_ms);
-
-                        // Check if this specific task is done (status != 0 means completed or failed)
-                        // Use thread-safe access method to get task status
-                        const current_status = session.getTaskStatus(idx) catch |err| {
-                            const msg = try std.fmt.allocPrint(allocator, "Download status lookup failed for {s}: {s}", .{ resource_id, @errorName(err) });
-                            defer allocator.free(msg);
-                            try display.showInfo(msg);
-                            return err;
-                        };
-                        if (current_status != 0) {
+                    var max_wait_iterations: usize = 3000; // 30 seconds max wait (10ms * 3000)
+                    while (max_wait_iterations > 0) {
+                        const status = task.status.load(.acquire);
+                        if (status != .queued and status != .downloading) {
                             break;
                         }
+
+                        try display.update();
+                        std.Thread.yield() catch {};
+                        std.Thread.sleep(10 * std.time.ns_per_ms);
                         max_wait_iterations -= 1;
                     }
+                }
 
-                    // Check if the download failed
-                    const final_status = session.getTaskStatus(idx) catch |err| {
-                        const msg = try std.fmt.allocPrint(allocator, "Download status lookup failed for {s}: {s}", .{ resource_id, @errorName(err) });
-                        defer allocator.free(msg);
-                        try display.showInfo(msg);
-                        return err;
-                    };
-                    if (final_status == 2) { // 2 typically means failed
-                        // Wait for all threads to complete before returning error to avoid segfault
-                        if (session.is_active) {
-                            _ = session.waitForCompletion(allocator) catch {};
-                        }
-                        const msg = try std.fmt.allocPrint(allocator, "Download failed for {s}", .{resource_id});
-                        defer allocator.free(msg);
-                        try display.showInfo(msg);
-                        return error.DownloadFailed;
-                    }
+                // Check if the download failed
+                const final_status = task.status.load(.acquire);
+                if (final_status == .failed) {
+                    const err_msg_owned = task.getError(allocator);
+                    defer if (err_msg_owned) |msg| allocator.free(msg);
+                    const err_msg = err_msg_owned orelse "Unknown error";
+
+                    const msg = try std.fmt.allocPrint(allocator, "Download failed for {s}: {s}", .{ resource_id, err_msg });
+                    defer allocator.free(msg);
+                    try display.showInfo(msg);
+                    return error.DownloadFailed;
                 }
             }
         }
@@ -934,13 +1011,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         }
     }
 
-    // Wait for any downloads that never got awaited during resource execution
-    if (download_session) |*session| {
-        if (session.is_active) {
-            try display.showInfo("Waiting for remaining downloads to complete...");
-            session.showFinalStatus(allocator) catch {};
+    // Wait for download thread to complete
+    if (download_thread) |thread| {
+        try display.showInfo("Waiting for remaining downloads to complete...");
+        thread.join();
+
+        // Show final stats
+        const stats = download_mgr.getStats();
+        if (stats.failed > 0) {
+            const msg = try std.fmt.allocPrint(allocator, "{d} downloads failed", .{stats.failed});
+            defer allocator.free(msg);
+            try display.showInfo(msg);
         }
-        session.deinit();
     }
 
     // Cleanup pending notifications

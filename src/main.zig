@@ -18,7 +18,8 @@ const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
 
 const main_params = clap.parseParamsComptime(
-    \\-h, --help   Print this help and exit
+    \\-h, --help       Print this help and exit
+    \\-v, --version    Show version information
     \\<command>
     \\
 );
@@ -127,6 +128,11 @@ pub fn main() !void {
         return;
     }
 
+    if (parsed.args.version != 0) {
+        try printVersion(allocator);
+        return;
+    }
+
     if (parsed.positionals[0]) |command| {
         return dispatchCommand(command, allocator, &iter);
     }
@@ -138,6 +144,10 @@ pub fn main() !void {
 fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     if (std.mem.eql(u8, command, "help")) {
         try printMainHelp(null);
+        return;
+    }
+    if (std.mem.eql(u8, command, "version")) {
+        try printVersion(allocator);
         return;
     }
     if (std.mem.eql(u8, command, "git-clone")) {
@@ -1079,9 +1089,16 @@ fn runProvisionCommand(allocator: std.mem.Allocator, iter: *std.process.ArgItera
         const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}.rb", .{ temp_dir, std.time.timestamp() });
         temp_file_path = temp_file;
 
-        // Use http_utils to download
-        const http_utils = @import("http_utils.zig");
-        const result = http_utils.downloadFile(allocator, script_path_or_url, temp_file, .{}) catch |err| {
+        // Download using new HTTP module
+        const http = @import("http.zig");
+        const cfg = http.Config{};
+        var client = http.Client.init(allocator, cfg) catch |err| {
+            std.debug.print("\nError: Failed to initialize HTTP client: {}\n", .{err});
+            return error.DownloadFailed;
+        };
+        defer client.deinit();
+
+        const response = client.get(script_path_or_url, null) catch |err| {
             std.debug.print("\nError: Failed to download provision script: {}\n", .{err});
             std.debug.print("URL: {s}\n", .{display_url});
             std.debug.print("\nPossible reasons:\n", .{});
@@ -1091,10 +1108,28 @@ fn runProvisionCommand(allocator: std.mem.Allocator, iter: *std.process.ArgItera
             std.debug.print("  • Server returned an error\n", .{});
             return error.DownloadFailed;
         };
+        defer {
+            var mut_resp = response;
+            mut_resp.deinit();
+        }
 
-        // Clean up result
-        if (result.etag) |etag| allocator.free(etag);
-        if (result.last_modified) |lm| allocator.free(lm);
+        // Check HTTP status code
+        if (response.status >= 400) {
+            std.debug.print("\nError: Server returned HTTP {d}\n", .{response.status});
+            std.debug.print("URL: {s}\n", .{display_url});
+            return error.DownloadFailed;
+        }
+
+        if (response.status < 200 or response.status >= 300) {
+            std.debug.print("\nError: Unexpected HTTP status {d}\n", .{response.status});
+            std.debug.print("URL: {s}\n", .{display_url});
+            return error.DownloadFailed;
+        }
+
+        // Write to temp file
+        const file = try std.fs.cwd().createFile(temp_file, .{});
+        defer file.close();
+        try file.writeAll(response.body);
 
         std.debug.print("[fetch] Downloaded to {s}\n", .{temp_file});
         break :blk temp_file;
@@ -1268,6 +1303,63 @@ fn printMainHelp(unknown: ?[]const u8) !void {
 
     // Footer
     help_formatter.HelpFormatter.printNote("Use 'hola <command> --help' for detailed command information");
+}
+
+fn printVersion(allocator: std.mem.Allocator) !void {
+    _ = allocator;
+    const curl = @import("curl.zig");
+
+    // Get curl version info
+    const curl_info = curl.getVersionInfo();
+    const curl_ver = curl.parseVersion(curl_info.version_num);
+
+    std.debug.print(
+        \\Hola version {s}
+        \\
+        \\Built with:
+        \\
+    , .{build_options.version});
+
+    // Core libraries
+    std.debug.print("  • Zig {s} (https://ziglang.org)\n", .{builtin.zig_version_string});
+    std.debug.print("  • libcurl {d}.{d}.{d} (https://curl.se)\n", .{ curl_ver.major, curl_ver.minor, curl_ver.patch });
+
+    if (curl_info.ssl_version) |ssl| {
+        std.debug.print("  • {s} (https://www.openssl.org)\n", .{std.mem.span(ssl)});
+    }
+
+    if (curl_info.libz_version) |libz| {
+        std.debug.print("  • zlib {s} (https://zlib.net)\n", .{std.mem.span(libz)});
+    }
+
+    // Additional compression libraries
+    std.debug.print("  • brotli (https://github.com/google/brotli)\n", .{});
+    std.debug.print("  • zstd (https://facebook.github.io/zstd)\n", .{});
+
+    // Git and SSH
+    std.debug.print("  • libgit2 (https://libgit2.org)\n", .{});
+    std.debug.print("  • libssh2 (https://www.libssh2.org)\n", .{});
+
+    // HTTP protocols
+    std.debug.print("  • nghttp2 - HTTP/2 (https://nghttp2.org)\n", .{});
+    std.debug.print("  • nghttp3 - HTTP/3 (https://nghttp2.org/nghttp3)\n", .{});
+
+    // Ruby
+    std.debug.print("  • mruby (https://mruby.org)\n", .{});
+
+    // Infrastructure as Code & Package managers
+    std.debug.print("\nInspired by and works with:\n", .{});
+    std.debug.print("  • Chef Infra (https://www.chef.io)\n", .{});
+    std.debug.print("  • Homebrew (https://brew.sh)\n", .{});
+    std.debug.print("  • mise (https://mise.jdx.dev)\n", .{});
+
+    std.debug.print(
+        \\
+        \\Special thanks to all the amazing open source projects that make Hola possible!
+        \\
+        \\For more information: https://github.com/ratazzi/hola
+        \\
+    , .{});
 }
 
 test "simple test" {

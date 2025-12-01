@@ -3,7 +3,7 @@ const indicatif = @import("indicatif.zig");
 const ansi = @import("ansi_term");
 const ansi_constants = @import("ansi_constants.zig");
 const ANSI = ansi_constants.ANSI;
-const http_utils = @import("http_utils.zig");
+const http = @import("http.zig");
 
 const AnsiStyle = ansi.style.Style;
 const AnsiColor = ansi.style.Color;
@@ -410,7 +410,7 @@ pub const ModernProvisionDisplay = struct {
 
     /// Format bytes to human-readable size
     fn formatSize(self: *Self, bytes: u64) ![]const u8 {
-        return http_utils.formatSize(self.allocator, bytes);
+        return http.formatSize(self.allocator, bytes);
     }
 
     /// Finish a download
