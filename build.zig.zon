@@ -41,7 +41,7 @@
             .hash = "hola_deps-0.1.0-clHq_1wbPgNNMb5Zag4eJicAHUGuSU42HVh33L-5jyn2",
         },
         .clap = .{
-            .url = "https://github.com/Hejsil/zig-clap/archive/refs/heads/master.tar.gz",
+            .url = "https://github.com/Hejsil/zig-clap/archive/c499116264c348e4a98d939917b2446cad79d5fb.tar.gz",
             .hash = "clap-0.11.0-oBajB-TnAQC7yPLnZRT5WzHZ_4Ly4dX2OILskli74b9H",
         },
         .vaxis = .{
