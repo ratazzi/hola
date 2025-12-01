@@ -51,20 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install libgit2 mruby openssl@3
-
       - name: Setup Zig
         uses: jdx/mise-action@v2
 
       - name: Build for ${{ matrix.target.name }}
         run: |
-          MRUBY_PATH=$(brew --prefix mruby)
-          echo "Using mruby path: $MRUBY_PATH"
           echo "Building for target: ${{ matrix.target.triple }}"
-
-          mise build -- -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }} -Dnightly=true
+          mise build -- -Dtarget=${{ matrix.target.triple }} -Dnightly=true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

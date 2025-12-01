@@ -23,24 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install libgit2 mruby openssl@3
-
       - name: Setup Zig
         uses: jdx/mise-action@v2
 
       - name: Run tests
         run: |
-          MRUBY_PATH=$(brew --prefix mruby)
-          echo "Running tests with mruby at: $MRUBY_PATH"
-          zig build test -Dmruby_path="$MRUBY_PATH"
+          echo "Running tests with bundled dependencies"
+          zig build test
 
       - name: Build (sanity check)
         run: |
-          MRUBY_PATH=$(brew --prefix mruby)
           echo "Building to verify compilation"
-          zig build -Dmruby_path="$MRUBY_PATH"
+          zig build
 
   build-check:
     name: Build Check (${{ matrix.target.name }})
@@ -55,18 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install libgit2 mruby openssl@3
-
       - name: Setup Zig
         uses: jdx/mise-action@v2
 
       - name: Build for ${{ matrix.target.name }}
         run: |
-          MRUBY_PATH=$(brew --prefix mruby)
           echo "Building for target: ${{ matrix.target.triple }}"
-          zig build -Dmruby_path="$MRUBY_PATH" -Dtarget=${{ matrix.target.triple }}
+          zig build -Dtarget=${{ matrix.target.triple }}
 
       - name: Verify binary
         run: |

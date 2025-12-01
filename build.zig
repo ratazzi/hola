@@ -30,12 +30,15 @@ pub fn build(b: *std.Build) !void {
     else
         "hola_deps_macos_arm64";
 
+    // Allow overriding mruby path for CI/testing with system mruby
+    const mruby_path_option = b.option([]const u8, "mruby_path", "Path to mruby installation (default: use bundled deps)");
+
     const hola_deps_dep = b.dependency(hola_deps_name, .{
         .target = target,
         .optimize = optimize,
     });
     const deps_path = hola_deps_dep.path(".").getPath(b);
-    const final_mruby_path = b.fmt("{s}/mruby", .{deps_path});
+    const final_mruby_path = mruby_path_option orelse b.fmt("{s}/mruby", .{deps_path});
     const final_libgit2_path = deps_path;
 
     const clap_dep = b.dependency("clap", .{
