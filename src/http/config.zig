@@ -10,17 +10,20 @@ pub const Config = struct {
     /// Connection timeout in milliseconds (for initial connection only)
     timeout_ms: u32 = 30000,
 
-    /// Maximum total timeout in seconds for the entire request (fallback protection)
+    /// Maximum total timeout in seconds for the entire request
+    /// Set to 0 to disable total timeout (default, relies on low_speed_limit protection)
     /// Primary timeout mechanism is low_speed_limit + low_speed_time
-    /// This guards against edge cases where server accepts connection but never responds
-    /// Set to 0 to disable (not recommended - may cause indefinite hangs)
-    max_timeout_s: u32 = 600,
+    /// Only set this if you need a hard deadline regardless of download speed
+    max_timeout_s: u32 = 0,
 
     /// Low speed limit in bytes/second (abort if speed drops below this)
     /// Set to 0 to disable low speed detection
-    low_speed_limit: u32 = 1024,
+    /// Default: 10KB/s - protects against stalled connections while allowing slow networks
+    low_speed_limit: u32 = 10240,
 
     /// Low speed time in seconds (abort if speed stays below limit for this long)
+    /// Must maintain at least low_speed_limit bytes/sec for this duration
+    /// Default: 30s - detects stalled connections while allowing brief slowdowns
     low_speed_time: u32 = 30,
 
     /// Follow HTTP redirects

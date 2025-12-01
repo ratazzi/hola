@@ -705,7 +705,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         allocator: std.mem.Allocator,
         tasks: *std.ArrayList(http.download.Task),
         mutex: *std.Thread.Mutex,
-        initialized: [256]std.atomic.Value(bool),  // Fixed size array with atomic values
+        initialized: [256]std.atomic.Value(bool), // Fixed size array with atomic values
 
         fn callback(ctx_ptr: *anyopaque, task_index: usize, downloaded: usize, total: usize) void {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
@@ -747,7 +747,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         .allocator = allocator,
         .tasks = &download_mgr.tasks,
         .mutex = &progress_mutex,
-        .initialized = undefined,  // Will initialize below
+        .initialized = undefined, // Will initialize below
     };
     // Initialize all atomic values to false
     for (&progress_ctx.initialized) |*init| {
