@@ -51,6 +51,6 @@ curl -fsSL -o hola "$URL"
 chmod +x hola
 
 # Remove macOS quarantine
-[ "$OS" = "darwin" ] && xattr -d com.apple.quarantine hola 2>/dev/null || true
+[ "$OS" = "macos" ] && xattr -d com.apple.quarantine hola 2>/dev/null || true
 
 echo "Done! Binary saved as: ./hola"
