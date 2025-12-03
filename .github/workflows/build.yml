@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - name: macos
+            triple: aarch64-macos
+          - name: linux
+            triple: x86_64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: jdx/mise-action@v2
+
+      - name: Build for ${{ matrix.target.name }}
+        run: |
+          echo "Building for target: ${{ matrix.target.triple }}"
+          mise build -- -Dtarget=${{ matrix.target.triple }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hola-${{ matrix.target.triple }}
+          path: zig-out/bin/hola-*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*/hola-*
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## What's Changed
+
+            <!-- Add release notes here before publishing -->
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.ref_name }}
