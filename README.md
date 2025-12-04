@@ -44,6 +44,41 @@ Symlink mapping. Dead simple.
 
 ---
 
+## Installation
+
+### Quick Install (Recommended)
+
+```bash
+curl -fsSL https://hola.ac/install | bash
+```
+
+This downloads the binary for your architecture (arm64/x86_64) and installs it to the current directory.
+
+### Homebrew
+
+```bash
+brew install ratazzi/hola/hola
+```
+
+### Manual Download
+
+Download the latest release from [GitHub Releases](https://github.com/ratazzi/hola/releases):
+
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/ratazzi/hola/releases/latest/download/hola-macos-aarch64 -o hola
+chmod +x hola
+xattr -d com.apple.quarantine hola
+sudo mv hola /usr/local/bin/
+
+# Linux (x86_64)
+curl -fsSL https://github.com/ratazzi/hola/releases/latest/download/hola-linux-x86_64 -o hola
+chmod +x hola
+sudo mv hola /usr/local/bin/
+```
+
+---
+
 ## Why Hola?
 
 ### Convention Over Configuration
