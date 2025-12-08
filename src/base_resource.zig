@@ -66,7 +66,17 @@ pub const CommonProps = struct {
 
         // Evaluate only_if (must be true to run)
         if (self.only_if_block) |block| {
-            const result = mruby.mrb_yield(mrb, block, mruby.mrb_nil_value());
+            // Use funcall instead of yield to properly handle exceptions
+            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
+            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
+
+            // Check for exceptions during call
+            const exc = mruby.mrb_get_exception(mrb);
+            if (mruby.mrb_test(exc)) {
+                mruby.mrb_print_error(mrb);
+                return error.MRubyException;
+            }
+
             if (!mruby.mrb_test(result)) {
                 return "skipped due to only_if"; // only_if returned falsy
             }
@@ -74,7 +84,17 @@ pub const CommonProps = struct {
 
         // Evaluate not_if (must be false to run)
         if (self.not_if_block) |block| {
-            const result = mruby.mrb_yield(mrb, block, mruby.mrb_nil_value());
+            // Use funcall instead of yield to properly handle exceptions
+            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
+            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
+
+            // Check for exceptions during call
+            const exc = mruby.mrb_get_exception(mrb);
+            if (mruby.mrb_test(exc)) {
+                mruby.mrb_print_error(mrb);
+                return error.MRubyException;
+            }
+
             if (mruby.mrb_test(result)) {
                 return "skipped due to not_if"; // not_if returned truthy
             }
@@ -306,7 +326,7 @@ pub fn applyFileAttributes(file_path: []const u8, attrs: FileAttributes) !void {
 }
 
 /// Get UID from username using getpwnam
-fn getUserId(username: []const u8) !std.posix.uid_t {
+pub fn getUserId(username: []const u8) !std.posix.uid_t {
     const c = @cImport({
         @cInclude("pwd.h");
         @cInclude("string.h");
@@ -322,7 +342,7 @@ fn getUserId(username: []const u8) !std.posix.uid_t {
 }
 
 /// Get GID from group name using getgrnam
-fn getGroupId(groupname: []const u8) !std.posix.gid_t {
+pub fn getGroupId(groupname: []const u8) !std.posix.gid_t {
     const c = @cImport({
         @cInclude("grp.h");
         @cInclude("string.h");

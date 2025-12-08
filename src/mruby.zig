@@ -151,7 +151,13 @@ pub const State = struct {
             @memcpy(buf[0..code.len], code);
             buf[code.len] = 0;
             _ = mrb_load_string(mrb, &buf);
-            mrb_print_error(mrb);
+
+            // Check if there was an exception
+            const exc = mrb_get_exception(mrb);
+            if (mrb_test(exc)) {
+                mrb_print_error(mrb);
+                return error.MRubyException;
+            }
             return;
         }
 
@@ -161,7 +167,13 @@ pub const State = struct {
         @memcpy(mem[0..code.len], code);
         mem[code.len] = 0;
         _ = mrb_load_string(mrb, mem.ptr);
-        mrb_print_error(mrb);
+
+        // Check if there was an exception
+        const exc = mrb_get_exception(mrb);
+        if (mrb_test(exc)) {
+            mrb_print_error(mrb);
+            return error.MRubyException;
+        }
     }
 
     pub fn evalFile(self: *State, file_path: []const u8) !void {
@@ -184,7 +196,11 @@ pub const State = struct {
         // Load and execute the file with context
         _ = mrb_load_file_cxt(mrb, file, cxt);
 
-        // Print any errors
-        mrb_print_error(mrb);
+        // Check if there was an exception
+        const exc = mrb_get_exception(mrb);
+        if (mrb_test(exc)) {
+            mrb_print_error(mrb);
+            return error.MRubyException;
+        }
     }
 };
