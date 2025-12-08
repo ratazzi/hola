@@ -699,6 +699,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // This registers File.stat and File.mtime as class methods
     file_ext.setupFileExtensions(mrb_ptr);
 
+    // Load OpenStruct utility class (used by node object and other resources)
+    try mrb.evalString(@embedFile("ruby_prelude/open_struct.rb"));
+
     // Load Ruby DSL preludes for resource types
     try mrb.evalString(resources.file.ruby_prelude);
     try mrb.evalString(resources.execute.ruby_prelude);

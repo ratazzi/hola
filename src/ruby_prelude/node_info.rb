@@ -1,92 +1,60 @@
 # Node object providing system information (like Chef's node)
+# This is a simplified wrapper that loads all data upfront from Zig
 class NodeObject
   def initialize
-    @cache = {}
+    # Get all node info in one call (high reuse with node-info command)
+    @data = ZigBackend.get_full_node_info
+    # Convert all nested hashes to OpenStruct for dot notation
+    convert_nested_hashes!
   end
 
   def [](key)
-    @cache[key] ||= fetch_value(key)
+    @data[key.to_s]
   end
 
-  def fetch_value(key)
-    case key.to_s
-    when 'hostname'
-      ZigBackend.get_node_hostname
-    when 'fqdn'
-      ZigBackend.get_node_fqdn
-    when 'platform'
-      ZigBackend.get_node_platform
-    when 'platform_family'
-      ZigBackend.get_node_platform_family
-    when 'platform_version'
-      ZigBackend.get_node_platform_version
-    when 'os'
-      ZigBackend.get_node_os
-    when 'kernel'
-      # Return a nested hash for kernel info
-      {
-        'name' => ZigBackend.get_node_kernel_name,
-        'release' => ZigBackend.get_node_kernel_release,
-        'machine' => ZigBackend.get_node_machine
-      }
-    when 'cpu'
-      # Return a nested hash for CPU info
-      {
-        'architecture' => ZigBackend.get_node_cpu_arch
-      }
-    when 'machine'
-      ZigBackend.get_node_machine
-    when 'lsb'
-      # Return LSB information (Linux only)
-      ZigBackend.get_node_lsb_info
-    when 'network'
-      # Return a nested hash for network info
-      {
-        'interfaces' => ZigBackend.get_node_network_interfaces,
-        'default_gateway' => ZigBackend.get_node_default_gateway_ip,
-        'default_interface' => ZigBackend.get_node_default_interface
-      }
-    when 'ec2'
-      # Return EC2 instance information (AWS only)
-      ZigBackend.get_node_ec2_info
-    else
-      nil
+  # Support method_missing for dot notation access
+  def method_missing(method, *args)
+    key = method.to_s
+    # Remove trailing '?' for predicate methods
+    key = key[0..-2] if key[-1] == '?'
+
+    value = self[key]
+
+    # Handle predicate methods (e.g., node.linux?)
+    if method.to_s[-1] == '?'
+      return !value.nil? && value != false
+    end
+
+    value
+  end
+
+  def respond_to_missing?(method, include_private = false)
+    true
+  end
+
+  private
+
+  # Convert all nested hashes to OpenStruct recursively
+  def convert_nested_hashes!
+    @data.each do |key, value|
+      @data[key] = convert_to_openstruct(value)
     end
   end
 
-  # Common shortcuts
-  def hostname
-    self['hostname']
+  # Helper to convert Hash to OpenStruct recursively
+  def convert_to_openstruct(value)
+    case value
+    when Hash
+      OpenStruct.new(value)
+    when Array
+      value.map { |v| convert_to_openstruct(v) }
+    else
+      value
+    end
   end
 
-  def platform
-    self['platform']
-  end
-
-  def platform_family
-    self['platform_family']
-  end
-
-  def os
-    self['os']
-  end
-
-  # Check if running on specific platform
-  def mac_os_x?
-    platform == 'mac_os_x'
-  end
-
-  def linux?
-    os == 'linux'
-  end
-
-  def debian?
-    platform_family == 'debian'
-  end
-
-  def rhel?
-    platform_family == 'rhel'
-  end
+  # Platform check helpers (predicate methods handled by method_missing)
+  # These are just for clarity, method_missing handles node.linux?, node.mac_os_x?, etc.
 end
 
 # Create global node instance

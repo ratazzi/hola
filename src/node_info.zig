@@ -1087,6 +1087,177 @@ pub fn zig_get_node_ec2_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv
     return mruby.mrb_nil_value();
 }
 
+/// mruby binding: get_node_memory_info()
+pub fn zig_get_node_memory_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+    const memory = getMemoryInfo(allocator) catch return mruby.mrb_nil_value();
+    defer {
+        allocator.free(memory.total);
+        allocator.free(memory.free);
+        if (memory.available) |v| allocator.free(v);
+        if (memory.active) |v| allocator.free(v);
+        if (memory.inactive) |v| allocator.free(v);
+        if (memory.wired) |v| allocator.free(v);
+        if (memory.compressed) |v| allocator.free(v);
+        if (memory.buffers) |v| allocator.free(v);
+        if (memory.cached) |v| allocator.free(v);
+        if (memory.swap_total) |v| allocator.free(v);
+        if (memory.swap_free) |v| allocator.free(v);
+    }
+
+    // Return a hash with memory information
+    const hash = mruby.mrb_hash_new(mrb);
+
+    // Helper function to add string to hash
+    const addStr = struct {
+        fn add(m: *mruby.mrb_state, h: mruby.mrb_value, key: []const u8, val: []const u8) void {
+            const k = mruby.mrb_str_new(m, key.ptr, @intCast(key.len));
+            const v = mruby.mrb_str_new(m, val.ptr, @intCast(val.len));
+            mruby.mrb_hash_set(m, h, k, v);
+        }
+    }.add;
+
+    // Add required fields
+    addStr(mrb, hash, "total", memory.total);
+    addStr(mrb, hash, "free", memory.free);
+
+    // Add optional fields
+    if (memory.available) |v| addStr(mrb, hash, "available", v);
+    if (memory.active) |v| addStr(mrb, hash, "active", v);
+    if (memory.inactive) |v| addStr(mrb, hash, "inactive", v);
+    if (memory.wired) |v| addStr(mrb, hash, "wired", v);
+    if (memory.compressed) |v| addStr(mrb, hash, "compressed", v);
+    if (memory.buffers) |v| addStr(mrb, hash, "buffers", v);
+    if (memory.cached) |v| addStr(mrb, hash, "cached", v);
+    if (memory.swap_total) |v| addStr(mrb, hash, "swap_total", v);
+    if (memory.swap_free) |v| addStr(mrb, hash, "swap_free", v);
+
+    return hash;
+}
+
+/// mruby binding: get_full_node_info() - Returns complete node information as hash
+pub fn zig_get_full_node_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+    const node = getNodeInfo(allocator) catch return mruby.mrb_nil_value();
+    defer node.deinit(allocator);
+
+    // Create main hash
+    const hash = mruby.mrb_hash_new(mrb);
+
+    // Helper to add string
+    const addStr = struct {
+        fn add(m: *mruby.mrb_state, h: mruby.mrb_value, key: []const u8, val: []const u8) void {
+            const k = mruby.mrb_str_new(m, key.ptr, @intCast(key.len));
+            const v = mruby.mrb_str_new(m, val.ptr, @intCast(val.len));
+            mruby.mrb_hash_set(m, h, k, v);
+        }
+    }.add;
+
+    // Helper to add optional string
+    const addOptStr = struct {
+        fn add(m: *mruby.mrb_state, h: mruby.mrb_value, key: []const u8, val: ?[]const u8) void {
+            const k = mruby.mrb_str_new(m, key.ptr, @intCast(key.len));
+            const v = if (val) |v_str| mruby.mrb_str_new(m, v_str.ptr, @intCast(v_str.len)) else mruby.mrb_nil_value();
+            mruby.mrb_hash_set(m, h, k, v);
+        }
+    }.add;
+
+    // Basic fields
+    addStr(mrb, hash, "hostname", node.hostname);
+    addStr(mrb, hash, "fqdn", node.fqdn);
+    addStr(mrb, hash, "platform", node.platform);
+    addStr(mrb, hash, "platform_family", node.platform_family);
+    addOptStr(mrb, hash, "platform_version", node.platform_version);
+    addStr(mrb, hash, "os", node.os);
+    addStr(mrb, hash, "machine", node.machine);
+
+    // Kernel hash
+    const kernel_hash = mruby.mrb_hash_new(mrb);
+    addStr(mrb, kernel_hash, "name", node.kernel.name);
+    addStr(mrb, kernel_hash, "release", node.kernel.release);
+    addStr(mrb, kernel_hash, "machine", node.kernel.machine);
+    const kernel_key = mruby.mrb_str_new(mrb, "kernel", 6);
+    mruby.mrb_hash_set(mrb, hash, kernel_key, kernel_hash);
+
+    // CPU hash
+    const cpu_hash = mruby.mrb_hash_new(mrb);
+    addStr(mrb, cpu_hash, "architecture", node.cpu.architecture);
+    // Add CPU numeric fields
+    const cores_key = mruby.mrb_str_new(mrb, "cores", 5);
+    const cores_val = mruby.mrb_int_value(mrb, @intCast(node.cpu.cores));
+    mruby.mrb_hash_set(mrb, cpu_hash, cores_key, cores_val);
+
+    const total_key = mruby.mrb_str_new(mrb, "total", 5);
+    const total_val = mruby.mrb_int_value(mrb, @intCast(node.cpu.total));
+    mruby.mrb_hash_set(mrb, cpu_hash, total_key, total_val);
+
+    const real_key = mruby.mrb_str_new(mrb, "real", 4);
+    const real_val = mruby.mrb_int_value(mrb, @intCast(node.cpu.real));
+    mruby.mrb_hash_set(mrb, cpu_hash, real_key, real_val);
+
+    if (node.cpu.model_name.len > 0) {
+        addStr(mrb, cpu_hash, "model_name", node.cpu.model_name);
+    }
+
+    const cpu_key = mruby.mrb_str_new(mrb, "cpu", 3);
+    mruby.mrb_hash_set(mrb, hash, cpu_key, cpu_hash);
+
+    // Memory hash
+    const memory_hash = mruby.mrb_hash_new(mrb);
+    addStr(mrb, memory_hash, "total", node.memory.total);
+    addStr(mrb, memory_hash, "free", node.memory.free);
+    addOptStr(mrb, memory_hash, "available", node.memory.available);
+    addOptStr(mrb, memory_hash, "active", node.memory.active);
+    addOptStr(mrb, memory_hash, "inactive", node.memory.inactive);
+    addOptStr(mrb, memory_hash, "wired", node.memory.wired);
+    addOptStr(mrb, memory_hash, "compressed", node.memory.compressed);
+    addOptStr(mrb, memory_hash, "buffers", node.memory.buffers);
+    addOptStr(mrb, memory_hash, "cached", node.memory.cached);
+    addOptStr(mrb, memory_hash, "swap_total", node.memory.swap_total);
+    addOptStr(mrb, memory_hash, "swap_free", node.memory.swap_free);
+    const memory_key = mruby.mrb_str_new(mrb, "memory", 6);
+    mruby.mrb_hash_set(mrb, hash, memory_key, memory_hash);
+
+    // Network hash
+    const network_hash = mruby.mrb_hash_new(mrb);
+    addOptStr(mrb, network_hash, "default_gateway", node.network.default_gateway);
+    addOptStr(mrb, network_hash, "default_interface", node.network.default_interface);
+    const network_key = mruby.mrb_str_new(mrb, "network", 7);
+    mruby.mrb_hash_set(mrb, hash, network_key, network_hash);
+
+    // LSB hash (Linux only)
+    if (node.lsb) |lsb| {
+        const lsb_hash = mruby.mrb_hash_new(mrb);
+        addStr(mrb, lsb_hash, "id", lsb.id);
+        addStr(mrb, lsb_hash, "description", lsb.description);
+        addStr(mrb, lsb_hash, "release", lsb.release);
+        addStr(mrb, lsb_hash, "codename", lsb.codename);
+        const lsb_key = mruby.mrb_str_new(mrb, "lsb", 3);
+        mruby.mrb_hash_set(mrb, hash, lsb_key, lsb_hash);
+    }
+
+    // EC2 hash (AWS only)
+    if (node.ec2) |ec2| {
+        const ec2_hash = mruby.mrb_hash_new(mrb);
+        addStr(mrb, ec2_hash, "instance_id", ec2.instance_id);
+        addStr(mrb, ec2_hash, "instance_type", ec2.instance_type);
+        addStr(mrb, ec2_hash, "account_id", ec2.account_id);
+        addStr(mrb, ec2_hash, "region", ec2.region);
+        addStr(mrb, ec2_hash, "availability_zone", ec2.availability_zone);
+        addStr(mrb, ec2_hash, "image_id", ec2.image_id);
+        addStr(mrb, ec2_hash, "architecture", ec2.architecture);
+        addStr(mrb, ec2_hash, "private_ip", ec2.private_ip);
+        addOptStr(mrb, ec2_hash, "kernel_id", ec2.kernel_id);
+        addOptStr(mrb, ec2_hash, "ramdisk_id", ec2.ramdisk_id);
+        addOptStr(mrb, ec2_hash, "billing_products", ec2.billing_products);
+        addStr(mrb, ec2_hash, "pending_time", ec2.pending_time);
+        const ec2_key = mruby.mrb_str_new(mrb, "ec2", 3);
+        mruby.mrb_hash_set(mrb, hash, ec2_key, ec2_hash);
+    }
+
+    return hash;
+}
+
 // External helper functions from mruby_helpers.c
 extern fn zig_mrb_true_value() mruby.mrb_value;
 extern fn zig_mrb_false_value() mruby.mrb_value;
@@ -1362,6 +1533,7 @@ pub const ruby_prelude = @embedFile("ruby_prelude/node_info.rb");
 const mruby_module = @import("mruby_module.zig");
 
 const node_info_functions = [_]mruby_module.ModuleFunction{
+    .{ .name = "get_full_node_info", .func = zig_get_full_node_info, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_hostname", .func = zig_get_node_hostname, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_fqdn", .func = zig_get_node_fqdn, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_platform", .func = zig_get_node_platform, .args = mruby.MRB_ARGS_NONE() },
@@ -1377,6 +1549,7 @@ const node_info_functions = [_]mruby_module.ModuleFunction{
     .{ .name = "get_node_default_interface", .func = zig_get_node_default_interface, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_lsb_info", .func = zig_get_node_lsb_info, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_ec2_info", .func = zig_get_node_ec2_info, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_memory_info", .func = zig_get_node_memory_info, .args = mruby.MRB_ARGS_NONE() },
 };
 
 fn getFunctions() []const mruby_module.ModuleFunction {
