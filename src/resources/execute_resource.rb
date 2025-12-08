@@ -8,7 +8,9 @@ class ExecuteResource
     @cwd = ""
     @user = ""
     @group = ""
+    @environment = {}  # Hash of environment variables
     @live_stream = false  # Default: don't output to stdout
+    @creates = ""  # Path to file - skip execution if it exists
     @action = "run"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -24,7 +26,11 @@ class ExecuteResource
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
-    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, @live_stream, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+
+    # Convert environment hash to array of [key, value] pairs
+    environment_arg = @environment.map { |k, v| [k.to_s, v.to_s] }
+
+    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, environment_arg, @live_stream, @creates, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def command(value)
@@ -43,12 +49,20 @@ class ExecuteResource
     @group = value.to_s
   end
 
+  def environment(value)
+    @environment = value
+  end
+
   def action(value)
     @action = value.to_s
   end
 
   def live_stream(value)
     @live_stream = value
+  end
+
+  def creates(value)
+    @creates = value.to_s
   end
 
   def timeout(value)

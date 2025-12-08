@@ -15,6 +15,7 @@ pub const Resource = struct {
     group: ?[]const u8, // Group to run as
     environment: ?[]const u8, // Environment variables (future)
     live_stream: bool, // Whether to output command result to stdout
+    creates: ?[]const u8, // Path to a file - skip execution if it exists
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -32,6 +33,7 @@ pub const Resource = struct {
         if (self.user) |user| allocator.free(user);
         if (self.group) |group| allocator.free(group);
         if (self.environment) |env| allocator.free(env);
+        if (self.creates) |creates| allocator.free(creates);
 
         // Deinit common props
         var common = self.common;
@@ -50,6 +52,27 @@ pub const Resource = struct {
                 .action = action_name,
                 .skip_reason = reason,
             };
+        }
+
+        // Check 'creates' property - skip if file exists
+        if (self.creates) |creates_path| {
+            const file_exists = blk: {
+                std.fs.cwd().access(creates_path, .{}) catch |err| {
+                    if (err != error.FileNotFound) {
+                        logger.warn("execute[{s}]: Error checking creates path '{s}': {}", .{ self.name, creates_path, err });
+                    }
+                    break :blk false; // File doesn't exist
+                };
+                break :blk true; // File exists
+            };
+
+            if (file_exists) {
+                return base.ApplyResult{
+                    .was_updated = false,
+                    .action = "run",
+                    .skip_reason = "file specified by 'creates' already exists",
+                };
+            }
         }
 
         switch (self.action) {
@@ -101,6 +124,7 @@ pub const Resource = struct {
         cwd: ?[]const u8,
         user: ?[]const u8,
         group: ?[]const u8,
+        environment: ?[]const u8,
     };
 
     fn executeCommand(ctx: ExecuteContext) !ExecuteResult {
@@ -117,6 +141,40 @@ pub const Resource = struct {
         // Set working directory if specified
         if (ctx.cwd) |cwd| {
             child.cwd = cwd;
+        }
+
+        // Set environment variables if specified
+        // Note: env_map must live until child.wait() completes
+        var env_map_storage: ?std.process.EnvMap = null;
+        defer if (env_map_storage) |*map| map.deinit();
+
+        if (ctx.environment) |env_str| {
+            // Parse environment string "KEY=VALUE\0KEY2=VALUE2\0" into a map
+            // Start with current environment
+            var env_map = try std.process.getEnvMap(temp_allocator);
+
+            // Parse and add/override environment variables
+            var pos: usize = 0;
+            while (pos < env_str.len) {
+                // Find next KEY=VALUE pair (null-terminated)
+                const start = pos;
+                while (pos < env_str.len and env_str[pos] != 0) : (pos += 1) {}
+
+                const pair = env_str[start..pos];
+                if (pair.len > 0) {
+                    // Split on '='
+                    if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
+                        const key = pair[0..eq_pos];
+                        const value = pair[eq_pos + 1 ..];
+                        try env_map.put(key, value);
+                    }
+                }
+
+                pos += 1; // Skip null terminator
+            }
+
+            env_map_storage = env_map;
+            child.env_map = &env_map_storage.?;
         }
 
         // Set user and/or group if specified (requires root privileges)
@@ -192,6 +250,7 @@ pub const Resource = struct {
             .cwd = self.cwd,
             .user = self.user,
             .group = self.group,
+            .environment = self.environment,
         };
 
         const result = try AsyncExecutor.executeWithContext(
@@ -280,7 +339,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("execute_resource.rb");
 
 /// Zig callback: called from Ruby to add an execute resource
-/// Format: add_execute(name, command, cwd, user, group, live_stream, action, only_if_block, not_if_block, ignore_failure, notifications_array)
+/// Format: add_execute(name, command, cwd, user, group, environment_array, live_stream, creates, action, only_if_block, not_if_block, ignore_failure, notifications_array, subscriptions_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -294,7 +353,9 @@ pub fn zigAddResource(
     var cwd_val: mruby.mrb_value = undefined;
     var user_val: mruby.mrb_value = undefined;
     var group_val: mruby.mrb_value = undefined;
+    var environment_val: mruby.mrb_value = undefined;
     var live_stream_val: mruby.mrb_value = undefined;
+    var creates_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
@@ -302,14 +363,15 @@ pub fn zigAddResource(
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Get 5 strings + 1 bool + 1 string + 3 optional (2 blocks + 1 bool + 2 arrays)
-    _ = mruby.mrb_get_args(mrb, "SSSSSoS|oooAA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &live_stream_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // Get 5 strings + 1 array + 1 bool + 2 strings + 3 optional (2 blocks + 1 bool + 2 arrays)
+    _ = mruby.mrb_get_args(mrb, "SSSSSAoSS|oooAA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &environment_val, &live_stream_val, &creates_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const command_cstr = mruby.mrb_str_to_cstr(mrb, command_val);
     const cwd_cstr = mruby.mrb_str_to_cstr(mrb, cwd_val);
     const user_cstr = mruby.mrb_str_to_cstr(mrb, user_val);
     const group_cstr = mruby.mrb_str_to_cstr(mrb, group_val);
+    const creates_cstr = mruby.mrb_str_to_cstr(mrb, creates_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
 
     const name = allocator.dupe(u8, std.mem.span(name_cstr)) catch return mruby.mrb_nil_value();
@@ -335,11 +397,51 @@ pub fn zigAddResource(
 
     const live_stream = mruby.mrb_test(live_stream_val);
 
+    const creates_str = std.mem.span(creates_cstr);
+    const creates: ?[]const u8 = if (creates_str.len > 0)
+        allocator.dupe(u8, creates_str) catch return mruby.mrb_nil_value()
+    else
+        null;
+
     const action_str = std.mem.span(action_cstr);
     const action: Resource.Action = if (std.mem.eql(u8, action_str, "nothing"))
         .nothing
     else
         .run;
+
+    // Parse environment array [[key, value], ...]
+    var environment: ?[]const u8 = null;
+    const env_len = mruby.mrb_ary_len(mrb, environment_val);
+    if (env_len > 0) {
+        // Build environment string in format "KEY=VALUE\0KEY2=VALUE2\0"
+        var env_list = std.ArrayList(u8).initCapacity(allocator, @intCast(env_len * 32)) catch std.ArrayList(u8).empty;
+        defer env_list.deinit(allocator);
+
+        var i: mruby.mrb_int = 0;
+        while (i < env_len) : (i += 1) {
+            const pair = mruby.mrb_ary_ref(mrb, environment_val, i);
+            if (mruby.mrb_ary_len(mrb, pair) != 2) continue;
+
+            const key_val = mruby.mrb_ary_ref(mrb, pair, 0);
+            const val_val = mruby.mrb_ary_ref(mrb, pair, 1);
+
+            const key_cstr = mruby.mrb_str_to_cstr(mrb, key_val);
+            const val_cstr = mruby.mrb_str_to_cstr(mrb, val_val);
+
+            const key_str = std.mem.span(key_cstr);
+            const val_str = std.mem.span(val_cstr);
+
+            // Append "KEY=VALUE\0"
+            env_list.appendSlice(allocator, key_str) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, '=') catch return mruby.mrb_nil_value();
+            env_list.appendSlice(allocator, val_str) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, 0) catch return mruby.mrb_nil_value();
+        }
+
+        if (env_list.items.len > 0) {
+            environment = allocator.dupe(u8, env_list.items) catch return mruby.mrb_nil_value();
+        }
+    }
 
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
@@ -351,8 +453,9 @@ pub fn zigAddResource(
         .cwd = cwd,
         .user = user,
         .group = group,
-        .environment = null,
+        .environment = environment,
         .live_stream = live_stream,
+        .creates = creates,
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();
