@@ -5,6 +5,8 @@ class LinkResource
   def initialize(path, &block)
     @path = File.expand_path(path)
     @target = ""
+    @owner = ""
+    @group = ""
     @action = "create"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -17,11 +19,19 @@ class LinkResource
     not_if_arg = @not_if_proc || nil
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
-    ZigBackend.add_link(@path, @target, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    ZigBackend.add_link(@path, @target, @owner, @group, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def to(value)
     @target = File.expand_path(value.to_s)
+  end
+
+  def owner(value)
+    @owner = value.to_s
+  end
+
+  def group(value)
+    @group = value.to_s
   end
 
   def action(value)
