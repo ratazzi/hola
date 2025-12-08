@@ -28,6 +28,14 @@ pub fn getDefaultDotfilesPath(allocator: std.mem.Allocator, home: []const u8) ![
     }
 }
 
+/// Helper function to ignore specific errors
+inline fn ignoreError(err: anyerror, comptime errors_to_ignore: []const anyerror) !void {
+    inline for (errors_to_ignore) |ignored| {
+        if (err == ignored) return;
+    }
+    return err;
+}
+
 pub fn saveDotfilesPreference(allocator: std.mem.Allocator, dotfiles_path: []const u8, home: []const u8) !void {
     const state_dir = try std.fs.path.join(allocator, &.{ home, ".local/state/hola" });
     defer allocator.free(state_dir);
@@ -35,15 +43,8 @@ pub fn saveDotfilesPreference(allocator: std.mem.Allocator, dotfiles_path: []con
     const state_link = try std.fs.path.join(allocator, &.{ state_dir, "dotfiles" });
     defer allocator.free(state_link);
 
-    std.fs.makeDirAbsolute(state_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-
-    std.fs.deleteFileAbsolute(state_link) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    std.fs.makeDirAbsolute(state_dir) catch |err| try ignoreError(err, &.{error.PathAlreadyExists});
+    std.fs.deleteFileAbsolute(state_link) catch |err| try ignoreError(err, &.{error.FileNotFound});
 
     try std.fs.symLinkAbsolute(dotfiles_path, state_link, .{});
 }
