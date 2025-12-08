@@ -220,6 +220,20 @@ fn wrapGit(res: resources.git.Resource) resources.Resource {
     return .{ .git = res };
 }
 
+fn buildUserId(allocator: std.mem.Allocator, res: *const resources.user.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "user", res.username);
+}
+fn wrapUser(res: resources.user.Resource) resources.Resource {
+    return .{ .user = res };
+}
+
+fn buildGroupId(allocator: std.mem.Allocator, res: *const resources.group.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "group", res.group_name);
+}
+fn wrapGroup(res: resources.group.Resource) resources.Resource {
+    return .{ .group = res };
+}
+
 /// Get a short filename from URL for display
 fn getShortFileNameFromUrl(url: []const u8) []const u8 {
     if (std.mem.lastIndexOf(u8, url, "/")) |last_slash| {
@@ -449,6 +463,30 @@ export fn zig_add_git_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) cal
     );
 }
 
+// Zig callback for user resource (cross-platform)
+export fn zig_add_user_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.user.Resource,
+        mrb,
+        self,
+        resources.user.zigAddResource,
+        buildUserId,
+        wrapUser,
+    );
+}
+
+// Zig callback for group resource (cross-platform)
+export fn zig_add_group_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.group.Resource,
+        mrb,
+        self,
+        resources.group.zigAddResource,
+        buildGroupId,
+        wrapGroup,
+    );
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -619,6 +657,26 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(13) | mruby.MRB_ARGS_OPT(5), // 13 required + 5 optional
     );
 
+    // Register user resource (cross-platform)
+    // Signature: add_user(username, uid, gid, comment, home, shell, password, system, manage_home, non_unique, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_user",
+        zig_add_user_resource,
+        mruby.MRB_ARGS_REQ(11) | mruby.MRB_ARGS_OPT(5), // 11 required + 5 optional
+    );
+
+    // Register group resource (cross-platform)
+    // Signature: add_group(group_name, gid, members, excluded_members, append, comment, system, non_unique, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_group",
+        zig_add_group_resource,
+        mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), // 9 required + 5 optional
+    );
+
     // Register all API modules using the unified interface
     // Register modules in dependency order: JSON must be registered before http_client
     // because http_client's Ruby prelude calls JSON.parse in Response#json method
@@ -663,6 +721,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.ruby_block.ruby_prelude);
     // Load git resource
     try mrb.evalString(resources.git.ruby_prelude);
+    // Load user and group resources
+    try mrb.evalString(resources.user.ruby_prelude);
+    try mrb.evalString(resources.group.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 

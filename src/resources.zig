@@ -53,9 +53,9 @@ pub const package = @import("resources/package.zig");
 // Cross-platform ruby_block resource
 pub const ruby_block = @import("resources/ruby_block.zig");
 
-// Future resources:
-// pub const service = @import("resources/service.zig");
-// pub const user = @import("resources/user.zig");
+// User and group management resources
+pub const user = @import("resources/user.zig");
+pub const group = @import("resources/group.zig");
 
 pub const Notification = notification.Notification;
 pub const ResourceId = notification.ResourceId;
@@ -97,6 +97,8 @@ const ResourceMacOs = union(enum) {
     package: package.Resource,
     ruby_block: ruby_block.Resource,
     git: git.Resource,
+    user: user.Resource,
+    group: group.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -112,6 +114,8 @@ const ResourceMacOs = union(enum) {
             .package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
             .git => |res| res.deinit(allocator),
+            .user => |res| res.deinit(allocator),
+            .group => |res| res.deinit(allocator),
         }
     }
 
@@ -129,6 +133,8 @@ const ResourceMacOs = union(enum) {
             .package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
             .git => |res| try res.apply(),
+            .user => |res| try res.apply(),
+            .group => |res| try res.apply(),
         };
     }
 
@@ -146,6 +152,8 @@ const ResourceMacOs = union(enum) {
             .package => |res| res.displayName(),
             .ruby_block => |res| res.name,
             .git => |res| res.destination,
+            .user => |res| res.username,
+            .group => |res| res.group_name,
         };
     }
 
@@ -163,6 +171,8 @@ const ResourceMacOs = union(enum) {
             .package => |*res| &res.common,
             .ruby_block => |*res| &res.common,
             .git => |*res| &res.common,
+            .user => |*res| &res.common,
+            .group => |*res| &res.common,
         };
     }
 
@@ -180,6 +190,8 @@ const ResourceMacOs = union(enum) {
             .package => |res| res.common.ignore_failure,
             .ruby_block => |res| res.common.ignore_failure,
             .git => |res| res.common.ignore_failure,
+            .user => |res| res.common.ignore_failure,
+            .group => |res| res.common.ignore_failure,
         };
     }
 };
@@ -197,6 +209,8 @@ const ResourceGeneric = union(enum) {
     ruby_block: ruby_block.Resource,
     route: route.Resource,
     git: git.Resource,
+    user: user.Resource,
+    group: group.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -212,6 +226,8 @@ const ResourceGeneric = union(enum) {
             .ruby_block => |res| res.deinit(allocator),
             .route => |res| res.deinit(allocator),
             .git => |res| res.deinit(allocator),
+            .user => |res| res.deinit(allocator),
+            .group => |res| res.deinit(allocator),
         }
     }
 
@@ -229,6 +245,8 @@ const ResourceGeneric = union(enum) {
             .ruby_block => |res| try res.apply(),
             .route => |res| try res.apply(),
             .git => |res| try res.apply(),
+            .user => |res| try res.apply(),
+            .group => |res| try res.apply(),
         };
     }
 
@@ -246,6 +264,8 @@ const ResourceGeneric = union(enum) {
             .ruby_block => |res| res.name,
             .route => |res| res.target,
             .git => |res| res.destination,
+            .user => |res| res.username,
+            .group => |res| res.group_name,
         };
     }
 
@@ -263,6 +283,8 @@ const ResourceGeneric = union(enum) {
             .ruby_block => |*res| &res.common,
             .route => |*res| &res.common,
             .git => |*res| &res.common,
+            .user => |*res| &res.common,
+            .group => |*res| &res.common,
         };
     }
 
@@ -280,6 +302,8 @@ const ResourceGeneric = union(enum) {
             .ruby_block => |res| res.common.ignore_failure,
             .route => |res| res.common.ignore_failure,
             .git => |res| res.common.ignore_failure,
+            .user => |res| res.common.ignore_failure,
+            .group => |res| res.common.ignore_failure,
         };
     }
 };
