@@ -28,6 +28,7 @@ pub const Node = struct {
     machine: []const u8,
     kernel: Kernel,
     cpu: CPU,
+    memory: Memory,
     network: Network,
     lsb: ?LsbInfo = null,
     platform_checks: PlatformChecks,
@@ -41,6 +42,18 @@ pub const Node = struct {
         if (self.platform_version) |v| allocator.free(v);
         allocator.free(self.machine);
         allocator.free(self.kernel.release);
+        if (self.cpu.model_name.len > 0) allocator.free(self.cpu.model_name);
+        if (self.memory.total.len > 0) allocator.free(self.memory.total);
+        if (self.memory.free.len > 0) allocator.free(self.memory.free);
+        if (self.memory.available) |v| allocator.free(v);
+        if (self.memory.active) |v| allocator.free(v);
+        if (self.memory.inactive) |v| allocator.free(v);
+        if (self.memory.wired) |v| allocator.free(v);
+        if (self.memory.compressed) |v| allocator.free(v);
+        if (self.memory.buffers) |v| allocator.free(v);
+        if (self.memory.cached) |v| allocator.free(v);
+        if (self.memory.swap_total) |v| allocator.free(v);
+        if (self.memory.swap_free) |v| allocator.free(v);
         if (self.network.default_gateway) |v| allocator.free(v);
         if (self.network.default_interface) |v| allocator.free(v);
         for (self.network.interfaces) |iface| {
@@ -65,6 +78,24 @@ pub const Kernel = struct {
 
 pub const CPU = struct {
     architecture: []const u8,
+    cores: u32 = 0,
+    total: u32 = 0,
+    real: u32 = 0,
+    model_name: []const u8 = "",
+};
+
+pub const Memory = struct {
+    total: []const u8 = "",
+    free: []const u8 = "",
+    available: ?[]const u8 = null,
+    active: ?[]const u8 = null,
+    inactive: ?[]const u8 = null,
+    wired: ?[]const u8 = null,
+    compressed: ?[]const u8 = null,
+    buffers: ?[]const u8 = null,
+    cached: ?[]const u8 = null,
+    swap_total: ?[]const u8 = null,
+    swap_free: ?[]const u8 = null,
 };
 
 pub const PlatformChecks = struct {
@@ -130,6 +161,10 @@ pub fn getNodeInfo(allocator: std.mem.Allocator) !Node {
     // Note: raw_interfaces slice itself needs freeing, but contents are moved to Node
     allocator.free(raw_interfaces);
 
+    // Get CPU and memory information
+    const cpu = try getCpuInfo(allocator);
+    const memory = try getMemoryInfo(allocator);
+
     return Node{
         .hostname = hostname,
         .fqdn = fqdn,
@@ -143,9 +178,8 @@ pub fn getNodeInfo(allocator: std.mem.Allocator) !Node {
             .release = kernel_release,
             .machine = getCpuArch(),
         },
-        .cpu = CPU{
-            .architecture = getCpuArch(),
-        },
+        .cpu = cpu,
+        .memory = memory,
         .network = Network{
             .default_gateway = default_gateway,
             .default_interface = default_interface,
@@ -759,6 +793,263 @@ fn addBoolToHash(mrb: *mruby.mrb_state, hash: mruby.mrb_value, key: []const u8, 
     const key_val = mruby.mrb_str_new(mrb, key.ptr, @intCast(key.len));
     const bool_val = if (value) zig_mrb_true_value() else zig_mrb_false_value();
     mruby.mrb_hash_set(mrb, hash, key_val, bool_val);
+}
+
+/// Get CPU information
+pub fn getCpuInfo(allocator: std.mem.Allocator) !CPU {
+    if (builtin.os.tag == .macos) {
+        return getCpuInfoMacOS(allocator);
+    } else if (builtin.os.tag == .linux) {
+        return getCpuInfoLinux(allocator);
+    }
+    return CPU{ .architecture = getCpuArch() };
+}
+
+/// Get CPU information on macOS using sysctl
+fn getCpuInfoMacOS(allocator: std.mem.Allocator) !CPU {
+    var cpu = CPU{ .architecture = getCpuArch() };
+
+    // Get CPU core count
+    var core_count: c_int = 0;
+    var core_count_size: usize = @sizeOf(c_int);
+    var mib_cores = [_]c_int{ c.CTL_HW, c.HW_NCPU };
+    if (c.sysctl(&mib_cores, 2, &core_count, &core_count_size, null, 0) == 0) {
+        cpu.cores = @intCast(core_count);
+        cpu.total = @intCast(core_count);
+    }
+
+    // Get physical CPU package count (number of physical CPUs/sockets)
+    var package_count: c_int = 0;
+    var package_count_size: usize = @sizeOf(c_int);
+    const packages_name = "hw.packages";
+    if (c.sysctlbyname(packages_name.ptr, &package_count, &package_count_size, null, 0) == 0) {
+        cpu.real = @intCast(package_count);
+    } else {
+        cpu.real = 1; // Fallback to 1 physical CPU
+    }
+
+    // Get CPU model name
+    var brand_buf: [256]u8 = undefined;
+    var brand_size: usize = brand_buf.len;
+    const brand_name = "machdep.cpu.brand_string";
+    if (c.sysctlbyname(brand_name.ptr, &brand_buf, &brand_size, null, 0) == 0) {
+        const brand_str = std.mem.sliceTo(&brand_buf, 0);
+        cpu.model_name = try allocator.dupe(u8, brand_str);
+    }
+
+    return cpu;
+}
+
+/// Get CPU information on Linux by reading /proc/cpuinfo
+fn getCpuInfoLinux(allocator: std.mem.Allocator) !CPU {
+    var cpu = CPU{ .architecture = getCpuArch() };
+
+    const file = std.fs.cwd().openFile("/proc/cpuinfo", .{}) catch return cpu;
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 65536);
+    defer allocator.free(content);
+
+    var processor_count: u32 = 0;
+    var physical_ids = std.AutoHashMap(u32, void).init(allocator);
+    defer physical_ids.deinit();
+    var core_ids = std.AutoHashMap(u32, void).init(allocator);
+    defer core_ids.deinit();
+    var model_name: ?[]const u8 = null;
+    var current_physical_id: ?u32 = null;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+            const key = std.mem.trim(u8, line[0..colon_pos], " \t");
+            const value = std.mem.trim(u8, line[colon_pos + 1 ..], " \t");
+
+            if (std.mem.eql(u8, key, "processor")) {
+                processor_count += 1;
+            } else if (std.mem.eql(u8, key, "physical id")) {
+                const phys_id = std.fmt.parseInt(u32, value, 10) catch continue;
+                current_physical_id = phys_id;
+                try physical_ids.put(phys_id, {});
+            } else if (std.mem.eql(u8, key, "core id")) {
+                const core_id = std.fmt.parseInt(u32, value, 10) catch continue;
+                try core_ids.put(core_id, {});
+            } else if (std.mem.eql(u8, key, "model name") and model_name == null) {
+                model_name = value;
+            }
+        }
+    }
+
+    cpu.total = processor_count;
+    const physical_count = physical_ids.count();
+    cpu.real = if (physical_count > 0) @intCast(physical_count) else 1;
+
+    // Core count is cores per socket
+    const cores_per_socket = core_ids.count();
+    cpu.cores = if (cores_per_socket > 0) @intCast(cores_per_socket * cpu.real) else processor_count;
+
+    if (model_name) |name| {
+        cpu.model_name = try allocator.dupe(u8, name);
+    }
+
+    return cpu;
+}
+
+/// Get memory information
+pub fn getMemoryInfo(allocator: std.mem.Allocator) !Memory {
+    if (builtin.os.tag == .macos) {
+        return getMemoryInfoMacOS(allocator);
+    } else if (builtin.os.tag == .linux) {
+        return getMemoryInfoLinux(allocator);
+    }
+    return Memory{};
+}
+
+/// Get memory information on macOS using sysctl and vm_stat
+fn getMemoryInfoMacOS(allocator: std.mem.Allocator) !Memory {
+    var memory = Memory{};
+
+    // Get total memory
+    var total_mem: u64 = 0;
+    var total_mem_size: usize = @sizeOf(u64);
+    var mib_mem = [_]c_int{ c.CTL_HW, c.HW_MEMSIZE };
+    if (c.sysctl(&mib_mem, 2, &total_mem, &total_mem_size, null, 0) == 0) {
+        const total_mb = total_mem / (1024 * 1024);
+        memory.total = try std.fmt.allocPrint(allocator, "{d}MB", .{total_mb});
+    }
+
+    // Use vm_stat command to get memory statistics
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{"vm_stat"},
+    }) catch return memory;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    var page_size: u64 = 4096; // Default page size
+    var free_pages: u64 = 0;
+    var active_pages: u64 = 0;
+    var inactive_pages: u64 = 0;
+    var wired_pages: u64 = 0;
+    var compressed_pages: u64 = 0;
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "page size of ")) |start_pos| {
+            const after_prefix = start_pos + "page size of ".len;
+            if (std.mem.indexOf(u8, line[after_prefix..], " bytes")) |end_offset| {
+                const end_pos = after_prefix + end_offset;
+                const page_str = line[after_prefix..end_pos];
+                page_size = std.fmt.parseInt(u64, page_str, 10) catch 4096;
+            }
+        } else if (std.mem.indexOf(u8, line, "Pages free:")) |_| {
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const value_str = std.mem.trim(u8, line[colon_pos + 1 ..], " \t.");
+                free_pages = std.fmt.parseInt(u64, value_str, 10) catch 0;
+            }
+        } else if (std.mem.indexOf(u8, line, "Pages active:")) |_| {
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const value_str = std.mem.trim(u8, line[colon_pos + 1 ..], " \t.");
+                active_pages = std.fmt.parseInt(u64, value_str, 10) catch 0;
+            }
+        } else if (std.mem.indexOf(u8, line, "Pages inactive:")) |_| {
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const value_str = std.mem.trim(u8, line[colon_pos + 1 ..], " \t.");
+                inactive_pages = std.fmt.parseInt(u64, value_str, 10) catch 0;
+            }
+        } else if (std.mem.indexOf(u8, line, "Pages wired down:")) |_| {
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const value_str = std.mem.trim(u8, line[colon_pos + 1 ..], " \t.");
+                wired_pages = std.fmt.parseInt(u64, value_str, 10) catch 0;
+            }
+        } else if (std.mem.indexOf(u8, line, "Pages occupied by compressor:")) |_| {
+            if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+                const value_str = std.mem.trim(u8, line[colon_pos + 1 ..], " \t.");
+                compressed_pages = std.fmt.parseInt(u64, value_str, 10) catch 0;
+            }
+        }
+    }
+
+    const active_mb = (active_pages * page_size) / (1024 * 1024);
+    memory.active = try std.fmt.allocPrint(allocator, "{d}MB", .{active_mb});
+
+    const inactive_mb = (inactive_pages * page_size) / (1024 * 1024);
+    memory.inactive = try std.fmt.allocPrint(allocator, "{d}MB", .{inactive_mb});
+
+    const wired_mb = (wired_pages * page_size) / (1024 * 1024);
+    memory.wired = try std.fmt.allocPrint(allocator, "{d}MB", .{wired_mb});
+
+    const compressed_mb = (compressed_pages * page_size) / (1024 * 1024);
+    memory.compressed = try std.fmt.allocPrint(allocator, "{d}MB", .{compressed_mb});
+
+    // Parse total memory to calculate free like Chef Ohai does
+    // Free = Total - Active - Inactive
+    const total_str = memory.total;
+    if (std.mem.indexOf(u8, total_str, "MB")) |mb_pos| {
+        const total_mb = std.fmt.parseInt(u64, total_str[0..mb_pos], 10) catch 0;
+        const calculated_free = total_mb - active_mb - inactive_mb;
+        memory.free = try std.fmt.allocPrint(allocator, "{d}MB", .{calculated_free});
+    } else {
+        // Fallback to actual free pages if total parsing fails
+        const free_mb = (free_pages * page_size) / (1024 * 1024);
+        memory.free = try std.fmt.allocPrint(allocator, "{d}MB", .{free_mb});
+    }
+
+    return memory;
+}
+
+/// Helper function to convert kB to MB string
+fn convertKBtoMB(allocator: std.mem.Allocator, value_str: []const u8) ![]const u8 {
+    // Parse the number from "12345 kB" format
+    var parts = std.mem.splitScalar(u8, value_str, ' ');
+    const kb_str = parts.next() orelse return allocator.dupe(u8, "0MB");
+    const kb_value = std.fmt.parseInt(u64, kb_str, 10) catch return allocator.dupe(u8, "0MB");
+    const mb_value = kb_value / 1024;
+    return std.fmt.allocPrint(allocator, "{d}MB", .{mb_value});
+}
+
+/// Get memory information on Linux by reading /proc/meminfo
+fn getMemoryInfoLinux(allocator: std.mem.Allocator) !Memory {
+    var memory = Memory{};
+
+    const file = std.fs.cwd().openFile("/proc/meminfo", .{}) catch return memory;
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 8192);
+    defer allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        if (std.mem.indexOf(u8, line, ":")) |colon_pos| {
+            const key = std.mem.trim(u8, line[0..colon_pos], " \t");
+            const value_part = std.mem.trim(u8, line[colon_pos + 1 ..], " \t");
+
+            if (std.mem.eql(u8, key, "MemTotal")) {
+                memory.total = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "MemFree")) {
+                memory.free = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "MemAvailable")) {
+                memory.available = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "Active")) {
+                memory.active = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "Inactive")) {
+                memory.inactive = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "Buffers")) {
+                memory.buffers = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "Cached")) {
+                memory.cached = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "SwapTotal")) {
+                memory.swap_total = try convertKBtoMB(allocator, value_part);
+            } else if (std.mem.eql(u8, key, "SwapFree")) {
+                memory.swap_free = try convertKBtoMB(allocator, value_part);
+            }
+        }
+    }
+
+    return memory;
 }
 
 /// Ruby prelude for node object
