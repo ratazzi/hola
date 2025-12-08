@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("mruby.zig");
 const builtin = @import("builtin");
+const http_client = @import("http/client.zig");
 
 // Platform-specific C imports
 const c = if (builtin.os.tag == .macos) @cImport({
@@ -32,6 +33,7 @@ pub const Node = struct {
     network: Network,
     lsb: ?LsbInfo = null,
     platform_checks: PlatformChecks,
+    ec2: ?Ec2Info = null,
 
     /// Free all allocated memory in this Node
     pub fn deinit(self: Node, allocator: std.mem.Allocator) void {
@@ -66,6 +68,20 @@ pub const Node = struct {
             allocator.free(lsb.description);
             allocator.free(lsb.release);
             allocator.free(lsb.codename);
+        }
+        if (self.ec2) |ec2| {
+            allocator.free(ec2.instance_id);
+            allocator.free(ec2.instance_type);
+            allocator.free(ec2.account_id);
+            allocator.free(ec2.region);
+            allocator.free(ec2.availability_zone);
+            allocator.free(ec2.image_id);
+            allocator.free(ec2.architecture);
+            allocator.free(ec2.private_ip);
+            if (ec2.kernel_id) |v| allocator.free(v);
+            if (ec2.ramdisk_id) |v| allocator.free(v);
+            if (ec2.billing_products) |v| allocator.free(v);
+            allocator.free(ec2.pending_time);
         }
     }
 };
@@ -190,6 +206,7 @@ pub fn getNodeInfo(allocator: std.mem.Allocator) !Node {
             .mac_os_x = builtin.os.tag == .macos,
             .linux = builtin.os.tag == .linux,
         },
+        .ec2 = try getEc2Info(allocator),
     };
 }
 
@@ -411,6 +428,31 @@ pub const LsbInfo = struct {
     codename: []const u8,
 };
 
+/// EC2 instance information (from instance identity document)
+pub const Ec2Info = struct {
+    // Core identity
+    instance_id: []const u8,
+    instance_type: []const u8,
+    account_id: []const u8,
+
+    // Location
+    region: []const u8,
+    availability_zone: []const u8,
+
+    // Image
+    image_id: []const u8,
+    architecture: []const u8,
+
+    // Network
+    private_ip: []const u8,
+
+    // Optional fields
+    kernel_id: ?[]const u8,
+    ramdisk_id: ?[]const u8,
+    billing_products: ?[]const u8,
+    pending_time: []const u8,
+};
+
 /// Get default gateway IP address and interface
 pub fn getDefaultGateway(allocator: std.mem.Allocator) !?DefaultGateway {
     if (builtin.os.tag == .macos) {
@@ -419,6 +461,208 @@ pub fn getDefaultGateway(allocator: std.mem.Allocator) !?DefaultGateway {
         return getDefaultGatewayLinux(allocator);
     }
     return null;
+}
+
+/// Quick check if running on EC2 by inspecting system files (no network call)
+fn isRunningOnEc2() bool {
+    // Only applicable on Linux (macOS doesn't have /sys)
+    if (builtin.os.tag != .linux) {
+        return false;
+    }
+
+    // Best method: Check system vendor (works for all EC2 instance types)
+    if (std.fs.cwd().openFile("/sys/class/dmi/id/sys_vendor", .{})) |file| {
+        defer file.close();
+        var buf: [64]u8 = undefined;
+        if (file.readAll(&buf)) |n| {
+            const content = std.mem.trim(u8, buf[0..n], " \n\r\t");
+            // Amazon EC2 instances report "Amazon EC2" as sys_vendor
+            if (std.mem.eql(u8, content, "Amazon EC2")) {
+                return true;
+            }
+        } else |_| {}
+    } else |_| {}
+
+    return false;
+}
+
+/// Get EC2 instance metadata using IMDSv2, fallback to IMDSv1
+pub fn getEc2Info(allocator: std.mem.Allocator) !?Ec2Info {
+    // Quick check: only attempt network call if we're likely on EC2
+    if (!isRunningOnEc2()) {
+        return null;
+    }
+
+    // Try IMDSv2 first, fallback to IMDSv1 if it fails
+    return getEc2InfoIMDSv2(allocator) catch {
+        return getEc2InfoIMDSv1(allocator) catch null;
+    };
+}
+
+/// Get EC2 metadata using IMDSv2 (session token required)
+fn getEc2InfoIMDSv2(allocator: std.mem.Allocator) !?Ec2Info {
+    const imds_token_url = "http://169.254.169.254/latest/api/token";
+    const identity_doc_url = "http://169.254.169.254/latest/dynamic/instance-identity/document";
+
+    const Config = @import("http/config.zig").Config;
+    const Request = @import("http/types.zig").Request;
+    const logger = @import("logger.zig");
+
+    const config = Config{
+        .timeout_ms = 2000,
+        .retry = .{ .max_attempts = 1 },
+    };
+    var client = try http_client.Client.init(allocator, config);
+    defer client.deinit();
+
+    // Step 1: Get IMDSv2 token
+    var token_headers = std.StringHashMap([]const u8).init(allocator);
+    defer token_headers.deinit();
+    try token_headers.put("X-aws-ec2-metadata-token-ttl-seconds", "21600");
+    try token_headers.put("Content-Length", "0"); // Explicitly set empty body
+
+    logger.debug("EC2: Requesting IMDSv2 token from {s}", .{imds_token_url});
+
+    const token_request = Request{
+        .method = .PUT,
+        .url = imds_token_url,
+        .headers = token_headers,
+        .body = "", // Empty body for PUT request
+        .timeout_ms = 2000,
+    };
+
+    const token_response = try client.request(token_request);
+    defer allocator.free(token_response.body);
+
+    logger.debug("EC2: Token response status={d}, body_len={d}", .{ token_response.status, token_response.body.len });
+
+    if (token_response.status != 200) {
+        logger.warn("EC2: Token request failed with status {d}", .{token_response.status});
+        return error.TokenRequestFailed;
+    }
+
+    const token = std.mem.trim(u8, token_response.body, " \n\r\t");
+    if (token.len == 0) {
+        logger.warn("EC2: Token is empty after trim", .{});
+        return error.EmptyToken;
+    }
+
+    logger.debug("EC2: Got token, length={d}", .{token.len});
+
+    // Step 2: Get instance identity document
+    var doc_headers = std.StringHashMap([]const u8).init(allocator);
+    defer doc_headers.deinit();
+    try doc_headers.put("X-aws-ec2-metadata-token", token);
+
+    logger.debug("EC2: Requesting identity document from {s}", .{identity_doc_url});
+
+    const doc_request = Request{
+        .method = .GET,
+        .url = identity_doc_url,
+        .headers = doc_headers,
+        .timeout_ms = 2000,
+    };
+
+    const doc_response = try client.request(doc_request);
+    defer allocator.free(doc_response.body);
+
+    logger.debug("EC2: Identity document response status={d}, body_len={d}", .{ doc_response.status, doc_response.body.len });
+
+    if (doc_response.status != 200) {
+        logger.warn("EC2: Identity document request failed with status {d}", .{doc_response.status});
+        return error.DocumentRequestFailed;
+    }
+
+    logger.debug("EC2: Parsing identity document JSON", .{});
+    const result = parseEc2IdentityDocument(allocator, doc_response.body) catch |err| {
+        logger.warn("EC2: Failed to parse identity document: {}", .{err});
+        return err;
+    };
+
+    if (result) |info| {
+        logger.debug("EC2: Successfully parsed - instance_id={s}, region={s}", .{ info.instance_id, info.region });
+        return info;
+    } else {
+        logger.warn("EC2: Parse returned null", .{});
+        return null;
+    }
+}
+
+/// Get EC2 metadata using IMDSv1 (no token required - fallback)
+fn getEc2InfoIMDSv1(allocator: std.mem.Allocator) !?Ec2Info {
+    const identity_doc_url = "http://169.254.169.254/latest/dynamic/instance-identity/document";
+
+    const Config = @import("http/config.zig").Config;
+    const Request = @import("http/types.zig").Request;
+    const config = Config{
+        .timeout_ms = 2000,
+        .retry = .{ .max_attempts = 1 },
+    };
+    var client = try http_client.Client.init(allocator, config);
+    defer client.deinit();
+
+    const doc_request = Request{
+        .method = .GET,
+        .url = identity_doc_url,
+        .timeout_ms = 2000,
+    };
+
+    const doc_response = try client.request(doc_request);
+    defer allocator.free(doc_response.body);
+
+    if (doc_response.status != 200) {
+        return error.DocumentRequestFailed;
+    }
+
+    return parseEc2IdentityDocument(allocator, doc_response.body);
+}
+
+/// Parse EC2 instance identity document JSON
+fn parseEc2IdentityDocument(allocator: std.mem.Allocator, json_body: []const u8) !?Ec2Info {
+    const logger = @import("logger.zig");
+
+    logger.debug("EC2: JSON body preview: {s}", .{json_body[0..@min(200, json_body.len)]});
+
+    const parsed = std.json.parseFromSlice(
+        struct {
+            instanceId: []const u8,
+            instanceType: []const u8,
+            accountId: []const u8,
+            region: []const u8,
+            availabilityZone: []const u8,
+            imageId: []const u8,
+            architecture: []const u8,
+            privateIp: []const u8,
+            kernelId: ?[]const u8 = null,
+            ramdiskId: ?[]const u8 = null,
+            billingProducts: ?[]const u8 = null,
+            pendingTime: []const u8,
+        },
+        allocator,
+        json_body,
+        .{ .ignore_unknown_fields = true },
+    ) catch |err| {
+        logger.warn("EC2: JSON parse error: {}", .{err});
+        return null;
+    };
+    defer parsed.deinit();
+
+    logger.debug("EC2: Parsed instanceId={s}, region={s}", .{ parsed.value.instanceId, parsed.value.region });
+
+    return Ec2Info{
+        .instance_id = try allocator.dupe(u8, parsed.value.instanceId),
+        .instance_type = try allocator.dupe(u8, parsed.value.instanceType),
+        .account_id = try allocator.dupe(u8, parsed.value.accountId),
+        .region = try allocator.dupe(u8, parsed.value.region),
+        .availability_zone = try allocator.dupe(u8, parsed.value.availabilityZone),
+        .image_id = try allocator.dupe(u8, parsed.value.imageId),
+        .architecture = try allocator.dupe(u8, parsed.value.architecture),
+        .private_ip = try allocator.dupe(u8, parsed.value.privateIp),
+        .kernel_id = if (parsed.value.kernelId) |k| try allocator.dupe(u8, k) else null,
+        .ramdisk_id = if (parsed.value.ramdiskId) |r| try allocator.dupe(u8, r) else null,
+        .billing_products = if (parsed.value.billingProducts) |b| try allocator.dupe(u8, b) else null,
+        .pending_time = try allocator.dupe(u8, parsed.value.pendingTime),
+    };
 }
 
 /// Get LSB information by reading /etc/os-release (Linux only)
@@ -784,6 +1028,65 @@ pub fn zig_get_node_lsb_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv
     return mruby.mrb_nil_value();
 }
 
+/// mruby binding: get_node_ec2_info()
+pub fn zig_get_node_ec2_info(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const allocator = global_allocator orelse return mruby.mrb_nil_value();
+    const ec2 = getEc2Info(allocator) catch return mruby.mrb_nil_value();
+    if (ec2) |info| {
+        defer {
+            allocator.free(info.instance_id);
+            allocator.free(info.instance_type);
+            allocator.free(info.account_id);
+            allocator.free(info.region);
+            allocator.free(info.availability_zone);
+            allocator.free(info.image_id);
+            allocator.free(info.architecture);
+            allocator.free(info.private_ip);
+            if (info.kernel_id) |v| allocator.free(v);
+            if (info.ramdisk_id) |v| allocator.free(v);
+            if (info.billing_products) |v| allocator.free(v);
+            allocator.free(info.pending_time);
+        }
+
+        // Return a hash with EC2 information
+        const hash = mruby.mrb_hash_new(mrb);
+
+        // Helper function to add string to hash
+        const addStr = struct {
+            fn add(m: *mruby.mrb_state, h: mruby.mrb_value, key: []const u8, val: []const u8) void {
+                const k = mruby.mrb_str_new(m, key.ptr, @intCast(key.len));
+                const v = mruby.mrb_str_new(m, val.ptr, @intCast(val.len));
+                mruby.mrb_hash_set(m, h, k, v);
+            }
+        }.add;
+
+        // Add all required fields
+        addStr(mrb, hash, "instance_id", info.instance_id);
+        addStr(mrb, hash, "instance_type", info.instance_type);
+        addStr(mrb, hash, "account_id", info.account_id);
+        addStr(mrb, hash, "region", info.region);
+        addStr(mrb, hash, "availability_zone", info.availability_zone);
+        addStr(mrb, hash, "image_id", info.image_id);
+        addStr(mrb, hash, "architecture", info.architecture);
+        addStr(mrb, hash, "private_ip", info.private_ip);
+        addStr(mrb, hash, "pending_time", info.pending_time);
+
+        // Add optional fields
+        if (info.kernel_id) |v| {
+            addStr(mrb, hash, "kernel_id", v);
+        }
+        if (info.ramdisk_id) |v| {
+            addStr(mrb, hash, "ramdisk_id", v);
+        }
+        if (info.billing_products) |v| {
+            addStr(mrb, hash, "billing_products", v);
+        }
+
+        return hash;
+    }
+    return mruby.mrb_nil_value();
+}
+
 // External helper functions from mruby_helpers.c
 extern fn zig_mrb_true_value() mruby.mrb_value;
 extern fn zig_mrb_false_value() mruby.mrb_value;
@@ -1073,6 +1376,7 @@ const node_info_functions = [_]mruby_module.ModuleFunction{
     .{ .name = "get_node_default_gateway_ip", .func = zig_get_node_default_gateway_ip, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_default_interface", .func = zig_get_node_default_interface, .args = mruby.MRB_ARGS_NONE() },
     .{ .name = "get_node_lsb_info", .func = zig_get_node_lsb_info, .args = mruby.MRB_ARGS_NONE() },
+    .{ .name = "get_node_ec2_info", .func = zig_get_node_ec2_info, .args = mruby.MRB_ARGS_NONE() },
 };
 
 fn getFunctions() []const mruby_module.ModuleFunction {

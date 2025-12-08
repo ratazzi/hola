@@ -46,6 +46,9 @@ class NodeObject
         'default_gateway' => ZigBackend.get_node_default_gateway_ip,
         'default_interface' => ZigBackend.get_node_default_interface
       }
+    when 'ec2'
+      # Return EC2 instance information (AWS only)
+      ZigBackend.get_node_ec2_info
     else
       nil
     end
