@@ -316,10 +316,13 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        // Use --quiet to suppress output
+        const base_opts = "--quiet";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew install {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "brew install {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "brew install {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "brew install {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -327,10 +330,13 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        // Use -qq to suppress output, -o Dpkg::Use-Pty=0 to prevent /dev/tty usage
+        const base_opts = "-y -qq -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get install -y {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "apt-get install -y {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -338,10 +344,12 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        const base_opts = "--quiet";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew uninstall {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "brew uninstall {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "brew uninstall {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "brew uninstall {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -349,10 +357,12 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        const base_opts = "-y -qq -o Dpkg::Use-Pty=0";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get remove -y {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "apt-get remove {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "apt-get remove -y {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "apt-get remove {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -360,10 +370,12 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        const base_opts = "--quiet";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew upgrade {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "brew upgrade {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "brew upgrade {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "brew upgrade {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -371,10 +383,12 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
 
+        const base_opts = "-y -qq -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 --only-upgrade";
+
         if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get install -y --only-upgrade {s} {s}", .{ opts, pkg_list });
+            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s} {s}", .{ base_opts, opts, pkg_list });
         } else {
-            return try std.fmt.allocPrint(allocator, "apt-get install -y --only-upgrade {s}", .{pkg_list});
+            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s}", .{ base_opts, pkg_list });
         }
     }
 
@@ -384,6 +398,23 @@ pub const Resource = struct {
         var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
+
+        // Set stdin to /dev/null to prevent any interactive prompts
+        child.stdin_behavior = .Ignore;
+
+        // Inherit current environment and add platform-specific non-interactive settings
+        var env_map = try std.process.getEnvMap(allocator);
+        defer env_map.deinit();
+
+        // Only set Debian/APT variables on Linux systems
+        if (is_linux) {
+            // Debian/APT specific: disable interactive prompts and progress
+            try env_map.put("DEBIAN_FRONTEND", "noninteractive");
+            try env_map.put("APT_LISTCHANGES_FRONTEND", "none");
+            try env_map.put("NEEDRESTART_MODE", "l"); // Avoid needrestart prompts
+        }
+
+        child.env_map = &env_map;
 
         try child.spawn();
 
