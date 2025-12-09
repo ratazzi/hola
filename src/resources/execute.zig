@@ -70,7 +70,7 @@ pub const Resource = struct {
                 return base.ApplyResult{
                     .was_updated = false,
                     .action = "run",
-                    .skip_reason = "file specified by 'creates' already exists",
+                    .skip_reason = "up to date",
                 };
             }
         }
