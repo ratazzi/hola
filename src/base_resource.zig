@@ -127,7 +127,12 @@ pub const CommonProps = struct {
     /// Execute a shell command and return true if exit code is 0
     /// Optionally runs as specified user/group
     fn executeShellCommand(command: []const u8, user: ?[]const u8, group: ?[]const u8) !bool {
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", command }, std.heap.page_allocator);
+        // Use ArenaAllocator for temporary allocations (matches pattern in execute.zig)
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const temp_allocator = arena.allocator();
+
+        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", command }, temp_allocator);
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
 
@@ -242,7 +247,11 @@ pub fn fillCommonFromRuby(
             const cmd_cstr = mruby.mrb_str_to_cstr(mrb, only_if_val);
             const cmd_str = std.mem.span(cmd_cstr);
             logger.debug("only_if command: {s}", .{cmd_str});
-            common.only_if_command = allocator.dupe(u8, cmd_str) catch null;
+            common.only_if_command = allocator.dupe(u8, cmd_str) catch |err| blk: {
+                logger.warn("Failed to allocate memory for only_if command: {}", .{err});
+                logger.warn("Guard 'only_if' will be ignored - this may cause unexpected resource execution!", .{});
+                break :blk null;
+            };
         } else {
             // Proc or other callable - store for later evaluation
             logger.debug("only_if is block/proc", .{});
@@ -258,7 +267,11 @@ pub fn fillCommonFromRuby(
             // String guard - execute as shell command
             const cmd_cstr = mruby.mrb_str_to_cstr(mrb, not_if_val);
             const cmd_str = std.mem.span(cmd_cstr);
-            common.not_if_command = allocator.dupe(u8, cmd_str) catch null;
+            common.not_if_command = allocator.dupe(u8, cmd_str) catch |err| blk: {
+                logger.warn("Failed to allocate memory for not_if command: {}", .{err});
+                logger.warn("Guard 'not_if' will be ignored - this may cause unexpected resource execution!", .{});
+                break :blk null;
+            };
         } else {
             // Proc or other callable - store for later evaluation
             common.not_if_block = not_if_val;
@@ -280,8 +293,15 @@ pub fn fillCommonFromRuby(
             const action_cstr_n = mruby.mrb_str_to_cstr(mrb, action_val_n);
             const timing_cstr = mruby.mrb_str_to_cstr(mrb, timing_val);
 
-            const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch continue;
-            const action_name = allocator.dupe(u8, std.mem.span(action_cstr_n)) catch continue;
+            const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch |err| {
+                logger.warn("Failed to allocate notification target: {}", .{err});
+                continue;
+            };
+            const action_name = allocator.dupe(u8, std.mem.span(action_cstr_n)) catch |err| {
+                allocator.free(target);
+                logger.warn("Failed to allocate notification action: {}", .{err});
+                continue;
+            };
             const timing_str = std.mem.span(timing_cstr);
 
             const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
@@ -295,7 +315,12 @@ pub fn fillCommonFromRuby(
                 .timing = timing,
             };
 
-            common.notifications.append(allocator, notif) catch continue;
+            common.notifications.append(allocator, notif) catch |err| {
+                logger.warn("Failed to append notification: {}", .{err});
+                allocator.free(target);
+                allocator.free(action_name);
+                continue;
+            };
         }
     }
 
@@ -314,8 +339,15 @@ pub fn fillCommonFromRuby(
             const action_cstr_s = mruby.mrb_str_to_cstr(mrb, action_val_s);
             const timing_cstr = mruby.mrb_str_to_cstr(mrb, timing_val);
 
-            const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch continue;
-            const action_name = allocator.dupe(u8, std.mem.span(action_cstr_s)) catch continue;
+            const target = allocator.dupe(u8, std.mem.span(target_cstr)) catch |err| {
+                logger.warn("Failed to allocate subscription target: {}", .{err});
+                continue;
+            };
+            const action_name = allocator.dupe(u8, std.mem.span(action_cstr_s)) catch |err| {
+                allocator.free(target);
+                logger.warn("Failed to allocate subscription action: {}", .{err});
+                continue;
+            };
             const timing_str = std.mem.span(timing_cstr);
 
             const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
@@ -329,7 +361,12 @@ pub fn fillCommonFromRuby(
                 .timing = timing,
             };
 
-            common.subscriptions.append(allocator, sub) catch continue;
+            common.subscriptions.append(allocator, sub) catch |err| {
+                logger.warn("Failed to append subscription: {}", .{err});
+                allocator.free(target);
+                allocator.free(action_name);
+                continue;
+            };
         }
     }
 
