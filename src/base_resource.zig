@@ -12,9 +12,11 @@ pub const ApplyResult = struct {
 
 /// Common properties shared by all resources
 pub const CommonProps = struct {
-    // Conditional execution (guards)
+    // Conditional execution (guards) - can be either Ruby block or shell command string
     only_if_block: ?mruby.mrb_value = null,
+    only_if_command: ?[]const u8 = null, // Shell command string
     not_if_block: ?mruby.mrb_value = null,
+    not_if_command: ?[]const u8 = null, // Shell command string
 
     // Error handling
     ignore_failure: bool = false,
@@ -46,6 +48,10 @@ pub const CommonProps = struct {
             }
         }
 
+        // Free string commands
+        if (self.only_if_command) |cmd| allocator.free(cmd);
+        if (self.not_if_command) |cmd| allocator.free(cmd);
+
         // Free notifications
         for (self.notifications.items) |notif| {
             notif.deinit(allocator);
@@ -61,11 +67,19 @@ pub const CommonProps = struct {
 
     /// Evaluate guards (only_if/not_if) to determine if resource should run
     /// Returns the reason if skipped, null if should run
-    pub fn shouldRun(self: CommonProps) !?[]const u8 {
+    /// Optionally runs guard commands as specified user/group
+    pub fn shouldRun(self: CommonProps, user: ?[]const u8, group: ?[]const u8) !?[]const u8 {
         const mrb = self.mrb_state orelse return null;
 
         // Evaluate only_if (must be true to run)
-        if (self.only_if_block) |block| {
+        // Check command string first (higher priority)
+        if (self.only_if_command) |cmd| {
+            // Execute shell command - exit code 0 means true
+            const success = try executeShellCommand(cmd, user, group);
+            if (!success) {
+                return "skipped due to only_if"; // command failed (non-zero exit)
+            }
+        } else if (self.only_if_block) |block| {
             // Use funcall instead of yield to properly handle exceptions
             const call_sym = mruby.mrb_intern_cstr(mrb, "call");
             const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
@@ -83,7 +97,14 @@ pub const CommonProps = struct {
         }
 
         // Evaluate not_if (must be false to run)
-        if (self.not_if_block) |block| {
+        // Check command string first (higher priority)
+        if (self.not_if_command) |cmd| {
+            // Execute shell command - exit code 0 means true
+            const success = try executeShellCommand(cmd, user, group);
+            if (success) {
+                return "skipped due to not_if"; // command succeeded (exit 0)
+            }
+        } else if (self.not_if_block) |block| {
             // Use funcall instead of yield to properly handle exceptions
             const call_sym = mruby.mrb_intern_cstr(mrb, "call");
             const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
@@ -101,6 +122,66 @@ pub const CommonProps = struct {
         }
 
         return null; // Should run
+    }
+
+    /// Execute a shell command and return true if exit code is 0
+    /// Optionally runs as specified user/group
+    fn executeShellCommand(command: []const u8, user: ?[]const u8, group: ?[]const u8) !bool {
+        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", command }, std.heap.page_allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        // Set user and/or group if specified (same logic as execute resource)
+        if (user != null or group != null) {
+            const c = @cImport({
+                @cInclude("pwd.h");
+                @cInclude("grp.h");
+            });
+
+            // Get user info if user is specified
+            if (user) |username| {
+                const username_z = std.posix.toPosixPath(username) catch |err| {
+                    const logger = @import("logger.zig");
+                    logger.warn("guard: failed to convert username '{s}': {}", .{ username, err });
+                    return error.UserInfoFailed;
+                };
+
+                const pwd = c.getpwnam(&username_z);
+                if (pwd == null) {
+                    const logger = @import("logger.zig");
+                    logger.warn("guard: user '{s}' not found", .{username});
+                    return error.UserNotFound;
+                }
+
+                child.uid = @intCast(pwd.*.pw_uid);
+                child.gid = @intCast(pwd.*.pw_gid);
+            }
+
+            // Override with group if specified
+            if (group) |groupname| {
+                const groupname_z = std.posix.toPosixPath(groupname) catch |err| {
+                    const logger = @import("logger.zig");
+                    logger.warn("guard: failed to convert groupname '{s}': {}", .{ groupname, err });
+                    return error.GroupInfoFailed;
+                };
+
+                const grp = c.getgrnam(&groupname_z);
+                if (grp == null) {
+                    const logger = @import("logger.zig");
+                    logger.warn("guard: group '{s}' not found", .{groupname});
+                    return error.GroupNotFound;
+                }
+
+                child.gid = @intCast(grp.*.gr_gid);
+            }
+        }
+
+        const term = try child.spawnAndWait();
+
+        return switch (term) {
+            .Exited => |code| code == 0,
+            else => false,
+        };
     }
 
     /// Register blocks with GC to prevent collection
@@ -144,11 +225,45 @@ pub fn fillCommonFromRuby(
     subscriptions_val: mruby.mrb_value,
     allocator: std.mem.Allocator,
 ) void {
-    // Attach mruby state and optional guard blocks
+    const logger = @import("logger.zig");
+    logger.debug("fillCommonFromRuby called", .{});
+    logger.debug("only_if_val test: {}", .{mruby.mrb_test(only_if_val)});
+
+    // Attach mruby state
     common.mrb_state = mrb;
-    common.only_if_block = if (mruby.mrb_test(only_if_val)) only_if_val else null;
-    common.not_if_block = if (mruby.mrb_test(not_if_val)) not_if_val else null;
     common.ignore_failure = mruby.mrb_test(ignore_failure_val);
+
+    // Parse only_if - can be string (shell command) or proc (Ruby block)
+    if (mruby.mrb_test(only_if_val)) {
+        const is_string = mruby.zig_mrb_string_p(only_if_val) != 0;
+
+        if (is_string) {
+            // String guard - execute as shell command
+            const cmd_cstr = mruby.mrb_str_to_cstr(mrb, only_if_val);
+            const cmd_str = std.mem.span(cmd_cstr);
+            logger.debug("only_if command: {s}", .{cmd_str});
+            common.only_if_command = allocator.dupe(u8, cmd_str) catch null;
+        } else {
+            // Proc or other callable - store for later evaluation
+            logger.debug("only_if is block/proc", .{});
+            common.only_if_block = only_if_val;
+        }
+    }
+
+    // Parse not_if - can be string (shell command) or proc (Ruby block)
+    if (mruby.mrb_test(not_if_val)) {
+        const is_string = mruby.zig_mrb_string_p(not_if_val) != 0;
+
+        if (is_string) {
+            // String guard - execute as shell command
+            const cmd_cstr = mruby.mrb_str_to_cstr(mrb, not_if_val);
+            const cmd_str = std.mem.span(cmd_cstr);
+            common.not_if_command = allocator.dupe(u8, cmd_str) catch null;
+        } else {
+            // Proc or other callable - store for later evaluation
+            common.not_if_block = not_if_val;
+        }
+    }
 
     // Parse notifications array if provided: each item is [target, action, timing]
     if (mruby.mrb_test(notifications_val)) {

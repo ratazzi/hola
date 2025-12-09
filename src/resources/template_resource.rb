@@ -73,12 +73,12 @@ class TemplateResource
     @variables = vars_hash
   end
 
-  def only_if(&block)
-    @only_if_proc = block if block
+  def only_if(command = nil, &block)
+    @only_if_proc = command&.to_s || block
   end
 
-  def not_if(&block)
-    @not_if_proc = block if block
+  def not_if(command = nil, &block)
+    @not_if_proc = command&.to_s || block
   end
 
   def ignore_failure(value)

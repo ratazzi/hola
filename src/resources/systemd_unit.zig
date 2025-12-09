@@ -47,7 +47,7 @@ pub const Resource = struct {
             };
         }
 
-        const skip_reason = try self.common.shouldRun();
+        const skip_reason = try self.common.shouldRun(null, null);
         if (skip_reason) |reason| {
             return base.ApplyResult{
                 .was_updated = false,

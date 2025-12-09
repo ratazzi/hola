@@ -103,7 +103,7 @@ pub const Resource = struct {
             else => logger.debug("macos_defaults desired value = other type", .{}),
         }
 
-        const skip_reason = try self.common.shouldRun();
+        const skip_reason = try self.common.shouldRun(null, null);
         if (skip_reason) |reason| {
             const action_name = switch (self.action) {
                 .write => "write",

@@ -68,6 +68,7 @@ pub extern fn mrb_intern_cstr(mrb: *mrb_state, str: [*c]const u8) mrb_sym;
 // Value type checking (via C helper since mrb_type is a macro)
 pub extern fn zig_mrb_type(val: mrb_value) u32;
 pub const mrb_type = zig_mrb_type;
+pub extern fn zig_mrb_string_p(val: mrb_value) c_int;
 
 // Array handling (using C helpers)
 pub extern fn zig_mrb_ary_len(mrb: *mrb_state, arr: mrb_value) mrb_int;

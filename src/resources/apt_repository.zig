@@ -47,7 +47,7 @@ pub const Resource = struct {
     }
 
     pub fn apply(self: Resource) !base.ApplyResult {
-        const skip_reason = try self.common.shouldRun();
+        const skip_reason = try self.common.shouldRun(null, null);
         if (skip_reason) |reason| {
             const action_name = switch (self.action) {
                 .add => "add",

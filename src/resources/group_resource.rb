@@ -69,12 +69,12 @@ class GroupResource
     @action = value
   end
 
-  def only_if(&block)
-    @only_if = block
+  def only_if(command = nil, &block)
+    @only_if = command&.to_s || block
   end
 
-  def not_if(&block)
-    @not_if = block
+  def not_if(command = nil, &block)
+    @not_if = command&.to_s || block
   end
 
   def ignore_failure(value)
