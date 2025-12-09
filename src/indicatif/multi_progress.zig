@@ -69,34 +69,43 @@ pub const MultiProgress = struct {
     fn drawInternal(self: *Self) !void {
         if (!self.draw_enabled) return;
 
+        // Build the entire output in a single buffer to ensure atomic write
+        var output_buffer = std.ArrayList(u8){};
+        defer output_buffer.deinit(self.allocator);
+
+        const writer = output_buffer.writer(self.allocator);
+
         // Move cursor up to the start of our drawing area
         if (self.last_total_lines > 0) {
-            std.debug.print("\x1b[{d}F", .{self.last_total_lines});
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
         }
 
-        // Pre-allocate buffer with enough capacity
-        var buffer: std.ArrayList(u8) = .{};
-        defer buffer.deinit(self.allocator);
-        try buffer.ensureTotalCapacity(self.allocator, 512); // Pre-allocate to avoid reallocation
+        // Pre-allocate buffer for individual bar rendering
+        var bar_buffer: std.ArrayList(u8) = .{};
+        defer bar_buffer.deinit(self.allocator);
+        try bar_buffer.ensureTotalCapacity(self.allocator, 512);
 
         // Draw each progress bar
         var total_lines: usize = 0;
         for (self.bars.items) |bar| {
-            buffer.clearRetainingCapacity();
+            bar_buffer.clearRetainingCapacity();
 
-            try bar.style.format(bar.state, bar.width, buffer.writer(self.allocator));
-            std.debug.print("\x1b[K{s}\n", .{buffer.items});
+            try bar.style.format(bar.state, bar.width, bar_buffer.writer(self.allocator));
+            try writer.print("\x1b[K{s}\n", .{bar_buffer.items});
 
             total_lines += 1;
         }
 
         // If we drew fewer lines than before, clear the remaining lines
         while (total_lines < self.last_total_lines) {
-            std.debug.print("\x1b[K\n", .{});
+            try writer.writeAll("\x1b[K\n");
             total_lines += 1;
         }
 
         self.last_total_lines = self.bars.items.len;
+
+        // Single atomic write to terminal
+        std.debug.print("{s}", .{output_buffer.items});
     }
 
     /// Draw all progress bars
@@ -111,17 +120,26 @@ pub const MultiProgress = struct {
         if (!self.draw_enabled) return;
 
         if (self.last_total_lines > 0) {
+            // Build the entire clear sequence in a single buffer
+            var output_buffer = std.ArrayList(u8){};
+            defer output_buffer.deinit(self.allocator);
+
+            const writer = output_buffer.writer(self.allocator);
+
             // Move cursor up
-            std.debug.print("\x1b[{d}F", .{self.last_total_lines});
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
 
             // Clear each line
             var i: usize = 0;
             while (i < self.last_total_lines) : (i += 1) {
-                std.debug.print("\x1b[K\n", .{});
+                try writer.writeAll("\x1b[K\n");
             }
 
             // Move cursor back up
-            std.debug.print("\x1b[{d}F", .{self.last_total_lines});
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
+
+            // Single atomic write
+            std.debug.print("{s}", .{output_buffer.items});
         }
 
         self.last_total_lines = 0;
@@ -139,9 +157,51 @@ pub const MultiProgress = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        try self.clearInternal();
-        std.debug.print("{s}\n", .{msg});
-        try self.drawInternal();
+        // Build the entire sequence (clear + message + redraw) in a single buffer
+        var output_buffer = std.ArrayList(u8){};
+        defer output_buffer.deinit(self.allocator);
+
+        const writer = output_buffer.writer(self.allocator);
+
+        // 1. Clear sequence
+        if (self.last_total_lines > 0) {
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
+            var i: usize = 0;
+            while (i < self.last_total_lines) : (i += 1) {
+                try writer.writeAll("\x1b[K\n");
+            }
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
+        }
+
+        // 2. Print message
+        try writer.print("{s}\n", .{msg});
+
+        // 3. Redraw all bars
+        if (self.last_total_lines > 0) {
+            try writer.print("\x1b[{d}F", .{self.last_total_lines});
+        }
+
+        var bar_buffer: std.ArrayList(u8) = .{};
+        defer bar_buffer.deinit(self.allocator);
+        try bar_buffer.ensureTotalCapacity(self.allocator, 512);
+
+        var total_lines: usize = 0;
+        for (self.bars.items) |bar| {
+            bar_buffer.clearRetainingCapacity();
+            try bar.style.format(bar.state, bar.width, bar_buffer.writer(self.allocator));
+            try writer.print("\x1b[K{s}\n", .{bar_buffer.items});
+            total_lines += 1;
+        }
+
+        while (total_lines < self.last_total_lines) {
+            try writer.writeAll("\x1b[K\n");
+            total_lines += 1;
+        }
+
+        self.last_total_lines = self.bars.items.len;
+
+        // Single atomic write
+        std.debug.print("{s}", .{output_buffer.items});
     }
 
     /// Join all bars (wait for them to finish)
