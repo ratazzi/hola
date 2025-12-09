@@ -90,7 +90,7 @@ pub const Resource = struct {
             const EnvEntry = struct { key: []const u8, value: ?[]const u8 };
             var saved_env = std.ArrayList(EnvEntry).empty;
             defer {
-                // Restore original environment
+                // Restore original environment and free allocated memory
                 for (saved_env.items) |item| {
                     const key_z = std.heap.page_allocator.dupeZ(u8, item.key) catch continue;
                     defer std.heap.page_allocator.free(key_z);
@@ -99,9 +99,15 @@ pub const Resource = struct {
                         const val_z = std.heap.page_allocator.dupeZ(u8, val) catch continue;
                         defer std.heap.page_allocator.free(val_z);
                         _ = c.setenv(key_z.ptr, val_z.ptr, 1);
+
+                        // Free the saved value
+                        std.heap.page_allocator.free(val);
                     } else {
                         _ = c.unsetenv(key_z.ptr);
                     }
+
+                    // Free the saved key
+                    std.heap.page_allocator.free(item.key);
                 }
                 saved_env.deinit(std.heap.page_allocator);
             }
@@ -126,9 +132,26 @@ pub const Resource = struct {
                             const old_value_ptr = c.getenv(key_z.ptr);
                             const old_value = if (old_value_ptr != null) std.mem.span(old_value_ptr) else null;
 
+                            // Save current value - handle allocation failures properly
                             const key_copy = std.heap.page_allocator.dupe(u8, key) catch continue;
-                            const old_value_copy = if (old_value) |v| std.heap.page_allocator.dupe(u8, v) catch null else null;
-                            saved_env.append(std.heap.page_allocator, .{ .key = key_copy, .value = old_value_copy }) catch {};
+                            errdefer std.heap.page_allocator.free(key_copy);
+
+                            const old_value_copy = if (old_value) |v|
+                                std.heap.page_allocator.dupe(u8, v) catch {
+                                    // If value copy fails, free key_copy and skip this entry
+                                    std.heap.page_allocator.free(key_copy);
+                                    continue;
+                                }
+                            else
+                                null;
+                            errdefer if (old_value_copy) |ov| std.heap.page_allocator.free(ov);
+
+                            // Append to saved_env - if this fails, errdefer will clean up
+                            saved_env.append(std.heap.page_allocator, .{ .key = key_copy, .value = old_value_copy }) catch {
+                                std.heap.page_allocator.free(key_copy);
+                                if (old_value_copy) |ov| std.heap.page_allocator.free(ov);
+                                continue;
+                            };
 
                             // Set new value
                             const val_z = std.heap.page_allocator.dupeZ(u8, value) catch continue;
