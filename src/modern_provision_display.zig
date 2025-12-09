@@ -660,7 +660,7 @@ pub const ModernProvisionDisplay = struct {
             const elapsed_ms = @divTrunc(elapsed_ns, std.time.ns_per_ms);
             const elapsed_s = @divTrunc(elapsed_ms, 1000);
             const elapsed_ms_part = @rem(elapsed_ms, 1000);
-            std.debug.print("Duration: \x1b[36m{d}.{d:0>3}s\x1b[0m\n", .{ elapsed_s, elapsed_ms_part });
+            std.debug.print("Duration: \x1b[36m{d}.{d:0>3}s\x1b[0m\n", .{ elapsed_s, @abs(elapsed_ms_part) });
             std.debug.print("\x1b[32m✓\x1b[0m Provisioning completed successfully!\n", .{});
         } else {
             // Finish the timer spinner with final message
