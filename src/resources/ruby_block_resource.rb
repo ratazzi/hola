@@ -5,6 +5,7 @@ class RubyBlockResource
   def initialize(name, &block)
     @name = name
     @block_proc = nil
+    @environment = {}
     @action = "run"
     @only_if_proc = nil
     @not_if_proc = nil
@@ -17,15 +18,22 @@ class RubyBlockResource
     only_if_arg = @only_if_proc || nil
     not_if_arg = @not_if_proc || nil
 
+    # Convert environment hash to array of [key, value] pairs
+    environment_arg = @environment.map { |k, v| [k.to_s, v.to_s] }
+
     # Convert notifications array to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
-    ZigBackend.add_ruby_block(@name, @block_proc, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    ZigBackend.add_ruby_block(@name, @block_proc, environment_arg, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def block(&block)
     @block_proc = block if block
+  end
+
+  def environment(hash)
+    @environment.merge!(hash)
   end
 
   def action(value)

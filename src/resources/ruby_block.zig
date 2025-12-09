@@ -12,6 +12,7 @@ pub const Resource = struct {
     // Resource-specific properties
     name: []const u8,
     block_proc: ?mruby.mrb_value, // Ruby Proc to execute
+    environment: ?[]const u8, // Environment variables (KEY=VALUE\0KEY2=VALUE2\0)
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -24,6 +25,7 @@ pub const Resource = struct {
 
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
+        if (self.environment) |env| allocator.free(env);
 
         // Unregister block from GC
         if (self.common.mrb_state) |mrb| {
@@ -80,6 +82,65 @@ pub const Resource = struct {
             // Get mruby state from common props
             const mrb = self.common.mrb_state orelse return error.NoMrubyState;
 
+            // Set environment variables if specified
+            const c = @cImport({
+                @cInclude("stdlib.h");
+            });
+
+            const EnvEntry = struct { key: []const u8, value: ?[]const u8 };
+            var saved_env = std.ArrayList(EnvEntry).empty;
+            defer {
+                // Restore original environment
+                for (saved_env.items) |item| {
+                    const key_z = std.heap.page_allocator.dupeZ(u8, item.key) catch continue;
+                    defer std.heap.page_allocator.free(key_z);
+
+                    if (item.value) |val| {
+                        const val_z = std.heap.page_allocator.dupeZ(u8, val) catch continue;
+                        defer std.heap.page_allocator.free(val_z);
+                        _ = c.setenv(key_z.ptr, val_z.ptr, 1);
+                    } else {
+                        _ = c.unsetenv(key_z.ptr);
+                    }
+                }
+                saved_env.deinit(std.heap.page_allocator);
+            }
+
+            if (self.environment) |env_str| {
+                // Parse environment string "KEY=VALUE\0KEY2=VALUE2\0"
+                var pos: usize = 0;
+                while (pos < env_str.len) {
+                    const start = pos;
+                    while (pos < env_str.len and env_str[pos] != 0) : (pos += 1) {}
+
+                    const pair = env_str[start..pos];
+                    if (pair.len > 0) {
+                        if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
+                            const key = pair[0..eq_pos];
+                            const value = pair[eq_pos + 1 ..];
+
+                            // Save current value
+                            const key_z = std.heap.page_allocator.dupeZ(u8, key) catch continue;
+                            defer std.heap.page_allocator.free(key_z);
+
+                            const old_value_ptr = c.getenv(key_z.ptr);
+                            const old_value = if (old_value_ptr != null) std.mem.span(old_value_ptr) else null;
+
+                            const key_copy = std.heap.page_allocator.dupe(u8, key) catch continue;
+                            const old_value_copy = if (old_value) |v| std.heap.page_allocator.dupe(u8, v) catch null else null;
+                            saved_env.append(std.heap.page_allocator, .{ .key = key_copy, .value = old_value_copy }) catch {};
+
+                            // Set new value
+                            const val_z = std.heap.page_allocator.dupeZ(u8, value) catch continue;
+                            defer std.heap.page_allocator.free(val_z);
+                            _ = c.setenv(key_z.ptr, val_z.ptr, 1);
+                        }
+                    }
+
+                    pos += 1; // Skip null terminator
+                }
+            }
+
             // Call the Ruby proc using mrb_funcall
             // Proc.call() in Ruby translates to funcall with "call" method
             const call_sym = mruby.mrb_intern_cstr(mrb, "call");
@@ -122,6 +183,7 @@ pub fn zigAddResource(
 
     var name_val: mruby.mrb_value = undefined;
     var block_val: mruby.mrb_value = undefined;
+    var environment_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
@@ -129,8 +191,8 @@ pub fn zigAddResource(
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Get name (string), block (proc), action (string), and 4 optional (blocks + arrays)
-    _ = mruby.mrb_get_args(mrb, "SoS|oooAA", &name_val, &block_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // Get name (string), block (proc), environment (array), action (string), and 4 optional (blocks + arrays)
+    _ = mruby.mrb_get_args(mrb, "SoAS|oooAA", &name_val, &block_val, &environment_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
@@ -146,6 +208,40 @@ pub fn zigAddResource(
     // Store the block proc (if it's a proc)
     const block_proc: ?mruby.mrb_value = if (zig_mrb_nil_p(block_val) == 0) block_val else null;
 
+    // Parse environment array [[key, value], ...]
+    var environment: ?[]const u8 = null;
+    const env_len = mruby.mrb_ary_len(mrb, environment_val);
+    if (env_len > 0) {
+        // Build environment string in format "KEY=VALUE\0KEY2=VALUE2\0"
+        var env_list = std.ArrayList(u8).initCapacity(allocator, @intCast(env_len * 32)) catch std.ArrayList(u8).empty;
+        defer env_list.deinit(allocator);
+
+        var i: mruby.mrb_int = 0;
+        while (i < env_len) : (i += 1) {
+            const pair = mruby.mrb_ary_ref(mrb, environment_val, i);
+            if (mruby.mrb_ary_len(mrb, pair) != 2) continue;
+
+            const key_val = mruby.mrb_ary_ref(mrb, pair, 0);
+            const val_val = mruby.mrb_ary_ref(mrb, pair, 1);
+
+            const key_cstr = mruby.mrb_str_to_cstr(mrb, key_val);
+            const val_cstr = mruby.mrb_str_to_cstr(mrb, val_val);
+
+            const key_str = std.mem.span(key_cstr);
+            const val_str = std.mem.span(val_cstr);
+
+            // Append "KEY=VALUE\0"
+            env_list.appendSlice(allocator, key_str) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, '=') catch return mruby.mrb_nil_value();
+            env_list.appendSlice(allocator, val_str) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, 0) catch return mruby.mrb_nil_value();
+        }
+
+        if (env_list.items.len > 0) {
+            environment = allocator.dupe(u8, env_list.items) catch return mruby.mrb_nil_value();
+        }
+    }
+
     // Build common properties (guards + notifications)
     var common = base.CommonProps.init(allocator);
     base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
@@ -158,6 +254,7 @@ pub fn zigAddResource(
     resources.append(allocator, .{
         .name = name,
         .block_proc = block_proc,
+        .environment = environment,
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();
