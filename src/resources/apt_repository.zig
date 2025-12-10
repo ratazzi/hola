@@ -86,37 +86,96 @@ pub const Resource = struct {
         const allocator = gpa.allocator();
 
         var updated = false;
+        var actual_key_path: ?[]const u8 = null;
+        defer if (actual_key_path) |p| allocator.free(p);
 
         // Step 1: Download GPG key if specified
         if (self.key_url) |key_url| {
-            const key_path = self.key_path orelse blk: {
-                // Default key path: /etc/apt/keyrings/<name>.gpg
-                break :blk try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.gpg", .{self.name});
-            };
-            defer if (self.key_path == null) allocator.free(key_path);
-
             // Create keyrings directory if it doesn't exist
             std.fs.cwd().makePath("/etc/apt/keyrings") catch |err| {
                 logger.warn("Failed to create /etc/apt/keyrings: {}", .{err});
             };
 
-            // Check if key already exists
-            const key_exists = blk: {
-                std.fs.accessAbsolute(key_path, .{}) catch |err| switch (err) {
-                    error.FileNotFound => break :blk false,
-                    else => return err,
-                };
-                break :blk true;
-            };
+            if (self.key_path) |explicit_path| {
+                // User specified explicit path, use it directly
+                actual_key_path = try allocator.dupe(u8, explicit_path);
 
-            if (!key_exists) {
-                logger.info("Downloading GPG key from {s} to {s}", .{ key_url, key_path });
-                const result = try http.downloadFile(allocator, key_url, key_path, .{});
-                defer {
-                    var mut_result = result;
-                    mut_result.deinit(allocator);
+                const key_exists = blk: {
+                    std.fs.accessAbsolute(explicit_path, .{}) catch |err| switch (err) {
+                        error.FileNotFound => break :blk false,
+                        else => return err,
+                    };
+                    break :blk true;
+                };
+
+                if (!key_exists) {
+                    logger.info("Downloading GPG key from {s} to {s}", .{ key_url, explicit_path });
+                    const result = try http.downloadFile(allocator, key_url, explicit_path, .{});
+                    defer {
+                        var mut_result = result;
+                        mut_result.deinit(allocator);
+                    }
+                    updated = true;
                 }
-                updated = true;
+            } else {
+                // Auto-detect key format: download to temp, check format, then move
+                // Check if either .gpg or .asc already exists
+                const gpg_path = try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.gpg", .{self.name});
+                defer allocator.free(gpg_path);
+                const asc_path = try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.asc", .{self.name});
+                defer allocator.free(asc_path);
+
+                const gpg_exists = blk: {
+                    std.fs.accessAbsolute(gpg_path, .{}) catch |err| switch (err) {
+                        error.FileNotFound => break :blk false,
+                        else => return err,
+                    };
+                    break :blk true;
+                };
+
+                const asc_exists = blk: {
+                    std.fs.accessAbsolute(asc_path, .{}) catch |err| switch (err) {
+                        error.FileNotFound => break :blk false,
+                        else => return err,
+                    };
+                    break :blk true;
+                };
+
+                if (gpg_exists) {
+                    actual_key_path = try allocator.dupe(u8, gpg_path);
+                } else if (asc_exists) {
+                    actual_key_path = try allocator.dupe(u8, asc_path);
+                } else {
+                    // Download to temp file first
+                    const temp_path = try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.tmp", .{self.name});
+                    defer allocator.free(temp_path);
+
+                    logger.info("Downloading GPG key from {s}", .{key_url});
+                    const result = try http.downloadFile(allocator, key_url, temp_path, .{});
+                    defer {
+                        var mut_result = result;
+                        mut_result.deinit(allocator);
+                    }
+
+                    // Read first few bytes to detect format
+                    const is_binary = blk: {
+                        const file = std.fs.openFileAbsolute(temp_path, .{}) catch break :blk true;
+                        defer file.close();
+                        var buf: [64]u8 = undefined;
+                        const n = file.read(&buf) catch break :blk true;
+                        if (n == 0) break :blk true;
+                        // ASCII armored keys start with "-----BEGIN PGP"
+                        break :blk !std.mem.startsWith(u8, buf[0..n], "-----BEGIN PGP");
+                    };
+
+                    const final_path = if (is_binary) gpg_path else asc_path;
+                    actual_key_path = try allocator.dupe(u8, final_path);
+
+                    // Rename temp file to final path
+                    try std.fs.renameAbsolute(temp_path, final_path);
+                    logger.info("Saved GPG key to {s}", .{final_path});
+                    updated = true;
+                }
             }
         }
 
@@ -170,13 +229,9 @@ pub const Resource = struct {
                 }
 
                 // Auto-add signed-by if key_url is specified
-                if (self.key_url != null) {
+                if (actual_key_path) |key_path| {
                     if (!first) try line_buf.appendSlice(allocator, " ");
                     try line_buf.appendSlice(allocator, "signed-by=");
-                    const key_path = self.key_path orelse blk: {
-                        break :blk try std.fmt.allocPrint(allocator, "/etc/apt/keyrings/{s}.gpg", .{self.name});
-                    };
-                    defer if (self.key_path == null) allocator.free(key_path);
                     try line_buf.appendSlice(allocator, key_path);
                     first = false;
                 }
