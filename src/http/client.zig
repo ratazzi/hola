@@ -219,8 +219,8 @@ pub const Client = struct {
             .S3 => {
                 if (req.auth) |auth| {
                     // AWS credentials for S3
-                    if (auth.aws_access_key) |access_key| {
-                        if (auth.aws_secret_key) |secret_key| {
+                    if (auth.aws_access_key_id) |access_key| {
+                        if (auth.aws_secret_access_key) |secret_key| {
                             const userpwd_str = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ access_key, secret_key });
                             defer self.allocator.free(userpwd_str);
                             const userpwd_z = try self.allocator.dupeZ(u8, userpwd_str);

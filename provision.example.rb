@@ -56,8 +56,8 @@ end
 # Download from S3
 remote_file '/tmp/data.json' do
   source 's3://my-bucket/data/file.json'
-  aws_access_key ENV['AWS_ACCESS_KEY_ID']
-  aws_secret_key ENV['AWS_SECRET_ACCESS_KEY']
+  aws_access_key_id ENV['AWS_ACCESS_KEY_ID']
+  aws_secret_access_key ENV['AWS_SECRET_ACCESS_KEY']
   aws_region 'us-east-1'
   mode '0644'
 end
@@ -65,8 +65,8 @@ end
 # Download from S3-compatible service (e.g., R2, MinIO)
 remote_file '/tmp/asset.tar.gz' do
   source 's3://my-bucket/assets/archive.tar.gz'
-  aws_access_key ENV['R2_ACCESS_KEY_ID']
-  aws_secret_key ENV['R2_SECRET_ACCESS_KEY']
+  aws_access_key_id ENV['R2_ACCESS_KEY_ID']
+  aws_secret_access_key ENV['R2_SECRET_ACCESS_KEY']
   aws_endpoint 'https://abc123.r2.cloudflarestorage.com'
   aws_region 'auto'
   mode '0644'

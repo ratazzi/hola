@@ -34,9 +34,9 @@ pub const AuthConfig = struct {
     password: ?[]const u8 = null,
 
     /// AWS Access Key ID for S3
-    aws_access_key: ?[]const u8 = null,
+    aws_access_key_id: ?[]const u8 = null,
     /// AWS Secret Access Key for S3
-    aws_secret_key: ?[]const u8 = null,
+    aws_secret_access_key: ?[]const u8 = null,
     /// AWS region for S3 (default: "auto")
     aws_region: []const u8 = "auto",
     /// AWS S3 endpoint URL (e.g., "https://s3.us-west-2.amazonaws.com" or custom endpoint for S3-compatible services)

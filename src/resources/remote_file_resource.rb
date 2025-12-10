@@ -20,8 +20,8 @@ class RemoteFileResource
     @ssh_private_key = nil
     @ssh_public_key = nil
     @ssh_known_hosts = nil
-    @aws_access_key = nil
-    @aws_secret_key = nil
+    @aws_access_key_id = nil
+    @aws_secret_access_key = nil
     @aws_region = nil
     @aws_endpoint = nil
     @action = "create"
@@ -42,7 +42,7 @@ class RemoteFileResource
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
     # Pass headers hash directly to Zig
-    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg, @remote_user, @remote_password, @remote_domain, @ssh_private_key, @ssh_public_key, @ssh_known_hosts, @aws_access_key, @aws_secret_key, @aws_region, @aws_endpoint)
+    ZigBackend.add_remote_file(@path, @source, @mode, @owner, @group, @checksum, @backup, @headers, @use_etag, @use_last_modified, @force_unlink, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg, @remote_user, @remote_password, @remote_domain, @ssh_private_key, @ssh_public_key, @ssh_known_hosts, @aws_access_key_id, @aws_secret_access_key, @aws_region, @aws_endpoint)
   end
 
   def source(value)
@@ -148,12 +148,12 @@ class RemoteFileResource
   end
 
   # Hola-specific: AWS S3 authentication
-  def aws_access_key(value)
-    @aws_access_key = value.to_s
+  def aws_access_key_id(value)
+    @aws_access_key_id = value.to_s
   end
 
-  def aws_secret_key(value)
-    @aws_secret_key = value.to_s
+  def aws_secret_access_key(value)
+    @aws_secret_access_key = value.to_s
   end
 
   def aws_region(value)

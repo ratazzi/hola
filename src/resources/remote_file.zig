@@ -38,8 +38,8 @@ pub const Resource = struct {
     ssh_known_hosts: ?[]const u8 = null, // Path to SSH known_hosts file
 
     // Hola-specific: AWS S3 authentication
-    aws_access_key: ?[]const u8 = null, // AWS Access Key ID
-    aws_secret_key: ?[]const u8 = null, // AWS Secret Access Key
+    aws_access_key_id: ?[]const u8 = null, // AWS Access Key ID
+    aws_secret_access_key: ?[]const u8 = null, // AWS Secret Access Key
     aws_region: ?[]const u8 = null, // AWS region (default: "auto")
     aws_endpoint: ?[]const u8 = null, // AWS S3 endpoint URL (required for s3:// URLs)
 
@@ -74,8 +74,8 @@ pub const Resource = struct {
         if (self.ssh_known_hosts) |hosts| allocator.free(hosts);
 
         // AWS fields
-        if (self.aws_access_key) |key| allocator.free(key);
-        if (self.aws_secret_key) |key| allocator.free(key);
+        if (self.aws_access_key_id) |key| allocator.free(key);
+        if (self.aws_secret_access_key) |key| allocator.free(key);
         if (self.aws_region) |region| allocator.free(region);
         if (self.aws_endpoint) |endpoint| allocator.free(endpoint);
 
@@ -393,15 +393,15 @@ pub const Resource = struct {
 
         // Build authentication config from resource parameters
         var auth_config: ?http.types.AuthConfig = null;
-        if (self.remote_user != null or self.ssh_private_key != null or self.aws_access_key != null) {
+        if (self.remote_user != null or self.ssh_private_key != null or self.aws_access_key_id != null) {
             auth_config = http.types.AuthConfig{
                 .username = self.remote_user,
                 .password = self.remote_password,
                 .ssh_private_key = self.ssh_private_key,
                 .ssh_public_key = self.ssh_public_key,
                 .ssh_known_hosts = self.ssh_known_hosts,
-                .aws_access_key = self.aws_access_key,
-                .aws_secret_key = self.aws_secret_key,
+                .aws_access_key_id = self.aws_access_key_id,
+                .aws_secret_access_key = self.aws_secret_access_key,
                 .aws_region = self.aws_region orelse "auto",
                 .aws_endpoint = self.aws_endpoint,
             };
@@ -588,13 +588,13 @@ pub fn zigAddResource(
     var ssh_private_key_val: mruby.mrb_value = undefined;
     var ssh_public_key_val: mruby.mrb_value = undefined;
     var ssh_known_hosts_val: mruby.mrb_value = undefined;
-    var aws_access_key_val: mruby.mrb_value = undefined;
-    var aws_secret_key_val: mruby.mrb_value = undefined;
+    var aws_access_key_id_val: mruby.mrb_value = undefined;
+    var aws_secret_access_key_val: mruby.mrb_value = undefined;
     var aws_region_val: mruby.mrb_value = undefined;
     var aws_endpoint_val: mruby.mrb_value = undefined;
 
     // Get 7 strings + 1 object (hash) + 3 bools + 1 string + 3 optional (2 blocks + 1 bool + 2 arrays) + 10 auth objects (can be nil)
-    _ = mruby.mrb_get_args(mrb, "SSSSSSSobbbS|oooAAoooooooooo", &path_val, &source_val, &mode_val, &owner_val, &group_val, &checksum_val, &backup_val, &headers_val, &use_etag_val, &use_last_modified_val, &force_unlink_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val, &remote_user_val, &remote_password_val, &remote_domain_val, &ssh_private_key_val, &ssh_public_key_val, &ssh_known_hosts_val, &aws_access_key_val, &aws_secret_key_val, &aws_region_val, &aws_endpoint_val);
+    _ = mruby.mrb_get_args(mrb, "SSSSSSSobbbS|oooAAoooooooooo", &path_val, &source_val, &mode_val, &owner_val, &group_val, &checksum_val, &backup_val, &headers_val, &use_etag_val, &use_last_modified_val, &force_unlink_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val, &remote_user_val, &remote_password_val, &remote_domain_val, &ssh_private_key_val, &ssh_public_key_val, &ssh_known_hosts_val, &aws_access_key_id_val, &aws_secret_access_key_val, &aws_region_val, &aws_endpoint_val);
 
     const path_cstr = mruby.mrb_str_to_cstr(mrb, path_val);
     const source_cstr = mruby.mrb_str_to_cstr(mrb, source_val);
@@ -675,13 +675,13 @@ pub fn zigAddResource(
         break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
     };
 
-    const aws_access_key = if (zig_mrb_nil_p(aws_access_key_val) != 0) null else blk: {
-        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_access_key_val));
+    const aws_access_key_id = if (zig_mrb_nil_p(aws_access_key_id_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_access_key_id_val));
         break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
     };
 
-    const aws_secret_key = if (zig_mrb_nil_p(aws_secret_key_val) != 0) null else blk: {
-        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_secret_key_val));
+    const aws_secret_access_key = if (zig_mrb_nil_p(aws_secret_access_key_val) != 0) null else blk: {
+        const str = std.mem.span(mruby.mrb_str_to_cstr(mrb, aws_secret_access_key_val));
         break :blk if (str.len > 0) allocator.dupe(u8, str) catch return mruby.mrb_nil_value() else null;
     };
 
@@ -742,8 +742,8 @@ pub fn zigAddResource(
         .ssh_private_key = ssh_private_key,
         .ssh_public_key = ssh_public_key,
         .ssh_known_hosts = ssh_known_hosts,
-        .aws_access_key = aws_access_key,
-        .aws_secret_key = aws_secret_key,
+        .aws_access_key_id = aws_access_key_id,
+        .aws_secret_access_key = aws_secret_access_key,
         .aws_region = aws_region,
         .aws_endpoint = aws_endpoint,
         .action = action,
