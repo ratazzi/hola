@@ -78,6 +78,7 @@ fn addResourceWithMetadata(
     add_fn: fn (*mruby.mrb_state, mruby.mrb_value, *std.ArrayList(T), std.mem.Allocator) mruby.mrb_value,
     build_id: fn (std.mem.Allocator, *const T) anyerror!resources.ResourceId,
     wrap: fn (T) resources.Resource,
+    get_common_props: fn (*const T) *const base.CommonProps,
 ) mruby.mrb_value {
     // Create a temporary ArrayList for this resource type
     var tmp_resources = std.ArrayList(T).empty;
@@ -95,7 +96,8 @@ fn addResourceWithMetadata(
         const id = build_id(g_allocator, &res) catch return mruby.mrb_nil_value();
 
         // Copy notifications from common props into metadata
-        const notifications = cloneNotificationsFromCommon(g_allocator, &res.common) catch return mruby.mrb_nil_value();
+        const common_ref = get_common_props(&res);
+        const notifications = cloneNotificationsFromCommon(g_allocator, common_ref) catch return mruby.mrb_nil_value();
 
         // Wrap into unified Resource enum
         const res_with_meta = resources.ResourceWithMetadata{
@@ -116,12 +118,18 @@ fn buildExecuteId(allocator: std.mem.Allocator, res: *const resources.execute.Re
 fn wrapExecute(res: resources.execute.Resource) resources.Resource {
     return .{ .execute = res };
 }
+fn getCommonPropsExecute(res: *const resources.execute.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildFileId(allocator: std.mem.Allocator, res: *const resources.file.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "file", res.path);
 }
 fn wrapFile(res: resources.file.Resource) resources.Resource {
     return .{ .file = res };
+}
+fn getCommonPropsFile(res: *const resources.file.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildRemoteFileId(allocator: std.mem.Allocator, res: *const resources.remote_file.Resource) !resources.ResourceId {
@@ -130,12 +138,18 @@ fn buildRemoteFileId(allocator: std.mem.Allocator, res: *const resources.remote_
 fn wrapRemoteFile(res: resources.remote_file.Resource) resources.Resource {
     return .{ .remote_file = res };
 }
+fn getCommonPropsRemoteFile(res: *const resources.remote_file.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildTemplateId(allocator: std.mem.Allocator, res: *const resources.template.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "template", res.path);
 }
 fn wrapTemplate(res: resources.template.Resource) resources.Resource {
     return .{ .template = res };
+}
+fn getCommonPropsTemplate(res: *const resources.template.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildMacosDockId(allocator: std.mem.Allocator, res: *const resources.macos_dock.Resource) !resources.ResourceId {
@@ -145,12 +159,18 @@ fn buildMacosDockId(allocator: std.mem.Allocator, res: *const resources.macos_do
 fn wrapMacosDock(res: resources.macos_dock.Resource) resources.Resource {
     return .{ .macos_dock = res };
 }
+fn getCommonPropsMacosDock(res: *const resources.macos_dock.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildDirectoryId(allocator: std.mem.Allocator, res: *const resources.directory.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "directory", res.path);
 }
 fn wrapDirectory(res: resources.directory.Resource) resources.Resource {
     return .{ .directory = res };
+}
+fn getCommonPropsDirectory(res: *const resources.directory.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildLinkId(allocator: std.mem.Allocator, res: *const resources.link.Resource) !resources.ResourceId {
@@ -159,12 +179,18 @@ fn buildLinkId(allocator: std.mem.Allocator, res: *const resources.link.Resource
 fn wrapLink(res: resources.link.Resource) resources.Resource {
     return .{ .link = res };
 }
+fn getCommonPropsLink(res: *const resources.link.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildRouteId(allocator: std.mem.Allocator, res: *const resources.route.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "route", res.target);
 }
 fn wrapRoute(res: resources.route.Resource) resources.Resource {
     return .{ .route = res };
+}
+fn getCommonPropsRoute(res: *const resources.route.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildMacosDefaultsId(allocator: std.mem.Allocator, res: *const resources.macos_defaults.Resource) !resources.ResourceId {
@@ -175,12 +201,18 @@ fn buildMacosDefaultsId(allocator: std.mem.Allocator, res: *const resources.maco
 fn wrapMacosDefaults(res: resources.macos_defaults.Resource) resources.Resource {
     return .{ .macos_defaults = res };
 }
+fn getCommonPropsMacosDefaults(res: *const resources.macos_defaults.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildAptRepositoryId(allocator: std.mem.Allocator, res: *const resources.apt_repository.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "apt_repository", res.name);
 }
 fn wrapAptRepository(res: resources.apt_repository.Resource) resources.Resource {
     return .{ .apt_repository = res };
+}
+fn getCommonPropsAptRepository(res: *const resources.apt_repository.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildSystemdUnitId(allocator: std.mem.Allocator, res: *const resources.systemd_unit.Resource) !resources.ResourceId {
@@ -189,21 +221,55 @@ fn buildSystemdUnitId(allocator: std.mem.Allocator, res: *const resources.system
 fn wrapSystemdUnit(res: resources.systemd_unit.Resource) resources.Resource {
     return .{ .systemd_unit = res };
 }
+fn getCommonPropsSystemdUnit(res: *const resources.systemd_unit.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildPackageId(allocator: std.mem.Allocator, res: *const resources.package.Resource) !resources.ResourceId {
     // Use first package name for ID, or join all names if multiple
-    if (res.names.items.len == 1) {
-        return makeResourceId(allocator, "package", res.names.items[0]);
-    } else if (res.names.items.len > 1) {
-        const joined = try std.mem.join(allocator, ", ", res.names.items);
-        defer allocator.free(joined);
-        return makeResourceId(allocator, "package", joined);
-    } else {
-        return makeResourceId(allocator, "package", "unknown");
-    }
+    const display_name = res.displayName();
+    return makeResourceId(allocator, "package", display_name);
 }
 fn wrapPackage(res: resources.package.Resource) resources.Resource {
     return .{ .package = res };
+}
+fn getCommonPropsPackage(res: *const resources.package.Resource) *const base.CommonProps {
+    // Package is a delegator, need to get common from backend
+    if (is_macos) {
+        return switch (res.backend) {
+            .homebrew => |*hb| &hb.common_props,
+        };
+    } else if (is_linux) {
+        return switch (res.backend) {
+            .apt => |*apt| &apt.common_props,
+        };
+    } else {
+        unreachable;
+    }
+}
+
+// Homebrew package (macOS only)
+fn buildHomebrewPackageId(allocator: std.mem.Allocator, res: *const resources.homebrew_package.Resource) !resources.ResourceId {
+    const display_name = res.displayName();
+    return makeResourceId(allocator, "homebrew_package", display_name);
+}
+fn wrapHomebrewPackage(res: resources.homebrew_package.Resource) resources.Resource {
+    return .{ .homebrew_package = res };
+}
+fn getCommonPropsHomebrewPackage(res: *const resources.homebrew_package.Resource) *const base.CommonProps {
+    return &res.common_props;
+}
+
+// APT package (Linux only)
+fn buildAptPackageId(allocator: std.mem.Allocator, res: *const resources.apt_package.Resource) !resources.ResourceId {
+    const display_name = res.displayName();
+    return makeResourceId(allocator, "apt_package", display_name);
+}
+fn wrapAptPackage(res: resources.apt_package.Resource) resources.Resource {
+    return .{ .apt_package = res };
+}
+fn getCommonPropsAptPackage(res: *const resources.apt_package.Resource) *const base.CommonProps {
+    return &res.common_props;
 }
 
 fn buildRubyBlockId(allocator: std.mem.Allocator, res: *const resources.ruby_block.Resource) !resources.ResourceId {
@@ -212,12 +278,18 @@ fn buildRubyBlockId(allocator: std.mem.Allocator, res: *const resources.ruby_blo
 fn wrapRubyBlock(res: resources.ruby_block.Resource) resources.Resource {
     return .{ .ruby_block = res };
 }
+fn getCommonPropsRubyBlock(res: *const resources.ruby_block.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildGitId(allocator: std.mem.Allocator, res: *const resources.git.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "git", res.destination);
 }
 fn wrapGit(res: resources.git.Resource) resources.Resource {
     return .{ .git = res };
+}
+fn getCommonPropsGit(res: *const resources.git.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 fn buildUserId(allocator: std.mem.Allocator, res: *const resources.user.Resource) !resources.ResourceId {
@@ -226,12 +298,18 @@ fn buildUserId(allocator: std.mem.Allocator, res: *const resources.user.Resource
 fn wrapUser(res: resources.user.Resource) resources.Resource {
     return .{ .user = res };
 }
+fn getCommonPropsUser(res: *const resources.user.Resource) *const base.CommonProps {
+    return &res.common;
+}
 
 fn buildGroupId(allocator: std.mem.Allocator, res: *const resources.group.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "group", res.group_name);
 }
 fn wrapGroup(res: resources.group.Resource) resources.Resource {
     return .{ .group = res };
+}
+fn getCommonPropsGroup(res: *const resources.group.Resource) *const base.CommonProps {
+    return &res.common;
 }
 
 /// Get a short filename from URL for display
@@ -288,6 +366,7 @@ export fn zig_add_execute_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value)
         resources.execute.zigAddResource,
         buildExecuteId,
         wrapExecute,
+        getCommonPropsExecute,
     );
 }
 
@@ -300,6 +379,7 @@ export fn zig_add_file_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) ca
         resources.file.zigAddResource,
         buildFileId,
         wrapFile,
+        getCommonPropsFile,
     );
 }
 
@@ -312,6 +392,7 @@ export fn zig_add_remote_file_resource(mrb: *mruby.mrb_state, self: mruby.mrb_va
         resources.remote_file.zigAddResource,
         buildRemoteFileId,
         wrapRemoteFile,
+        getCommonPropsRemoteFile,
     );
 }
 
@@ -324,6 +405,7 @@ export fn zig_add_template_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value
         resources.template.zigAddResource,
         buildTemplateId,
         wrapTemplate,
+        getCommonPropsTemplate,
     );
 }
 
@@ -340,6 +422,7 @@ export fn zig_add_macos_dock_resource(mrb: *mruby.mrb_state, self: mruby.mrb_val
         resources.macos_dock.zigAddResource,
         buildMacosDockId,
         wrapMacosDock,
+        getCommonPropsMacosDock,
     );
 }
 
@@ -352,6 +435,7 @@ export fn zig_add_directory_resource(mrb: *mruby.mrb_state, self: mruby.mrb_valu
         resources.directory.zigAddResource,
         buildDirectoryId,
         wrapDirectory,
+        getCommonPropsDirectory,
     );
 }
 
@@ -364,6 +448,7 @@ export fn zig_add_link_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) ca
         resources.link.zigAddResource,
         buildLinkId,
         wrapLink,
+        getCommonPropsLink,
     );
 }
 
@@ -376,6 +461,7 @@ export fn zig_add_route_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) c
         resources.route.zigAddResource,
         buildRouteId,
         wrapRoute,
+        getCommonPropsRoute,
     );
 }
 
@@ -392,6 +478,7 @@ export fn zig_add_macos_defaults_resource(mrb: *mruby.mrb_state, self: mruby.mrb
         resources.macos_defaults.zigAddResource,
         buildMacosDefaultsId,
         wrapMacosDefaults,
+        getCommonPropsMacosDefaults,
     );
 }
 
@@ -408,6 +495,7 @@ export fn zig_add_apt_repository_resource(mrb: *mruby.mrb_state, self: mruby.mrb
         resources.apt_repository.zigAddResource,
         buildAptRepositoryId,
         wrapAptRepository,
+        getCommonPropsAptRepository,
     );
 }
 
@@ -424,6 +512,7 @@ export fn zig_add_systemd_unit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_v
         resources.systemd_unit.zigAddResource,
         buildSystemdUnitId,
         wrapSystemdUnit,
+        getCommonPropsSystemdUnit,
     );
 }
 
@@ -436,6 +525,41 @@ export fn zig_add_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value)
         resources.package.zigAddResource,
         buildPackageId,
         wrapPackage,
+        getCommonPropsPackage,
+    );
+}
+
+// Zig callback for homebrew_package resource (macOS only)
+export fn zig_add_homebrew_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (builtin.os.tag != .macos) {
+        logger.err("homebrew_package resource is only available on macOS", .{});
+        return mruby.mrb_nil_value();
+    }
+    return addResourceWithMetadata(
+        resources.homebrew_package.Resource,
+        mrb,
+        self,
+        resources.homebrew_package.zigAddResource,
+        buildHomebrewPackageId,
+        wrapHomebrewPackage,
+        getCommonPropsHomebrewPackage,
+    );
+}
+
+// Zig callback for apt_package resource (Linux only)
+export fn zig_add_apt_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (builtin.os.tag != .linux) {
+        logger.err("apt_package resource is only available on Linux", .{});
+        return mruby.mrb_nil_value();
+    }
+    return addResourceWithMetadata(
+        resources.apt_package.Resource,
+        mrb,
+        self,
+        resources.apt_package.zigAddResource,
+        buildAptPackageId,
+        wrapAptPackage,
+        getCommonPropsAptPackage,
     );
 }
 
@@ -448,6 +572,7 @@ export fn zig_add_ruby_block_resource(mrb: *mruby.mrb_state, self: mruby.mrb_val
         resources.ruby_block.zigAddResource,
         buildRubyBlockId,
         wrapRubyBlock,
+        getCommonPropsRubyBlock,
     );
 }
 
@@ -460,6 +585,7 @@ export fn zig_add_git_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) cal
         resources.git.zigAddResource,
         buildGitId,
         wrapGit,
+        getCommonPropsGit,
     );
 }
 
@@ -472,6 +598,7 @@ export fn zig_add_user_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) ca
         resources.user.zigAddResource,
         buildUserId,
         wrapUser,
+        getCommonPropsUser,
     );
 }
 
@@ -484,6 +611,7 @@ export fn zig_add_group_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) c
         resources.group.zigAddResource,
         buildGroupId,
         wrapGroup,
+        getCommonPropsGroup,
     );
 }
 
@@ -625,14 +753,38 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     }
 
     // Register package resource (cross-platform: homebrew on macOS, apt on Linux)
-    // Signature: add_package(name, version, options, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
+    // Signature: add_package(names, version, options, action, provider=nil, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
     mruby.mrb_define_module_function(
         mrb_ptr,
         zig_module,
         "add_package",
         zig_add_package_resource,
-        mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(4), // 4 required + 4 optional
+        mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6), // 4 required + 6 optional
     );
+
+    // Register homebrew_package resource (macOS only)
+    // Signature: add_homebrew_package(names, version, options, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
+    if (is_macos) {
+        mruby.mrb_define_module_function(
+            mrb_ptr,
+            zig_module,
+            "add_homebrew_package",
+            zig_add_homebrew_package_resource,
+            mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), // 4 required + 5 optional
+        );
+    }
+
+    // Register apt_package resource (Linux only)
+    // Signature: add_apt_package(names, version, options, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
+    if (is_linux) {
+        mruby.mrb_define_module_function(
+            mrb_ptr,
+            zig_module,
+            "add_apt_package",
+            zig_add_apt_package_resource,
+            mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), // 4 required + 5 optional
+        );
+    }
 
     // Register ruby_block resource (cross-platform)
     // Signature: add_ruby_block(name, block_proc, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
@@ -719,8 +871,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
     try mrb.evalString(resources.systemd_unit.ruby_prelude);
-    // Load package and ruby_block resources
+    // Load package resources (delegator and platform-specific)
     try mrb.evalString(resources.package.ruby_prelude);
+    try mrb.evalString(resources.homebrew_package.ruby_prelude);
+    try mrb.evalString(resources.apt_package.ruby_prelude);
+    // Load ruby_block resource
     try mrb.evalString(resources.ruby_block.ruby_prelude);
     // Load git resource
     try mrb.evalString(resources.git.ruby_prelude);

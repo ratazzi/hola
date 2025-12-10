@@ -50,6 +50,21 @@ else
 // Cross-platform package resource (supports homebrew on macOS, apt on Linux)
 pub const package = @import("resources/package.zig");
 
+// Platform-specific package managers
+pub const homebrew_package = if (builtin.os.tag == .macos)
+    @import("resources/homebrew_package.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/homebrew_package_resource.rb");
+    };
+
+pub const apt_package = if (builtin.os.tag == .linux)
+    @import("resources/apt_package.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/apt_package_resource.rb");
+    };
+
 // Cross-platform ruby_block resource
 pub const ruby_block = @import("resources/ruby_block.zig");
 
@@ -95,6 +110,7 @@ const ResourceMacOs = union(enum) {
     link: link.Resource,
     route: route.Resource,
     package: package.Resource,
+    homebrew_package: homebrew_package.Resource,
     ruby_block: ruby_block.Resource,
     git: git.Resource,
     user: user.Resource,
@@ -112,6 +128,7 @@ const ResourceMacOs = union(enum) {
             .link => |res| res.deinit(allocator),
             .route => |res| res.deinit(allocator),
             .package => |res| res.deinit(allocator),
+            .homebrew_package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
             .git => |res| res.deinit(allocator),
             .user => |res| res.deinit(allocator),
@@ -131,6 +148,7 @@ const ResourceMacOs = union(enum) {
             .link => |res| try res.apply(),
             .route => |res| try res.apply(),
             .package => |res| try res.apply(),
+            .homebrew_package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
             .git => |res| try res.apply(),
             .user => |res| try res.apply(),
@@ -150,6 +168,7 @@ const ResourceMacOs = union(enum) {
             .link => |res| res.path,
             .route => |res| res.target,
             .package => |res| res.displayName(),
+            .homebrew_package => |res| res.displayName(),
             .ruby_block => |res| res.name,
             .git => |res| res.destination,
             .user => |res| res.username,
@@ -168,7 +187,17 @@ const ResourceMacOs = union(enum) {
             .directory => |*res| &res.common,
             .link => |*res| &res.common,
             .route => |*res| &res.common,
-            .package => |*res| &res.common,
+            .package => |*res| blk: {
+                // package is a delegator, need to get common from backend
+                if (builtin.os.tag == .macos) {
+                    break :blk switch (res.backend) {
+                        .homebrew => |*hb| &hb.common_props,
+                    };
+                } else {
+                    unreachable;
+                }
+            },
+            .homebrew_package => |*res| &res.common_props,
             .ruby_block => |*res| &res.common,
             .git => |*res| &res.common,
             .user => |*res| &res.common,
@@ -187,7 +216,17 @@ const ResourceMacOs = union(enum) {
             .directory => |res| res.common.ignore_failure,
             .link => |res| res.common.ignore_failure,
             .route => |res| res.common.ignore_failure,
-            .package => |res| res.common.ignore_failure,
+            .package => |res| blk: {
+                // package is a delegator, need to get common from backend
+                if (builtin.os.tag == .macos) {
+                    break :blk switch (res.backend) {
+                        .homebrew => |hb| hb.common_props.ignore_failure,
+                    };
+                } else {
+                    break :blk false;
+                }
+            },
+            .homebrew_package => |res| res.common_props.ignore_failure,
             .ruby_block => |res| res.common.ignore_failure,
             .git => |res| res.common.ignore_failure,
             .user => |res| res.common.ignore_failure,
@@ -206,6 +245,7 @@ const ResourceGeneric = union(enum) {
     apt_repository: apt_repository.Resource,
     systemd_unit: systemd_unit.Resource,
     package: package.Resource,
+    apt_package: apt_package.Resource,
     ruby_block: ruby_block.Resource,
     route: route.Resource,
     git: git.Resource,
@@ -223,6 +263,7 @@ const ResourceGeneric = union(enum) {
             .apt_repository => |res| res.deinit(allocator),
             .systemd_unit => |res| res.deinit(allocator),
             .package => |res| res.deinit(allocator),
+            .apt_package => |res| res.deinit(allocator),
             .ruby_block => |res| res.deinit(allocator),
             .route => |res| res.deinit(allocator),
             .git => |res| res.deinit(allocator),
@@ -242,6 +283,7 @@ const ResourceGeneric = union(enum) {
             .apt_repository => |res| try res.apply(),
             .systemd_unit => |res| try res.apply(),
             .package => |res| try res.apply(),
+            .apt_package => |res| try res.apply(),
             .ruby_block => |res| try res.apply(),
             .route => |res| try res.apply(),
             .git => |res| try res.apply(),
@@ -261,6 +303,7 @@ const ResourceGeneric = union(enum) {
             .apt_repository => |res| res.name,
             .systemd_unit => |res| res.name,
             .package => |res| res.displayName(),
+            .apt_package => |res| res.displayName(),
             .ruby_block => |res| res.name,
             .route => |res| res.target,
             .git => |res| res.destination,
@@ -279,7 +322,17 @@ const ResourceGeneric = union(enum) {
             .link => |*res| &res.common,
             .apt_repository => |*res| &res.common,
             .systemd_unit => |*res| &res.common,
-            .package => |*res| &res.common,
+            .package => |*res| blk: {
+                // package is a delegator, need to get common from backend
+                if (builtin.os.tag == .linux) {
+                    break :blk switch (res.backend) {
+                        .apt => |*apt| &apt.common_props,
+                    };
+                } else {
+                    unreachable;
+                }
+            },
+            .apt_package => |*res| &res.common_props,
             .ruby_block => |*res| &res.common,
             .route => |*res| &res.common,
             .git => |*res| &res.common,
@@ -298,7 +351,17 @@ const ResourceGeneric = union(enum) {
             .link => |res| res.common.ignore_failure,
             .apt_repository => |res| res.common.ignore_failure,
             .systemd_unit => |res| res.common.ignore_failure,
-            .package => |res| res.common.ignore_failure,
+            .package => |res| blk: {
+                // package is a delegator, need to get common from backend
+                if (builtin.os.tag == .linux) {
+                    break :blk switch (res.backend) {
+                        .apt => |apt| apt.common_props.ignore_failure,
+                    };
+                } else {
+                    break :blk false;
+                }
+            },
+            .apt_package => |res| res.common_props.ignore_failure,
             .ruby_block => |res| res.common.ignore_failure,
             .route => |res| res.common.ignore_failure,
             .git => |res| res.common.ignore_failure,

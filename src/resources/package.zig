@@ -3,462 +3,81 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
 const builtin = @import("builtin");
-const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
+const common = @import("package_common.zig");
+
+// Platform-specific imports with conditional compilation
+const homebrew_package = if (builtin.os.tag == .macos)
+    @import("homebrew_package.zig")
+else
+    struct {
+        pub const Resource = void;
+        pub const ruby_prelude = "";
+    };
+
+const apt_package = if (builtin.os.tag == .linux)
+    @import("apt_package.zig")
+else
+    struct {
+        pub const Resource = void;
+        pub const ruby_prelude = "";
+    };
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
 
-/// Context for async package operations
-const PackageApplyContext = struct {
-    resource: *const Resource,
-    action: Resource.Action,
-};
-
-/// Package resource data structure
+/// Package resource - thin delegator to platform-specific implementations
 pub const Resource = struct {
-    // Resource-specific properties
-    names: std.ArrayList([]const u8), // Package names (supports multiple)
-    version: ?[]const u8, // Optional version constraint (only for single package)
-    options: ?[]const u8, // Additional package manager options
-    action: Action,
+    // Delegate to platform-specific backend
+    backend: BackendType,
 
-    // Common properties (guards, notifications, etc.)
-    common: base.CommonProps,
-
-    pub const Action = enum {
-        install,
-        remove,
-        upgrade,
-        nothing,
-    };
+    const BackendType = if (is_macos)
+        union(enum) {
+            homebrew: homebrew_package.Resource,
+        }
+    else if (is_linux)
+        union(enum) {
+            apt: apt_package.Resource,
+        }
+    else
+        void;
 
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
-        for (self.names.items) |name| {
-            allocator.free(name);
+        if (is_macos) {
+            switch (self.backend) {
+                .homebrew => |res| res.deinit(allocator),
+            }
+        } else if (is_linux) {
+            switch (self.backend) {
+                .apt => |res| res.deinit(allocator),
+            }
         }
-        var names_copy = self.names;
-        names_copy.deinit(allocator);
-        if (self.version) |v| allocator.free(v);
-        if (self.options) |o| allocator.free(o);
-
-        var common = self.common;
-        common.deinit(allocator);
     }
 
-    /// Get display name for resource (first package or comma-separated list)
     pub fn displayName(self: Resource) []const u8 {
-        if (self.names.items.len == 0) return "unknown";
-        return self.names.items[0];
+        if (is_macos) {
+            return switch (self.backend) {
+                .homebrew => |res| res.displayName(),
+            };
+        } else if (is_linux) {
+            return switch (self.backend) {
+                .apt => |res| res.displayName(),
+            };
+        } else {
+            return "unknown";
+        }
     }
 
     pub fn apply(self: Resource) !base.ApplyResult {
-        const skip_reason = try self.common.shouldRun(null, null);
-        if (skip_reason) |reason| {
-            const action_name = self.actionName();
-            return base.ApplyResult{
-                .was_updated = false,
-                .action = action_name,
-                .skip_reason = reason,
-            };
-        }
-
-        // Execute the entire apply operation asynchronously
-        const ctx = PackageApplyContext{
-            .resource = &self,
-            .action = self.action,
-        };
-
-        return try AsyncExecutor.executeWithContext(
-            PackageApplyContext,
-            base.ApplyResult,
-            ctx,
-            applyAsync,
-        );
-    }
-
-    /// Async apply implementation - runs in separate thread
-    fn applyAsync(ctx: PackageApplyContext) !base.ApplyResult {
-        switch (ctx.action) {
-            .install => return try ctx.resource.applyInstallSync(),
-            .remove => return try ctx.resource.applyRemoveSync(),
-            .upgrade => return try ctx.resource.applyUpgradeSync(),
-            .nothing => {
-                return base.ApplyResult{
-                    .was_updated = false,
-                    .action = "nothing",
-                    .skip_reason = "skipped due to action :nothing",
-                };
-            },
-        }
-    }
-
-    fn actionName(self: Resource) []const u8 {
-        return switch (self.action) {
-            .install => "install",
-            .remove => "remove",
-            .upgrade => "upgrade",
-            .nothing => "nothing",
-        };
-    }
-
-    fn applyInstallSync(self: Resource) !base.ApplyResult {
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        // Build list of packages that need to be installed
-        var to_install = std.ArrayList([]const u8).empty;
-        defer to_install.deinit(allocator);
-
-        for (self.names.items) |name| {
-            if (!try self.isPackageInstalled(allocator, name)) {
-                try to_install.append(allocator, name);
-            }
-        }
-
-        if (to_install.items.len == 0) {
-            const names_str = try self.joinNames(allocator);
-            defer allocator.free(names_str);
-            logger.info("package[{s}]: already installed", .{names_str});
-            return base.ApplyResult{
-                .was_updated = true,
-                .action = "install",
-                .skip_reason = "up to date",
-            };
-        }
-
-        // Install only the missing packages
-        try self.runInstallPackages(allocator, to_install.items);
-
-        return base.ApplyResult{
-            .was_updated = true,
-            .action = "install",
-            .skip_reason = null,
-        };
-    }
-
-    fn applyRemoveSync(self: Resource) !base.ApplyResult {
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        // Build list of packages that are installed and need to be removed
-        var to_remove = std.ArrayList([]const u8).empty;
-        defer to_remove.deinit(allocator);
-
-        for (self.names.items) |name| {
-            if (try self.isPackageInstalled(allocator, name)) {
-                try to_remove.append(allocator, name);
-            }
-        }
-
-        if (to_remove.items.len == 0) {
-            const names_str = try self.joinNames(allocator);
-            defer allocator.free(names_str);
-            logger.info("package[{s}]: not installed", .{names_str});
-            return base.ApplyResult{
-                .was_updated = true,
-                .action = "remove",
-                .skip_reason = "up to date",
-            };
-        }
-
-        // Remove only the installed packages
-        try self.runRemovePackages(allocator, to_remove.items);
-
-        return base.ApplyResult{
-            .was_updated = true,
-            .action = "remove",
-            .skip_reason = null,
-        };
-    }
-
-    fn applyUpgradeSync(self: Resource) !base.ApplyResult {
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
-        // Upgrade all packages
-        try self.runUpgradePackages(allocator, self.names.items);
-
-        return base.ApplyResult{
-            .was_updated = true,
-            .action = "upgrade",
-            .skip_reason = null,
-        };
-    }
-
-    fn joinNames(self: Resource, allocator: std.mem.Allocator) ![]const u8 {
-        if (self.names.items.len == 0) return try allocator.dupe(u8, "");
-        if (self.names.items.len == 1) return try allocator.dupe(u8, self.names.items[0]);
-
-        var total_len: usize = 0;
-        for (self.names.items) |name| {
-            total_len += name.len + 2; // ", "
-        }
-        total_len -= 2; // Remove last ", "
-
-        var result = try allocator.alloc(u8, total_len);
-        var pos: usize = 0;
-        for (self.names.items, 0..) |name, i| {
-            @memcpy(result[pos .. pos + name.len], name);
-            pos += name.len;
-            if (i < self.names.items.len - 1) {
-                result[pos] = ',';
-                result[pos + 1] = ' ';
-                pos += 2;
-            }
-        }
-        return result;
-    }
-
-    fn isPackageInstalled(self: Resource, allocator: std.mem.Allocator, name: []const u8) !bool {
-        _ = self;
         if (is_macos) {
-            return try isPackageInstalledBrew(allocator, name);
+            return switch (self.backend) {
+                .homebrew => |res| try res.apply(),
+            };
         } else if (is_linux) {
-            return try isPackageInstalledApt(allocator, name);
+            return switch (self.backend) {
+                .apt => |res| try res.apply(),
+            };
         } else {
-            return error.UnsupportedPlatform;
-        }
-    }
-
-    fn isPackageInstalledBrew(allocator: std.mem.Allocator, name: []const u8) !bool {
-        // Check if package is installed via: brew list --versions <package>
-        const cmd = try std.fmt.allocPrint(allocator, "brew list --versions {s} 2>/dev/null", .{name});
-        defer allocator.free(cmd);
-
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-        defer allocator.free(stdout);
-        _ = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
-
-        const term = try child.wait();
-        const exited_ok = switch (term) {
-            .Exited => |code| code == 0,
-            else => false,
-        };
-
-        // If command succeeded and there's output, package is installed
-        return exited_ok and stdout.len > 0;
-    }
-
-    fn isPackageInstalledApt(allocator: std.mem.Allocator, name: []const u8) !bool {
-        // Check if package is installed via: dpkg-query -W -f='${Status}' <package>
-        const cmd = try std.fmt.allocPrint(allocator, "dpkg-query -W -f='${{Status}}' {s} 2>/dev/null | grep -q 'install ok installed'", .{name});
-        defer allocator.free(cmd);
-
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-        _ = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-        _ = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
-
-        const term = try child.wait();
-        return switch (term) {
-            .Exited => |code| code == 0,
-            else => false,
-        };
-    }
-
-    fn runInstallPackages(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) !void {
-        const cmd = if (is_macos)
-            try self.buildBrewInstallCmd(allocator, packages)
-        else if (is_linux)
-            try self.buildAptInstallCmd(allocator, packages)
-        else
-            return error.UnsupportedPlatform;
-        defer allocator.free(cmd);
-
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-        logger.info("package[{s}]: installing via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
-        try self.runCommand(allocator, cmd);
-    }
-
-    fn runRemovePackages(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) !void {
-        const cmd = if (is_macos)
-            try self.buildBrewRemoveCmd(allocator, packages)
-        else if (is_linux)
-            try self.buildAptRemoveCmd(allocator, packages)
-        else
-            return error.UnsupportedPlatform;
-        defer allocator.free(cmd);
-
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-        logger.info("package[{s}]: removing via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
-        try self.runCommand(allocator, cmd);
-    }
-
-    fn runUpgradePackages(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) !void {
-        const cmd = if (is_macos)
-            try self.buildBrewUpgradeCmd(allocator, packages)
-        else if (is_linux)
-            try self.buildAptUpgradeCmd(allocator, packages)
-        else
-            return error.UnsupportedPlatform;
-        defer allocator.free(cmd);
-
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-        logger.info("package[{s}]: upgrading via {s}", .{ pkg_list, if (is_macos) "homebrew" else "apt" });
-        try self.runCommand(allocator, cmd);
-    }
-
-    fn buildBrewInstallCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        // Use --quiet to suppress output
-        const base_opts = "--quiet";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew install {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "brew install {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn buildAptInstallCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        // Use -qq to suppress output, -o Dpkg::Use-Pty=0 to prevent /dev/tty usage
-        const base_opts = "-y -qq -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn buildBrewRemoveCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        const base_opts = "--quiet";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew uninstall {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "brew uninstall {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn buildAptRemoveCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        const base_opts = "-y -qq -o Dpkg::Use-Pty=0";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get remove {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "apt-get remove {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn buildBrewUpgradeCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        const base_opts = "--quiet";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "brew upgrade {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "brew upgrade {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn buildAptUpgradeCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
-        const pkg_list = try std.mem.join(allocator, " ", packages);
-        defer allocator.free(pkg_list);
-
-        const base_opts = "-y -qq -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 --only-upgrade";
-
-        if (self.options) |opts| {
-            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s} {s}", .{ base_opts, opts, pkg_list });
-        } else {
-            return try std.fmt.allocPrint(allocator, "apt-get install {s} {s}", .{ base_opts, pkg_list });
-        }
-    }
-
-    fn runCommand(self: Resource, allocator: std.mem.Allocator, cmd: []const u8) !void {
-        _ = self;
-
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        // Set stdin to /dev/null to prevent any interactive prompts
-        child.stdin_behavior = .Ignore;
-
-        // Inherit current environment and add platform-specific non-interactive settings
-        var env_map = try std.process.getEnvMap(allocator);
-        defer env_map.deinit();
-
-        // Only set Debian/APT variables on Linux systems
-        if (is_linux) {
-            // Debian/APT specific: disable interactive prompts and progress
-            try env_map.put("DEBIAN_FRONTEND", "noninteractive");
-            try env_map.put("APT_LISTCHANGES_FRONTEND", "none");
-            try env_map.put("NEEDRESTART_MODE", "l"); // Avoid needrestart prompts
-        }
-
-        child.env_map = &env_map;
-
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        defer allocator.free(stdout);
-        defer allocator.free(stderr);
-
-        const term = try child.wait();
-
-        // Log output (but don't display it)
-        if (stdout.len > 0) {
-            const trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
-            if (trimmed.len > 0) {
-                logger.debug("  stdout: {s}", .{trimmed});
-            }
-        }
-
-        if (stderr.len > 0) {
-            const trimmed = std.mem.trim(u8, stderr, &std.ascii.whitespace);
-            if (trimmed.len > 0) {
-                logger.warn("  stderr: {s}", .{trimmed});
-            }
-        }
-
-        // Check exit status
-        switch (term) {
-            .Exited => |code| {
-                if (code != 0) {
-                    logger.err("[package] command failed with code {d}", .{code});
-                    if (stderr.len > 0) {
-                        logger.err("   {s}", .{stderr});
-                    }
-                    return error.PackageOperationFailed;
-                }
-            },
-            .Signal => |sig| {
-                logger.err("[package] command killed by signal {d}", .{sig});
-                return error.CommandKilled;
-            },
-            else => {
-                logger.err("[package] command failed with unknown status", .{});
-                return error.CommandFailed;
-            },
+            return common.PackageError.UnsupportedPlatform;
         }
     }
 };
@@ -467,7 +86,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("package_resource.rb");
 
 /// Zig callback: called from Ruby to add a package resource
-/// Format: add_package(names_array, version, options, action, only_if_block, not_if_block, notifications_array)
+/// This delegator parses the provider and creates the appropriate backend
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -480,14 +99,39 @@ pub fn zigAddResource(
     var version_val: mruby.mrb_value = undefined;
     var options_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
+    var provider_val: mruby.mrb_value = undefined; // NEW: provider parameter
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Get array + 3 strings + 4 optional (blocks + arrays)
-    _ = mruby.mrb_get_args(mrb, "ASSS|oooAA", &names_val, &version_val, &options_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // Get array + 4 strings + 5 optional (provider + blocks + arrays)
+    _ = mruby.mrb_get_args(mrb, "ASSS|SoooAA", &names_val, &version_val, &options_val, &action_val, &provider_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+
+    // Parse provider (optional, auto-detect if not specified)
+    const provider_cstr = mruby.mrb_str_to_cstr(mrb, provider_val);
+    const provider_str = std.mem.span(provider_cstr);
+    const provider_type: common.ProviderType = if (provider_str.len > 0)
+        common.ProviderType.fromString(provider_str) catch blk: {
+            logger.warn("Invalid provider '{s}', using platform default", .{provider_str});
+            break :blk detectProvider();
+        }
+    else
+        detectProvider();
+
+    // Helper to clean up allocated resources on error
+    const cleanupResources = struct {
+        fn call(alloc: std.mem.Allocator, names_list: *std.ArrayList([]const u8), ver: ?[]const u8, opts: ?[]const u8, props: *base.CommonProps) void {
+            for (names_list.items) |name| {
+                alloc.free(name);
+            }
+            names_list.deinit(alloc);
+            if (ver) |v| alloc.free(v);
+            if (opts) |o| alloc.free(o);
+            props.deinit(alloc);
+        }
+    }.call;
 
     // Parse names array
     var names = std.ArrayList([]const u8).empty;
@@ -495,8 +139,19 @@ pub fn zigAddResource(
     for (0..@intCast(names_len)) |i| {
         const name_val = mruby.mrb_ary_ref(mrb, names_val, @intCast(i));
         const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
-        const name = allocator.dupe(u8, std.mem.span(name_cstr)) catch return mruby.mrb_nil_value();
-        names.append(allocator, name) catch return mruby.mrb_nil_value();
+        const name = allocator.dupe(u8, std.mem.span(name_cstr)) catch {
+            // Clean up previously allocated names
+            for (names.items) |n| allocator.free(n);
+            names.deinit(allocator);
+            return mruby.mrb_nil_value();
+        };
+        names.append(allocator, name) catch {
+            // Clean up current name and all previous names
+            allocator.free(name);
+            for (names.items) |n| allocator.free(n);
+            names.deinit(allocator);
+            return mruby.mrb_nil_value();
+        };
     }
 
     const version_cstr = mruby.mrb_str_to_cstr(mrb, version_val);
@@ -505,37 +160,93 @@ pub fn zigAddResource(
 
     const version_str = std.mem.span(version_cstr);
     const version: ?[]const u8 = if (version_str.len > 0)
-        allocator.dupe(u8, version_str) catch return mruby.mrb_nil_value()
+        allocator.dupe(u8, version_str) catch {
+            for (names.items) |n| allocator.free(n);
+            names.deinit(allocator);
+            return mruby.mrb_nil_value();
+        }
     else
         null;
 
     const options_str = std.mem.span(options_cstr);
     const options: ?[]const u8 = if (options_str.len > 0)
-        allocator.dupe(u8, options_str) catch return mruby.mrb_nil_value()
+        allocator.dupe(u8, options_str) catch {
+            for (names.items) |n| allocator.free(n);
+            names.deinit(allocator);
+            if (version) |v| allocator.free(v);
+            return mruby.mrb_nil_value();
+        }
     else
         null;
 
     const action_str = std.mem.span(action_cstr);
-    const action: Resource.Action = if (std.mem.eql(u8, action_str, "remove"))
-        .remove
-    else if (std.mem.eql(u8, action_str, "upgrade"))
-        .upgrade
-    else if (std.mem.eql(u8, action_str, "nothing"))
-        .nothing
-    else
-        .install;
+    const action = common.Action.fromString(action_str) catch .install;
 
     // Build common properties (guards + notifications)
-    var common = base.CommonProps.init(allocator);
-    base.fillCommonFromRuby(&common, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
+    var common_props = base.CommonProps.init(allocator);
+    base.fillCommonFromRuby(&common_props, mrb, only_if_val, not_if_val, ignore_failure_val, notifications_val, subscriptions_val, allocator);
+
+    // Pre-format display name for multiple packages
+    const display_name = common.formatPackageList(allocator, names.items) catch {
+        cleanupResources(allocator, &names, version, options, &common_props);
+        return mruby.mrb_nil_value();
+    };
+
+    // Create backend based on provider
+    const backend: Resource.BackendType = switch (provider_type) {
+        .homebrew => blk: {
+            if (!is_macos) {
+                logger.err("homebrew_package provider is only available on macOS", .{});
+                allocator.free(display_name);
+                cleanupResources(allocator, &names, version, options, &common_props);
+                return mruby.mrb_nil_value();
+            }
+            break :blk .{
+                .homebrew = homebrew_package.Resource{
+                    .names = names,
+                    .display_name = display_name,
+                    .version = version,
+                    .options = options,
+                    .action = action,
+                    .common_props = common_props,
+                },
+            };
+        },
+        .apt => blk: {
+            if (!is_linux) {
+                logger.err("apt_package provider is only available on Linux", .{});
+                allocator.free(display_name);
+                cleanupResources(allocator, &names, version, options, &common_props);
+                return mruby.mrb_nil_value();
+            }
+            break :blk .{
+                .apt = apt_package.Resource{
+                    .names = names,
+                    .display_name = display_name,
+                    .version = version,
+                    .options = options,
+                    .action = action,
+                    .common_props = common_props,
+                },
+            };
+        },
+    };
 
     resources.append(allocator, .{
-        .names = names,
-        .version = version,
-        .options = options,
-        .action = action,
-        .common = common,
-    }) catch return mruby.mrb_nil_value();
+        .backend = backend,
+    }) catch {
+        // Clean up the backend resource if append fails
+        const temp_resource = Resource{ .backend = backend };
+        temp_resource.deinit(allocator);
+        return mruby.mrb_nil_value();
+    };
 
     return mruby.mrb_nil_value();
+}
+
+/// Auto-detect provider based on platform
+fn detectProvider() common.ProviderType {
+    if (is_macos) return .homebrew;
+    if (is_linux) return .apt;
+    @compileError("Unsupported platform for package resource");
 }

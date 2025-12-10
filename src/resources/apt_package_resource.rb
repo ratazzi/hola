@@ -1,14 +1,13 @@
 module ZigBackend
 end
 
-class PackageResource
+class AptPackageResource
   def initialize(names, &block)
     # Support both single name and array of names
     @names = Array(names)
     @version = ""
     @options = ""
     @action = "install"
-    @provider = "" # Optional provider: "homebrew_package" or "apt_package"
     @only_if_proc = nil
     @not_if_proc = nil
     @ignore_failure = false
@@ -24,8 +23,8 @@ class PackageResource
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
 
-    # Register package resource with optional provider
-    ZigBackend.add_package(@names, @version, @options, @action, @provider, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    # Register all packages as a single resource (batch install)
+    ZigBackend.add_apt_package(@names, @version, @options, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   # Allow overriding package names in block
@@ -43,11 +42,6 @@ class PackageResource
 
   def action(value)
     @action = value.to_s
-  end
-
-  # NEW: Optional provider selection
-  def provider(value)
-    @provider = value.to_s
   end
 
   def only_if(command = nil, &block)
@@ -79,6 +73,6 @@ class PackageResource
   end
 end
 
-def package(names, &block)
-  PackageResource.new(names, &block)
+def apt_package(names, &block)
+  AptPackageResource.new(names, &block)
 end
