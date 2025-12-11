@@ -224,6 +224,7 @@ fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: 
     step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{libgit2_path}) });
     step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{libgit2_path}) });
     step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{libgit2_path}) });
+    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-posix.a", .{libgit2_path}) });
     step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{libgit2_path}) });
 
     // curl-specific dependencies

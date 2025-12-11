@@ -13,6 +13,7 @@ pub const link = @import("resources/link.zig");
 pub const route = @import("resources/route.zig");
 pub const git = @import("resources/git.zig");
 pub const aws_kms = @import("resources/aws_kms.zig");
+pub const file_edit = @import("resources/file_edit.zig");
 
 // macOS-only resources
 pub const macos_dock = if (builtin.os.tag == .macos)
@@ -117,6 +118,7 @@ const ResourceMacOs = union(enum) {
     user: user.Resource,
     group: group.Resource,
     aws_kms: aws_kms.Resource,
+    file_edit: file_edit.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -136,6 +138,7 @@ const ResourceMacOs = union(enum) {
             .user => |res| res.deinit(allocator),
             .group => |res| res.deinit(allocator),
             .aws_kms => |res| res.deinit(allocator),
+            .file_edit => |res| res.deinit(allocator),
         }
     }
 
@@ -157,6 +160,7 @@ const ResourceMacOs = union(enum) {
             .user => |res| try res.apply(),
             .group => |res| try res.apply(),
             .aws_kms => |res| try res.apply(),
+            .file_edit => |res| try res.apply(),
         };
     }
 
@@ -178,6 +182,7 @@ const ResourceMacOs = union(enum) {
             .user => |res| res.username,
             .group => |res| res.group_name,
             .aws_kms => |res| res.name,
+            .file_edit => |res| res.path,
         };
     }
 
@@ -208,6 +213,7 @@ const ResourceMacOs = union(enum) {
             .user => |*res| &res.common,
             .group => |*res| &res.common,
             .aws_kms => |*res| &res.common,
+            .file_edit => |*res| &res.common,
         };
     }
 
@@ -238,6 +244,7 @@ const ResourceMacOs = union(enum) {
             .user => |res| res.common.ignore_failure,
             .group => |res| res.common.ignore_failure,
             .aws_kms => |res| res.common.ignore_failure,
+            .file_edit => |res| res.common.ignore_failure,
         };
     }
 };
@@ -259,6 +266,7 @@ const ResourceGeneric = union(enum) {
     user: user.Resource,
     group: group.Resource,
     aws_kms: aws_kms.Resource,
+    file_edit: file_edit.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -278,6 +286,7 @@ const ResourceGeneric = union(enum) {
             .user => |res| res.deinit(allocator),
             .group => |res| res.deinit(allocator),
             .aws_kms => |res| res.deinit(allocator),
+            .file_edit => |res| res.deinit(allocator),
         }
     }
 
@@ -299,6 +308,7 @@ const ResourceGeneric = union(enum) {
             .user => |res| try res.apply(),
             .group => |res| try res.apply(),
             .aws_kms => |res| try res.apply(),
+            .file_edit => |res| try res.apply(),
         };
     }
 
@@ -320,6 +330,7 @@ const ResourceGeneric = union(enum) {
             .user => |res| res.username,
             .group => |res| res.group_name,
             .aws_kms => |res| res.name,
+            .file_edit => |res| res.path,
         };
     }
 
@@ -350,6 +361,7 @@ const ResourceGeneric = union(enum) {
             .user => |*res| &res.common,
             .group => |*res| &res.common,
             .aws_kms => |*res| &res.common,
+            .file_edit => |*res| &res.common,
         };
     }
 
@@ -380,6 +392,7 @@ const ResourceGeneric = union(enum) {
             .user => |res| res.common.ignore_failure,
             .group => |res| res.common.ignore_failure,
             .aws_kms => |res| res.common.ignore_failure,
+            .file_edit => |res| res.common.ignore_failure,
         };
     }
 };
