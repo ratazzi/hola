@@ -322,7 +322,6 @@ fn getCommonPropsAwsKms(res: *const resources.aws_kms.Resource) *const base.Comm
     return &res.common;
 }
 
-
 fn buildFileEditId(allocator: std.mem.Allocator, res: *const resources.file_edit.Resource) !resources.ResourceId {
     return makeResourceId(allocator, "file_edit", res.path);
 }
