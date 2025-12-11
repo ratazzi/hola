@@ -956,6 +956,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 
+    // Load test helper only in debug builds
+    if (builtin.mode == .Debug) {
+        try mrb.evalString(@embedFile("ruby_prelude/test_helper.rb"));
+    }
+
     // Load and execute user's recipe
     // Use evalFile instead of evalString to preserve file path and line numbers in error messages
     try mrb.evalFile(opts.script_path);
