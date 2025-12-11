@@ -312,6 +312,16 @@ fn getCommonPropsGroup(res: *const resources.group.Resource) *const base.CommonP
     return &res.common;
 }
 
+fn buildAwsKmsId(allocator: std.mem.Allocator, res: *const resources.aws_kms.Resource) !resources.ResourceId {
+    return makeResourceId(allocator, "aws_kms", res.name);
+}
+fn wrapAwsKms(res: resources.aws_kms.Resource) resources.Resource {
+    return .{ .aws_kms = res };
+}
+fn getCommonPropsAwsKms(res: *const resources.aws_kms.Resource) *const base.CommonProps {
+    return &res.common;
+}
+
 /// Get a short filename from URL for display
 fn getShortFileNameFromUrl(url: []const u8) []const u8 {
     if (std.mem.lastIndexOf(u8, url, "/")) |last_slash| {
@@ -615,6 +625,19 @@ export fn zig_add_group_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) c
     );
 }
 
+// Zig callback for aws_kms resource (cross-platform)
+export fn zig_add_aws_kms_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addResourceWithMetadata(
+        resources.aws_kms.Resource,
+        mrb,
+        self,
+        resources.aws_kms.zigAddResource,
+        buildAwsKmsId,
+        wrapAwsKms,
+        getCommonPropsAwsKms,
+    );
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -829,6 +852,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
         mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), // 9 required + 5 optional
     );
 
+    // Register aws_kms resource (cross-platform)
+    // Signature: add_aws_kms(name, region, access_key_id, secret_access_key, session_token, key_id, algorithm, source, source_encoding, target_encoding, path, mode, owner, group, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_aws_kms",
+        zig_add_aws_kms_resource,
+        mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5), // 15 required + 5 optional
+    );
+
     // Register all API modules using the unified interface
     // Register modules in dependency order: JSON must be registered before http_client
     // because http_client's Ruby prelude calls JSON.parse in Response#json method
@@ -882,6 +915,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load user and group resources
     try mrb.evalString(resources.user.ruby_prelude);
     try mrb.evalString(resources.group.ruby_prelude);
+    // Load aws_kms resource
+    try mrb.evalString(resources.aws_kms.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 
