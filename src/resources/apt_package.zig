@@ -184,7 +184,7 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
         logger.info("apt_package[{s}]: installing", .{pkg_list});
-        try runCommand(allocator, cmd, .install);
+        try runCommand(allocator, cmd, .install, packages);
     }
 
     fn runRemovePackages(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) !void {
@@ -194,7 +194,7 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
         logger.info("apt_package[{s}]: removing", .{pkg_list});
-        try runCommand(allocator, cmd, .remove);
+        try runCommand(allocator, cmd, .remove, packages);
     }
 
     fn runUpgradePackages(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) !void {
@@ -204,7 +204,7 @@ pub const Resource = struct {
         const pkg_list = try std.mem.join(allocator, " ", packages);
         defer allocator.free(pkg_list);
         logger.info("apt_package[{s}]: upgrading", .{pkg_list});
-        try runCommand(allocator, cmd, .upgrade);
+        try runCommand(allocator, cmd, .upgrade, packages);
     }
 
     fn buildInstallCmd(self: Resource, allocator: std.mem.Allocator, packages: []const []const u8) ![]const u8 {
@@ -272,7 +272,7 @@ fn isInstalled(allocator: std.mem.Allocator, name: []const u8) !bool {
 }
 
 /// Execute an APT command with appropriate error mapping based on action
-fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Action) !void {
+fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Action, packages: []const []const u8) !void {
     var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -318,9 +318,14 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                logger.err("[apt_package] {s} command failed with code {d}", .{ action.toString(), code });
+                // Format package list for error message
+                const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
+                defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
+
+                logger.err("[apt_package] {s} failed for package(s): {s}", .{ action.toString(), pkg_list });
+                logger.err("[apt_package] exit code: {d}", .{code});
                 if (stderr.len > 0) {
-                    logger.err("   {s}", .{stderr});
+                    logger.err("[apt_package] error: {s}", .{stderr});
                 }
                 // Map action to corresponding error type
                 return switch (action) {
@@ -332,11 +337,15 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
             }
         },
         .Signal => |sig| {
-            logger.err("[apt_package] command killed by signal {d}", .{sig});
+            const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
+            defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
+            logger.err("[apt_package] command killed by signal {d} for package(s): {s}", .{ sig, pkg_list });
             return common.PackageError.CommandFailed;
         },
         else => {
-            logger.err("[apt_package] command failed with unknown status", .{});
+            const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
+            defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
+            logger.err("[apt_package] command failed with unknown status for package(s): {s}", .{pkg_list});
             return common.PackageError.CommandFailed;
         },
     }
