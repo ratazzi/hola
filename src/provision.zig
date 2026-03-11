@@ -23,16 +23,43 @@ pub const Options = struct {
     use_pretty_output: bool = true, // Default to pretty output
 };
 
-// Global resource collector (will be initialized per-run)
-var g_allocator: std.mem.Allocator = undefined;
-var g_resources: std.ArrayList(resources.ResourceWithMetadata) = undefined;
-var g_display: ?*modern_display.ModernProvisionDisplay = null;
+const ProvisionRunner = struct {
+    allocator: std.mem.Allocator,
+    resources: std.ArrayList(resources.ResourceWithMetadata),
+    display: ?*modern_display.ModernProvisionDisplay = null,
+
+    fn init(allocator: std.mem.Allocator) ProvisionRunner {
+        return .{
+            .allocator = allocator,
+            .resources = std.ArrayList(resources.ResourceWithMetadata).empty,
+        };
+    }
+
+    fn deinit(self: *ProvisionRunner) void {
+        for (self.resources.items) |*res| {
+            res.deinit(self.allocator);
+        }
+        self.resources.deinit(self.allocator);
+    }
+};
+
+threadlocal var current_runner: ?*ProvisionRunner = null;
+
+fn requireRunner() *ProvisionRunner {
+    return current_runner orelse @panic("provision runner is not initialized");
+}
 
 // Poll callback for async executor
 fn pollDisplayUpdate() !void {
-    if (g_display) |display| {
-        try display.update();
+    if (current_runner) |runner| {
+        if (runner.display) |display| {
+            try display.update();
+        }
     }
+}
+
+fn currentRunnerOrNilValue() ?*ProvisionRunner {
+    return current_runner;
 }
 
 // Pending notification wrapper
@@ -80,12 +107,15 @@ fn addResourceWithMetadata(
     wrap: fn (T) resources.Resource,
     get_common_props: fn (*const T) *const base.CommonProps,
 ) mruby.mrb_value {
+    const runner = currentRunnerOrNilValue() orelse return mruby.mrb_nil_value();
+    const allocator = runner.allocator;
+
     // Create a temporary ArrayList for this resource type
     var tmp_resources = std.ArrayList(T).empty;
-    defer tmp_resources.deinit(g_allocator);
+    defer tmp_resources.deinit(allocator);
 
     // Call the resource-specific Zig add function
-    const result = add_fn(mrb, self, &tmp_resources, g_allocator);
+    const result = add_fn(mrb, self, &tmp_resources, allocator);
 
     // If nothing was added, just return the result from the resource handler
     if (tmp_resources.items.len == 0) return result;
@@ -93,11 +123,11 @@ fn addResourceWithMetadata(
     // Process all resources in tmp_resources (some resources like systemd_unit create multiple)
     for (tmp_resources.items) |res| {
         // Build ResourceId
-        const id = build_id(g_allocator, &res) catch return mruby.mrb_nil_value();
+        const id = build_id(allocator, &res) catch return mruby.mrb_nil_value();
 
         // Copy notifications from common props into metadata
         const common_ref = get_common_props(&res);
-        const notifications = cloneNotificationsFromCommon(g_allocator, common_ref) catch return mruby.mrb_nil_value();
+        const notifications = cloneNotificationsFromCommon(allocator, common_ref) catch return mruby.mrb_nil_value();
 
         // Wrap into unified Resource enum
         const res_with_meta = resources.ResourceWithMetadata{
@@ -106,7 +136,7 @@ fn addResourceWithMetadata(
             .notifications = notifications,
         };
 
-        g_resources.append(g_allocator, res_with_meta) catch return mruby.mrb_nil_value();
+        runner.resources.append(allocator, res_with_meta) catch return mruby.mrb_nil_value();
     }
 
     return result;
@@ -284,6 +314,7 @@ fn getShortFileNameFromUrl(url: []const u8) []const u8 {
 
 /// Process a notification by finding the target resource and triggering the action
 fn processNotification(allocator: std.mem.Allocator, pending: PendingNotification, display: *modern_display.ModernProvisionDisplay) !void {
+    const runner = requireRunner();
     const notif = pending.notification;
 
     // Parse target resource ID
@@ -297,7 +328,7 @@ fn processNotification(allocator: std.mem.Allocator, pending: PendingNotificatio
 
     // Find target resource
     var found = false;
-    for (g_resources.items) |*target_res| {
+    for (runner.resources.items) |*target_res| {
         if (std.mem.eql(u8, target_res.id.type_name, target_id.type_name) and
             std.mem.eql(u8, target_res.id.name, target_id.name))
         {
@@ -662,16 +693,11 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
-    // Initialize global state
-    g_allocator = allocator;
-    g_resources = std.ArrayList(resources.ResourceWithMetadata).empty;
-    defer {
-        // Clean up resources
-        for (g_resources.items) |*res| {
-            res.deinit(allocator);
-        }
-        g_resources.deinit(allocator);
-    }
+    var runner = ProvisionRunner.init(allocator);
+    defer runner.deinit();
+
+    current_runner = &runner;
+    defer current_runner = null;
 
     var mrb = try mruby.State.init();
     defer mrb.deinit();
@@ -758,17 +784,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     defer display.deinit();
 
     // Set global display for async executor callback
-    g_display = &display;
-    defer g_display = null;
+    runner.display = &display;
+    defer runner.display = null;
 
     // Set poll callback for async executor
     AsyncExecutor.setPollCallback(pollDisplayUpdate);
+    defer AsyncExecutor.setPollCallback(null);
 
     // Show section header
     try display.showSection("Applying Configuration");
 
     // Set total number of resources for progress display
-    display.setTotalResources(g_resources.items.len);
+    display.setTotalResources(runner.resources.items.len);
 
     // Phase 0: Start parallel downloads for remote files
     // Initialize download manager with the specified output mode
@@ -838,7 +865,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Collect all remote_file resources for parallel download
     // Only pre-download simple files (no conditions like only_if/not_if, and action is :create)
-    for (g_resources.items) |*res| {
+    for (runner.resources.items) |*res| {
         if (res.resource == .remote_file) {
             const remote_res = &res.resource.remote_file;
 
@@ -956,7 +983,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Phase 0: Convert subscriptions to reverse notifications
     // When resource A subscribes to resource B, we add a notification from B to A
-    for (g_resources.items) |*subscriber_res| {
+    for (runner.resources.items) |*subscriber_res| {
         const common = subscriber_res.resource.getCommonProps();
         for (common.subscriptions.items) |sub| {
             // Find the source resource that this resource is subscribing to
@@ -964,7 +991,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             defer source_id_parsed.deinit(allocator);
 
             // Find the source resource in our list
-            for (g_resources.items) |*source_res| {
+            for (runner.resources.items) |*source_res| {
                 if (std.mem.eql(u8, source_res.id.type_name, source_id_parsed.type_name) and
                     std.mem.eql(u8, source_res.id.name, source_id_parsed.name))
                 {
@@ -985,7 +1012,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     }
 
     // Phase 1: Execute resources and collect notifications
-    for (g_resources.items) |*res| {
+    for (runner.resources.items) |*res| {
         try display.startResource(res.id.type_name, res.id.name);
         try display.update();
 
