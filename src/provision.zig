@@ -661,6 +661,64 @@ export fn zig_add_file_edit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_valu
     );
 }
 
+const ResourcePlatform = enum {
+    all,
+    macos,
+    linux,
+
+    fn isSupported(self: ResourcePlatform) bool {
+        return switch (self) {
+            .all => true,
+            .macos => is_macos,
+            .linux => is_linux,
+        };
+    }
+};
+
+const ResourceBinding = struct {
+    name: [*:0]const u8,
+    handler: mruby.mrb_func_t,
+    args_spec: mruby.mrb_aspec,
+    platform: ResourcePlatform = .all,
+};
+
+fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass) void {
+    const bindings = [_]ResourceBinding{
+        .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_template", .handler = zig_add_template_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_macos_dock", .handler = zig_add_macos_dock_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(9), .platform = .macos },
+        .{ .name = "add_directory", .handler = zig_add_directory_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(7) },
+        .{ .name = "add_link", .handler = zig_add_link_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_route", .handler = zig_add_route_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(6), .platform = .macos },
+        .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
+        .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
+        .{ .name = "add_package", .handler = zig_add_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
+        .{ .name = "add_homebrew_package", .handler = zig_add_homebrew_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .macos },
+        .{ .name = "add_apt_package", .handler = zig_add_apt_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
+        .{ .name = "add_ruby_block", .handler = zig_add_ruby_block_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_git", .handler = zig_add_git_resource, .args_spec = mruby.MRB_ARGS_REQ(13) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_user", .handler = zig_add_user_resource, .args_spec = mruby.MRB_ARGS_REQ(11) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_group", .handler = zig_add_group_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_aws_kms", .handler = zig_add_aws_kms_resource, .args_spec = mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_file_edit", .handler = zig_add_file_edit_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
+    };
+
+    inline for (bindings) |binding| {
+        if (binding.platform.isSupported()) {
+            mruby.mrb_define_module_function(
+                mrb_ptr,
+                zig_module,
+                binding.name,
+                binding.handler,
+                binding.args_spec,
+            );
+        }
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Initialize global state
     g_allocator = allocator;
@@ -679,221 +737,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Register Zig functions in mruby
     const mrb_ptr = mrb.mrb orelse return error.MRubyNotInitialized;
     const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
-
-    // Register file resource
-    // Signature: add_file(path, content, action, mode, owner, group, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_file",
-        zig_add_file_resource,
-        mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(4), // 6 required + 4 optional
-    );
-
-    // Register execute resource
-    // Signature: add_execute(name, command, cwd, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_execute",
-        zig_add_execute_resource,
-        mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(4), // 4 required + 4 optional
-    );
-
-    // Register remote_file resource
-    // Signature: add_remote_file(path, source, mode, owner, group, checksum, backup, headers, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_remote_file",
-        zig_add_remote_file_resource,
-        mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(4), // 9 required + 4 optional
-    );
-
-    // Register template resource
-    // Signature: add_template(path, source, mode, variables_array, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_template",
-        zig_add_template_resource,
-        mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4), // 5 required + 4 optional
-    );
-
-    // Register macos_dock resource (macOS only)
-    // Signature: add_macos_dock(apps_array, tilesize=nil, orientation=nil, autohide=nil, magnification=nil, largesize=nil, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    if (is_macos) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_macos_dock",
-            zig_add_macos_dock_resource,
-            mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(9), // 1 required + 9 optional
-        );
-    }
-
-    // Register directory resource
-    // Signature: add_directory(path, mode=nil, recursive=false, action="create", only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_directory",
-        zig_add_directory_resource,
-        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(7), // 1 required + 7 optional
-    );
-
-    // Register link resource
-    // Signature: add_link(path, target, action="create", only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_link",
-        zig_add_link_resource,
-        mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(5), // 2 required + 5 optional
-    );
-
-    // Register route resource
-    // Signature: add_route(target, gateway, netmask, device, action, only_if, not_if, ignore_failure, notifications)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_route",
-        zig_add_route_resource,
-        mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4),
-    );
-
-    // Register macos_defaults resource (macOS only)
-    // Signature: add_macos_defaults(domain, key, value_array=nil, action="write", only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    if (is_macos) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_macos_defaults",
-            zig_add_macos_defaults_resource,
-            mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(6), // 2 required + 6 optional
-        );
-    }
-
-    // Register apt_repository resource (Linux only)
-    // Signature: add_apt_repository(name, uri, key_url, key_path, distribution, components, arch, options, repo_type, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    if (is_linux) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_apt_repository",
-            zig_add_apt_repository_resource,
-            mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(4), // 10 required + 4 optional
-        );
-    }
-
-    // Register systemd_unit resource (Linux only)
-    // Signature: add_systemd_unit(name, content, actions, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    if (is_linux) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_systemd_unit",
-            zig_add_systemd_unit_resource,
-            mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), // 3 required + 4 optional
-        );
-    }
-
-    // Register package resource (cross-platform: homebrew on macOS, apt on Linux)
-    // Signature: add_package(names, version, options, action, provider=nil, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_package",
-        zig_add_package_resource,
-        mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6), // 4 required + 6 optional
-    );
-
-    // Register homebrew_package resource (macOS only)
-    // Signature: add_homebrew_package(names, version, options, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    if (is_macos) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_homebrew_package",
-            zig_add_homebrew_package_resource,
-            mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), // 4 required + 5 optional
-        );
-    }
-
-    // Register apt_package resource (Linux only)
-    // Signature: add_apt_package(names, version, options, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    if (is_linux) {
-        mruby.mrb_define_module_function(
-            mrb_ptr,
-            zig_module,
-            "add_apt_package",
-            zig_add_apt_package_resource,
-            mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), // 4 required + 5 optional
-        );
-    }
-
-    // Register ruby_block resource (cross-platform)
-    // Signature: add_ruby_block(name, block_proc, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_ruby_block",
-        zig_add_ruby_block_resource,
-        mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), // 3 required + 4 optional
-    );
-
-    // Register git resource (cross-platform)
-    // Signature: add_git(repository, destination, revision, checkout_branch, remote, depth,
-    //   enable_checkout, enable_submodules, ssh_key, enable_strict_host_key_checking,
-    //   user, group, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil,
-    //   notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_git",
-        zig_add_git_resource,
-        mruby.MRB_ARGS_REQ(13) | mruby.MRB_ARGS_OPT(5), // 13 required + 5 optional
-    );
-
-    // Register user resource (cross-platform)
-    // Signature: add_user(username, uid, gid, comment, home, shell, password, system, manage_home, non_unique, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_user",
-        zig_add_user_resource,
-        mruby.MRB_ARGS_REQ(11) | mruby.MRB_ARGS_OPT(5), // 11 required + 5 optional
-    );
-
-    // Register group resource (cross-platform)
-    // Signature: add_group(group_name, gid, members, excluded_members, append, comment, system, non_unique, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_group",
-        zig_add_group_resource,
-        mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), // 9 required + 5 optional
-    );
-
-    // Register aws_kms resource (cross-platform)
-    // Signature: add_aws_kms(name, region, access_key_id, secret_access_key, session_token, key_id, algorithm, source, source_encoding, target_encoding, path, mode, owner, group, action, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_aws_kms",
-        zig_add_aws_kms_resource,
-        mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5), // 15 required + 5 optional
-    );
-
-    // Register file_edit resource (cross-platform)
-    // Signature: add_file_edit(path, operations, backup, mode, owner, group, only_if_block=nil, not_if_block=nil, ignore_failure=nil, notifications=nil, subscriptions=nil)
-    mruby.mrb_define_module_function(
-        mrb_ptr,
-        zig_module,
-        "add_file_edit",
-        zig_add_file_edit_resource,
-        mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5), // 6 required + 5 optional
-    );
+    registerResourceBindings(mrb_ptr, zig_module);
 
     // Register all API modules using the unified interface
     // Register modules in dependency order: JSON must be registered before http_client
