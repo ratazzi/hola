@@ -15,34 +15,9 @@ const parsers = .{
     .MODE = clap.parsers.string,
 };
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
-    var diag = clap.Diagnostic{};
-    var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
-        .allocator = allocator,
-        .diagnostic = &diag,
-    }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
-        return;
-    };
-    defer res.deinit();
-
-    if (res.args.help != 0) return printHelp(null);
-
-    const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
-
-    var use_pretty_output = true;
-    if (res.args.output) |output_mode| {
-        if (std.mem.eql(u8, output_mode, "plain")) {
-            use_pretty_output = false;
-        } else if (std.mem.eql(u8, output_mode, "pretty")) {
-            use_pretty_output = true;
-        } else {
-            std.debug.print("Invalid output mode: {s}\n", .{output_mode});
-            std.debug.print("Valid modes: pretty, plain\n", .{});
-            return error.InvalidOutputMode;
-        }
-    }
-
+/// Download a remote script to a temp file, run provision, then clean up.
+/// Accepts both local paths and HTTP(S) URLs.
+pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool) !void {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
@@ -76,7 +51,10 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
             try allocator.dupe(u8, "/tmp");
         defer allocator.free(temp_dir);
 
-        const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}.rb", .{ temp_dir, std.time.timestamp() });
+        var rand_buf: [8]u8 = undefined;
+        std.crypto.random.bytes(&rand_buf);
+        const rand_hex = std.fmt.bytesToHex(rand_buf, .lower);
+        const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}-{s}.rb", .{ temp_dir, std.time.timestamp(), &rand_hex });
         temp_file_path = temp_file;
 
         const cfg = http.Config{};
@@ -113,7 +91,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
             return error.DownloadFailed;
         }
 
-        const file = try std.fs.cwd().createFile(temp_file, .{});
+        const file = try std.fs.cwd().createFile(temp_file, .{ .exclusive = true });
         defer file.close();
         try file.writeAll(response.body);
 
@@ -121,10 +99,41 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         break :blk temp_file;
     } else script_path_or_url;
 
-    provision.run(allocator, .{
+    try provision.run(allocator, .{
         .script_path = script_path,
         .use_pretty_output = use_pretty_output,
+    });
+}
+
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    var diag = clap.Diagnostic{};
+    var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
+        .allocator = allocator,
+        .diagnostic = &diag,
     }) catch |err| {
+        try diag.reportToFile(std.fs.File.stderr(), err);
+        return;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) return printHelp(null);
+
+    const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
+
+    var use_pretty_output = true;
+    if (res.args.output) |output_mode| {
+        if (std.mem.eql(u8, output_mode, "plain")) {
+            use_pretty_output = false;
+        } else if (std.mem.eql(u8, output_mode, "pretty")) {
+            use_pretty_output = true;
+        } else {
+            std.debug.print("Invalid output mode: {s}\n", .{output_mode});
+            std.debug.print("Valid modes: pretty, plain\n", .{});
+            return error.InvalidOutputMode;
+        }
+    }
+
+    runScript(allocator, script_path_or_url, use_pretty_output) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
     };
 }
