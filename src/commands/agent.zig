@@ -122,9 +122,21 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
         }
         break :blk "unknown";
     };
+    // Extract params field as JSON string for data_bag injection
+    const params_json: ?[]const u8 = blk: {
+        if (obj.get("params")) |v| {
+            if (v == .object) {
+                const json_str = std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(v, .{})}) catch break :blk null;
+                break :blk json_str;
+            }
+        }
+        break :blk null;
+    };
+    defer if (params_json) |p| allocator.free(p);
+
     std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, url });
 
-    provision_cmd.runScript(allocator, url, false) catch |err| {
+    provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
             sendCallback(allocator, cb, data, "error", @errorName(err));

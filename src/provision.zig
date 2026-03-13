@@ -21,6 +21,7 @@ const AsyncExecutor = @import("async_executor.zig").AsyncExecutor;
 pub const Options = struct {
     script_path: []const u8,
     use_pretty_output: bool = true, // Default to pretty output
+    params_json: ?[]const u8 = null, // JSON string for data_bag injection
 };
 
 const ProvisionRunner = struct {
@@ -692,6 +693,52 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
     }
 }
 
+/// Inject params JSON into mruby as $_hola_params global variable.
+/// Uses mruby's JSON.parse to convert the JSON string into a Ruby Hash.
+fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
+    // Build Ruby code: $_hola_params = JSON.parse('...')
+    // Escape single quotes in JSON to avoid breaking the Ruby string literal
+    var escaped_len: usize = 0;
+    for (params_json) |ch| {
+        escaped_len += if (ch == '\'' or ch == '\\') @as(usize, 2) else 1;
+    }
+
+    const allocator = std.heap.c_allocator;
+    const buf = try allocator.alloc(u8, escaped_len + 64); // prefix + suffix overhead
+    defer allocator.free(buf);
+
+    var pos: usize = 0;
+    const prefix = "$_hola_params = JSON.parse('";
+    @memcpy(buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+
+    for (params_json) |ch| {
+        if (ch == '\'' or ch == '\\') {
+            buf[pos] = '\\';
+            pos += 1;
+        }
+        buf[pos] = ch;
+        pos += 1;
+    }
+
+    const suffix = "')";
+    @memcpy(buf[pos .. pos + suffix.len], suffix);
+    pos += suffix.len;
+
+    // Evaluate the Ruby code
+    var code_buf: [4096:0]u8 = undefined;
+    if (pos > 4096) return error.ParamsTooLarge;
+    @memcpy(code_buf[0..pos], buf[0..pos]);
+    code_buf[pos] = 0;
+    _ = mruby.mrb_load_string(mrb, &code_buf);
+
+    const exc = mruby.mrb_get_exception(mrb);
+    if (mruby.mrb_test(exc)) {
+        mruby.mrb_print_error(mrb);
+        return error.MRubyException;
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
@@ -766,6 +813,14 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.file_edit.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
+
+    // Load data_bag support
+    try mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
+
+    // Inject params as $_hola_params if provided (agent mode)
+    if (opts.params_json) |params_json| {
+        try injectParams(mrb_ptr, params_json);
+    }
 
     // Load test helper only in debug builds
     if (builtin.mode == .Debug) {
