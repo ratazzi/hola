@@ -24,6 +24,21 @@ const parsers = .{
     .SECONDS = clap.parsers.int(u32, 10),
 };
 
+/// Return a display-safe URL with password masked as "***".
+/// If the URL has no password or parsing fails, returns the original string.
+fn maskUrlPassword(allocator: std.mem.Allocator, url: []const u8) []const u8 {
+    const uri = std.Uri.parse(url) catch return url;
+    if (uri.password == null) return url;
+    const user_part = if (uri.user) |u| u.percent_encoded else "";
+    const host_part = if (uri.host) |h| h.percent_encoded else "";
+    return std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
+        uri.scheme,
+        user_part,
+        host_part,
+        uri.path.percent_encoded,
+    }) catch url;
+}
+
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const MAX_BACKOFF_MS: u64 = 30_000;
 const DEFAULT_WATCH_INTERVAL: u32 = 10;
@@ -135,7 +150,9 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     };
     defer if (params_json) |p| allocator.free(p);
 
-    std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, url });
+    const display_url = maskUrlPassword(allocator, url);
+    defer if (display_url.ptr != url.ptr) allocator.free(display_url);
+    std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, display_url });
 
     var prov_result = provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
@@ -285,7 +302,9 @@ fn sseStreamCallback(data: []const u8, context: *anyopaque) anyerror!usize {
 }
 
 fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) void {
-    std.debug.print("[agent] SSE mode, node={s}, connecting to {s}\n", .{ node_name, endpoint });
+    const display_endpoint = maskUrlPassword(allocator, endpoint);
+    defer if (display_endpoint.ptr != endpoint.ptr) allocator.free(display_endpoint);
+    std.debug.print("[agent] SSE mode, node={s}, connecting to {s}\n", .{ node_name, display_endpoint });
 
     var backoff_ms: u64 = INITIAL_BACKOFF_MS;
     while (true) {
@@ -351,7 +370,9 @@ fn sseConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
 // -- Watch (polling) mode --
 
 fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, interval_s: u32, default_callback: ?[]const u8) void {
-    std.debug.print("[agent] watch mode, node={s}, polling {s} every {d}s\n", .{ node_name, endpoint, interval_s });
+    const display_endpoint = maskUrlPassword(allocator, endpoint);
+    defer if (display_endpoint.ptr != endpoint.ptr) allocator.free(display_endpoint);
+    std.debug.print("[agent] watch mode, node={s}, polling {s} every {d}s\n", .{ node_name, display_endpoint, interval_s });
 
     while (true) {
         pollOnce(allocator, endpoint, node_name, default_callback);
