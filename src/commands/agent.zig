@@ -110,7 +110,19 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
         break :blk default_callback;
     };
 
-    std.debug.print("[agent] provisioning: {s}\n", .{url});
+    const task_id = blk: {
+        if (obj.get("id")) |v| {
+            if (v == .string) break :blk v.string;
+        }
+        break :blk "unknown";
+    };
+    const action_name = blk: {
+        if (obj.get("action")) |v| {
+            if (v == .string) break :blk v.string;
+        }
+        break :blk "unknown";
+    };
+    std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, url });
 
     provision_cmd.runScript(allocator, url, false) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
