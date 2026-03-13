@@ -20,7 +20,7 @@ const parsers = .{
 /// Download a remote script to a temp file, run provision, then clean up.
 /// Accepts both local paths and HTTP(S) URLs.
 /// params_json: optional JSON string to inject as data_bag (agent mode).
-pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8) !void {
+pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
@@ -102,7 +102,7 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         break :blk temp_file;
     } else script_path_or_url;
 
-    try provision.run(allocator, .{
+    return try provision.run(allocator, .{
         .script_path = script_path,
         .use_pretty_output = use_pretty_output,
         .params_json = params_json,
@@ -137,9 +137,11 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         }
     }
 
-    runScript(allocator, script_path_or_url, use_pretty_output, res.args.params) catch |err| {
+    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
+        return;
     };
+    defer result.deinit(allocator);
 }
 
 fn printHelp(reason: ?[]const u8) !void {

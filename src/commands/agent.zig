@@ -3,6 +3,7 @@ const clap = @import("clap");
 const http = @import("../http.zig");
 const sse = @import("../sse.zig");
 const provision_cmd = @import("provision.zig");
+const provision = @import("../provision.zig");
 const node_info = @import("../node_info.zig");
 
 const params = clap.parseParamsComptime(
@@ -136,21 +137,22 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
 
     std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, url });
 
-    provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
+    var prov_result = provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
-            sendCallback(allocator, cb, data, "error", @errorName(err));
+            sendCallback(allocator, cb, data, "error", @errorName(err), null);
         }
         return;
     };
+    defer prov_result.deinit(allocator);
 
     std.debug.print("[agent] provision complete\n", .{});
     if (callback_url) |cb| {
-        sendCallback(allocator, cb, data, "ok", null);
+        sendCallback(allocator, cb, data, "ok", null, &prov_result);
     }
 }
 
-fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, status: []const u8, err_msg: ?[]const u8) ![]const u8 {
+fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult) ![]const u8 {
     // Use arena for all intermediate JSON allocations; only the final string is duped to caller's allocator.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -168,6 +170,35 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
     if (err_msg) |msg| {
         try result.put("error", .{ .string = msg });
     }
+
+    if (prov_result) |pr| {
+        try result.put("executed", .{ .integer = @intCast(pr.executed_count) });
+        try result.put("updated", .{ .integer = @intCast(pr.updated_count) });
+        try result.put("skipped", .{ .integer = @intCast(pr.skipped_count) });
+        try result.put("failed", .{ .integer = @intCast(pr.failed_count) });
+        try result.put("duration_ms", .{ .integer = pr.duration_ms });
+
+        var resources_arr = std.json.Array.init(aa);
+        for (pr.resource_results.items) |rr| {
+            var res_obj = std.json.ObjectMap.init(aa);
+            try res_obj.put("type", .{ .string = rr.type_name });
+            try res_obj.put("name", .{ .string = rr.name });
+            try res_obj.put("action", .{ .string = rr.action });
+            try res_obj.put("updated", .{ .bool = rr.was_updated });
+            if (rr.skipped) {
+                try res_obj.put("skipped", .{ .bool = true });
+            }
+            if (rr.skip_reason) |sr| {
+                try res_obj.put("skip_reason", .{ .string = sr });
+            }
+            if (rr.error_name) |en| {
+                try res_obj.put("error", .{ .string = en });
+            }
+            try resources_arr.append(.{ .object = res_obj });
+        }
+        try result.put("resources", .{ .array = resources_arr });
+    }
+
     try obj.put("result", .{ .object = result });
 
     const node = node_info.getNodeInfo(aa) catch null;
@@ -211,8 +242,8 @@ fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json
     };
 }
 
-fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8) void {
-    const body = buildCallbackBody(allocator, event_data, status, err_msg) catch |err| {
+fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult) void {
+    const body = buildCallbackBody(allocator, event_data, status, err_msg, prov_result) catch |err| {
         std.debug.print("[agent] failed to build callback body: {}\n", .{err});
         return;
     };
@@ -448,4 +479,77 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  hola agent --mode watch --interval 30 --node-name db-01 https://worker.example.com/pending
         \\
     );
+}
+
+test "buildCallbackBody with ProvisionResult" {
+    const allocator = std.testing.allocator;
+
+    var resource_results = std.ArrayList(provision.ResourceResult).empty;
+    defer resource_results.deinit(allocator);
+
+    const type1 = try allocator.dupe(u8, "file");
+    const name1 = try allocator.dupe(u8, "/tmp/config");
+    const action1 = try allocator.dupe(u8, "create");
+    try resource_results.append(allocator, .{
+        .type_name = type1,
+        .name = name1,
+        .action = action1,
+        .was_updated = true,
+        .skipped = false,
+        .skip_reason = null,
+        .error_name = null,
+    });
+
+    const type2 = try allocator.dupe(u8, "execute");
+    const name2 = try allocator.dupe(u8, "reload");
+    const action2 = try allocator.dupe(u8, "run");
+    const skip2 = try allocator.dupe(u8, "up to date");
+    try resource_results.append(allocator, .{
+        .type_name = type2,
+        .name = name2,
+        .action = action2,
+        .was_updated = false,
+        .skipped = true,
+        .skip_reason = skip2,
+        .error_name = null,
+    });
+
+    var prov_result = provision.ProvisionResult{
+        .executed_count = 2,
+        .updated_count = 1,
+        .skipped_count = 1,
+        .failed_count = 0,
+        .duration_ms = 142,
+        .resource_results = resource_results,
+    };
+
+    const event_data =
+        \\{"id":"task-1","url":"https://example.com/script.rb","callback":"https://example.com/done"}
+    ;
+
+    const body = try buildCallbackBody(allocator, event_data, "ok", null, &prov_result);
+    defer allocator.free(body);
+
+    // Verify key fields exist in the JSON output
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"executed\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"updated\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"skipped\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"failed\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"duration_ms\":142") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"resources\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"/tmp/config\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"skip_reason\":\"up to date\"") != null);
+    // url and callback should be removed
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"url\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"callback\":") == null);
+
+    // Free the duped strings
+    allocator.free(type1);
+    allocator.free(name1);
+    allocator.free(action1);
+    allocator.free(type2);
+    allocator.free(name2);
+    allocator.free(action2);
+    allocator.free(skip2);
 }

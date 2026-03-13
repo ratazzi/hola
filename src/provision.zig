@@ -24,6 +24,36 @@ pub const Options = struct {
     params_json: ?[]const u8 = null, // JSON string for data_bag injection
 };
 
+pub const ResourceResult = struct {
+    type_name: []const u8,
+    name: []const u8,
+    action: []const u8,
+    was_updated: bool,
+    skipped: bool,
+    skip_reason: ?[]const u8,
+    error_name: ?[]const u8,
+};
+
+pub const ProvisionResult = struct {
+    executed_count: usize,
+    updated_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    duration_ms: i64,
+    resource_results: std.ArrayList(ResourceResult),
+
+    pub fn deinit(self: *ProvisionResult, allocator: std.mem.Allocator) void {
+        for (self.resource_results.items) |rr| {
+            allocator.free(rr.type_name);
+            allocator.free(rr.name);
+            allocator.free(rr.action);
+            if (rr.skip_reason) |sr| allocator.free(sr);
+            if (rr.error_name) |en| allocator.free(en);
+        }
+        self.resource_results.deinit(allocator);
+    }
+};
+
 const ProvisionRunner = struct {
     allocator: std.mem.Allocator,
     resources: std.ArrayList(resources.ResourceWithMetadata),
@@ -739,7 +769,7 @@ fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
     }
 }
 
-pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
+pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
 
@@ -833,6 +863,19 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Record start time for timer
     const start_time = std.time.nanoTimestamp();
+
+    // Initialize resource results collection
+    var resource_results = std.ArrayList(ResourceResult).empty;
+    errdefer {
+        for (resource_results.items) |rr| {
+            allocator.free(rr.type_name);
+            allocator.free(rr.name);
+            allocator.free(rr.action);
+            if (rr.skip_reason) |sr| allocator.free(sr);
+            if (rr.error_name) |en| allocator.free(en);
+        }
+        resource_results.deinit(allocator);
+    }
 
     // Initialize modern display with the specified output mode
     var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.use_pretty_output);
@@ -1117,6 +1160,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             try display.resourceError(res.id.type_name, res.id.name, @errorName(err));
             try display.update();
 
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, ""),
+                .was_updated = false,
+                .skipped = false,
+                .skip_reason = null,
+                .error_name = try allocator.dupe(u8, @errorName(err)),
+            });
+
             // Check if this resource has ignore_failure set
             if (res.resource.shouldIgnoreFailure()) {
                 // Continue to next resource if ignore_failure is true
@@ -1134,6 +1187,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             // Pass skip_reason to resourceUpdated so it can handle "up to date" case
             try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason);
             try display.update();
+
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, result.action),
+                .was_updated = true,
+                .skipped = false,
+                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
+                .error_name = null,
+            });
 
             // Collect notifications from updated resources (only if actually updated, not "up to date")
             if (result.skip_reason == null or !std.mem.eql(u8, result.skip_reason.?, "up to date")) {
@@ -1154,6 +1217,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             // Resource was not updated - show skip reason (including "up to date")
             try display.resourceSkipped(res.id.type_name, res.id.name, result.action, result.skip_reason);
             try display.update();
+
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, result.action),
+                .was_updated = false,
+                .skipped = true,
+                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
+                .error_name = null,
+            });
         }
     }
 
@@ -1197,4 +1270,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Show execution summary with duration
     try display.showSummaryWithDuration(0, 0);
+
+    // Compute duration
+    const end_time = std.time.nanoTimestamp();
+    const elapsed_ms = @divTrunc(end_time - start_time, std.time.ns_per_ms);
+
+    return ProvisionResult{
+        .executed_count = display.executed_count,
+        .updated_count = display.updated_count,
+        .skipped_count = display.skipped_count,
+        .failed_count = display.failed_count,
+        .duration_ms = @intCast(elapsed_ms),
+        .resource_results = resource_results,
+    };
 }

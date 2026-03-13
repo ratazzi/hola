@@ -190,7 +190,8 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
 
     std.debug.print("\n", .{});
     // provision.run() will use its own ModernProvisionDisplay with spinner and will show section
-    try provision.run(allocator, .{ .script_path = script_path });
+    var prov_result = try provision.run(allocator, .{ .script_path = script_path });
+    defer prov_result.deinit(allocator);
 
     // Show log file location
     if (logger.getLogPath()) |log_file| {
