@@ -734,7 +734,7 @@ fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
     }
 
     const allocator = std.heap.c_allocator;
-    const buf = try allocator.alloc(u8, escaped_len + 64); // prefix + suffix overhead
+    const buf = try allocator.alloc(u8, escaped_len + 64 + 1); // prefix + suffix + null terminator
     defer allocator.free(buf);
 
     var pos: usize = 0;
@@ -755,12 +755,9 @@ fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
     @memcpy(buf[pos .. pos + suffix.len], suffix);
     pos += suffix.len;
 
-    // Evaluate the Ruby code
-    var code_buf: [4096:0]u8 = undefined;
-    if (pos > 4096) return error.ParamsTooLarge;
-    @memcpy(code_buf[0..pos], buf[0..pos]);
-    code_buf[pos] = 0;
-    _ = mruby.mrb_load_string(mrb, &code_buf);
+    // Null-terminate and evaluate the Ruby code
+    buf[pos] = 0;
+    _ = mruby.mrb_load_string(mrb, buf.ptr);
 
     const exc = mruby.mrb_get_exception(mrb);
     if (mruby.mrb_test(exc)) {
