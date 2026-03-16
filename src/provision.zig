@@ -32,6 +32,7 @@ pub const ResourceResult = struct {
     skipped: bool,
     skip_reason: ?[]const u8,
     error_name: ?[]const u8,
+    output: ?[]const u8,
 };
 
 pub const ProvisionResult = struct {
@@ -49,6 +50,7 @@ pub const ProvisionResult = struct {
             allocator.free(rr.action);
             if (rr.skip_reason) |sr| allocator.free(sr);
             if (rr.error_name) |en| allocator.free(en);
+            if (rr.output) |o| allocator.free(o);
         }
         self.resource_results.deinit(allocator);
     }
@@ -870,6 +872,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
             allocator.free(rr.action);
             if (rr.skip_reason) |sr| allocator.free(sr);
             if (rr.error_name) |en| allocator.free(en);
+            if (rr.output) |o| allocator.free(o);
         }
         resource_results.deinit(allocator);
     }
@@ -1165,6 +1168,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .skipped = false,
                 .skip_reason = null,
                 .error_name = try allocator.dupe(u8, @errorName(err)),
+                .output = null,
             });
 
             // Check if this resource has ignore_failure set
@@ -1176,6 +1180,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 return err;
             }
         };
+        // Free resource-allocated output after duping into resource_results
+        defer if (result.output) |o| std.heap.c_allocator.free(o);
         res.was_updated = result.was_updated;
 
         // Update resource status with action and skip reason
@@ -1193,6 +1199,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .skipped = false,
                 .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
                 .error_name = null,
+                .output = if (result.output) |o| try allocator.dupe(u8, o) else null,
             });
 
             // Collect notifications from updated resources (only if actually updated, not "up to date")
@@ -1223,6 +1230,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .skipped = true,
                 .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
                 .error_name = null,
+                .output = null,
             });
         }
     }

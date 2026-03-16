@@ -211,6 +211,9 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
             if (rr.error_name) |en| {
                 try res_obj.put("error", .{ .string = en });
             }
+            if (rr.output) |o| {
+                try res_obj.put("output", .{ .string = o });
+            }
             try resources_arr.append(.{ .object = res_obj });
         }
         try result.put("resources", .{ .array = resources_arr });

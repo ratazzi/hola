@@ -51,11 +51,12 @@ pub const Resource = struct {
 
         switch (self.action) {
             .create => {
-                const was_created = try applyCreate(self);
+                const create_result = try applyCreate(self);
                 return base.ApplyResult{
-                    .was_updated = was_created,
+                    .was_updated = create_result.was_updated,
                     .action = action_name,
-                    .skip_reason = if (was_created) null else "up to date",
+                    .skip_reason = if (create_result.was_updated) null else "up to date",
+                    .output = create_result.output,
                 };
             },
             .delete => {
@@ -69,7 +70,9 @@ pub const Resource = struct {
         }
     }
 
-    fn applyCreate(self: Resource) !bool {
+    const CreateResult = struct { was_updated: bool, output: ?[]const u8 };
+
+    fn applyCreate(self: Resource) !CreateResult {
         try base.ensureParentDir(self.path);
         const is_abs = std.fs.path.isAbsolute(self.path);
 
@@ -120,19 +123,21 @@ pub const Resource = struct {
                     true;
 
                 if (mode_matches) {
-                    return false; // File exists with same content and mode
+                    return .{ .was_updated = false, .output = null };
                 }
 
                 // Only mode differs; fix attributes without rewriting
                 base.applyFileAttributes(self.path, self.attrs) catch |err| {
                     logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
                 };
-                return true;
+                return .{ .was_updated = true, .output = null };
             }
         }
 
         // File doesn't exist or content differs, create/update it
         // Generate diff if file existed and log it
+        var diff_output: ?[]const u8 = null;
+        errdefer if (diff_output) |d| std.heap.c_allocator.free(d);
         if (existing_content) |old_content| {
             const diff = git.diffStrings(
                 std.heap.c_allocator,
@@ -146,9 +151,11 @@ pub const Resource = struct {
             };
 
             if (diff) |d| {
-                defer std.heap.c_allocator.free(d);
                 if (d.len > 0) {
                     logger.info("File diff for {s}:\n{s}", .{ self.path, d });
+                    diff_output = d;
+                } else {
+                    std.heap.c_allocator.free(d);
                 }
             }
         }
@@ -197,7 +204,7 @@ pub const Resource = struct {
             logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
         };
 
-        return true; // File was created or updated
+        return .{ .was_updated = true, .output = diff_output };
     }
 
     fn applyDelete(self: Resource) !void {

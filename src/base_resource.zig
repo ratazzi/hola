@@ -8,6 +8,7 @@ pub const ApplyResult = struct {
     was_updated: bool,
     action: []const u8,
     skip_reason: ?[]const u8 = null, // null means "up to date", non-null means skipped with reason
+    output: ?[]const u8 = null, // resource output: execute stdout/stderr, file/template diff, etc.
 };
 
 /// Common properties shared by all resources
