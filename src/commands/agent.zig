@@ -1,7 +1,6 @@
 const std = @import("std");
 const clap = @import("clap");
 const http = @import("../http.zig");
-const sse = @import("../sse.zig");
 const provision_cmd = @import("provision.zig");
 const provision = @import("../provision.zig");
 const node_info = @import("../node_info.zig");
@@ -283,35 +282,27 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     std.debug.print("[agent] callback response: {d}\n", .{resp.status});
 }
 
-// -- SSE mode --
-
-const SseContext = struct {
-    parser: *sse.Parser,
-    allocator: std.mem.Allocator,
-    default_callback: ?[]const u8,
-};
-
-fn sseStreamCallback(data: []const u8, context: *anyopaque) anyerror!usize {
-    const ctx: *SseContext = @ptrCast(@alignCast(context));
-    try ctx.parser.feed(data);
-    while (ctx.parser.next()) |ev| {
-        var event = ev;
-        defer event.deinit(ctx.allocator);
-        if (event.data) |event_data| {
-            handleTaskJson(ctx.allocator, event_data, ctx.default_callback);
-        }
-    }
-    return data.len;
-}
+// -- WebSocket mode --
 
 fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) void {
-    const display_endpoint = maskUrlPassword(allocator, endpoint);
-    defer if (display_endpoint.ptr != endpoint.ptr) allocator.free(display_endpoint);
-    std.debug.print("[agent] SSE mode, node={s}, connecting to {s}\n", .{ node_name, display_endpoint });
+    // Convert http(s) URL to ws(s) URL
+    const ws_endpoint = blk: {
+        if (std.mem.startsWith(u8, endpoint, "https://")) {
+            break :blk std.fmt.allocPrint(allocator, "wss://{s}", .{endpoint["https://".len..]}) catch endpoint;
+        } else if (std.mem.startsWith(u8, endpoint, "http://")) {
+            break :blk std.fmt.allocPrint(allocator, "ws://{s}", .{endpoint["http://".len..]}) catch endpoint;
+        }
+        break :blk endpoint;
+    };
+    defer if (ws_endpoint.ptr != endpoint.ptr) allocator.free(ws_endpoint);
+
+    const display_endpoint = maskUrlPassword(allocator, ws_endpoint);
+    defer if (display_endpoint.ptr != ws_endpoint.ptr) allocator.free(display_endpoint);
+    std.debug.print("[agent] node={s}, connecting to {s}\n", .{ node_name, display_endpoint });
 
     var backoff_ms: u64 = INITIAL_BACKOFF_MS;
     while (true) {
-        sseConnect(allocator, endpoint, node_name, default_callback) catch {
+        wsConnect(allocator, ws_endpoint, node_name, default_callback) catch {
             std.debug.print("[agent] reconnecting in {d}ms...\n", .{backoff_ms});
             std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
             backoff_ms = @min(backoff_ms * 2, MAX_BACKOFF_MS);
@@ -323,50 +314,82 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
     }
 }
 
-fn sseConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) !void {
-    var parser = sse.Parser.init(allocator);
-    defer parser.deinit();
+const WsContext = struct {
+    allocator: std.mem.Allocator,
+    default_callback: ?[]const u8,
+};
 
-    var ctx = SseContext{
-        .parser = &parser,
-        .allocator = allocator,
-        .default_callback = default_callback,
-    };
+fn wsWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
+    const ctx: *WsContext = @ptrCast(@alignCast(userdata));
+    const total = size * nmemb;
+    if (total == 0) return 0;
+    handleWsMessage(ctx.allocator, ptr[0..total], ctx.default_callback);
+    return total;
+}
 
-    const cfg = http.Config{
-        .timeout_ms = 0,
-        .low_speed_limit = 0,
-        .low_speed_time = 0,
-    };
-    var client = try http.Client.init(allocator, cfg);
-    defer client.deinit();
+fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) !void {
+    const curl = @import("../curl.zig");
+    const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
+    defer curl.curl_easy_cleanup(handle);
 
-    var req = try http.Request.build(allocator, .GET, endpoint, .{
-        .headers = .{
-            .Accept = "text/event-stream",
-            .@"Cache-Control" = "no-cache",
-            .@"X-Hola-Node" = node_name,
-            .@"X-Hola-Platform" = node_info.getOs(),
-            .@"X-Hola-Arch" = node_info.getCpuArch(),
-        },
-    });
-    defer req.deinit();
+    const url_z = try allocator.dupeZ(u8, endpoint);
+    defer allocator.free(url_z);
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_URL, url_z.ptr);
 
-    var result = client.stream(req, sseStreamCallback, @ptrCast(&ctx), null, null) catch |err| {
-        std.debug.print("[agent] SSE connection error: {}\n", .{err});
-        return err;
-    };
-    // Free headers owned by StreamResult
-    var it = result.headers.iterator();
-    while (it.next()) |entry| {
-        allocator.free(entry.key_ptr.*);
-        allocator.free(entry.value_ptr.*);
+    // Custom headers
+    var headers: ?*curl.curl_slist = null;
+    const node_header = try std.fmt.allocPrint(allocator, "X-Hola-Node: {s}\x00", .{node_name});
+    defer allocator.free(node_header);
+    headers = curl.curl_slist_append(headers, @ptrCast(node_header.ptr));
+    const platform_header = try std.fmt.allocPrint(allocator, "X-Hola-Platform: {s}\x00", .{node_info.getOs()});
+    defer allocator.free(platform_header);
+    headers = curl.curl_slist_append(headers, @ptrCast(platform_header.ptr));
+    const arch_header = try std.fmt.allocPrint(allocator, "X-Hola-Arch: {s}\x00", .{node_info.getCpuArch()});
+    defer allocator.free(arch_header);
+    headers = curl.curl_slist_append(headers, @ptrCast(arch_header.ptr));
+    if (headers) |h| {
+        _ = curl.curl_easy_setopt(handle, .CURLOPT_HTTPHEADER, h);
     }
-    result.headers.deinit();
+    defer if (headers) |h| curl.curl_slist_free_all(h);
 
-    if (result.status < 200 or result.status >= 300) {
-        std.debug.print("[agent] SSE server returned HTTP {d}\n", .{result.status});
+    // Write callback receives WebSocket text frame payloads
+    var ctx = WsContext{ .allocator = allocator, .default_callback = default_callback };
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEFUNCTION, @as(curl.WriteCallback, @ptrCast(&wsWriteCallback)));
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&ctx)));
+
+    // Perform WebSocket connection (blocks until closed)
+    const rc = curl.curl_easy_perform(handle);
+    if (rc != .CURLE_OK) {
+        const err_msg = curl.curl_easy_strerror(rc);
+        std.debug.print("[agent] WebSocket error: {s}\n", .{std.mem.span(err_msg)});
         return error.ConnectionFailed;
+    }
+}
+
+fn handleWsMessage(allocator: std.mem.Allocator, msg: []const u8, default_callback: ?[]const u8) void {
+    // Parse {"type": "task"|"snapshot-task", "data": {...}}
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, msg, .{}) catch |err| {
+        std.debug.print("[agent] failed to parse WS message: {}\n", .{err});
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return;
+    const obj = parsed.value.object;
+
+    const msg_type = blk: {
+        if (obj.get("type")) |v| {
+            if (v == .string) break :blk v.string;
+        }
+        break :blk "";
+    };
+
+    if (std.mem.eql(u8, msg_type, "task") or std.mem.eql(u8, msg_type, "snapshot-task")) {
+        if (obj.get("data")) |data_val| {
+            const task_json = std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data_val, .{})}) catch return;
+            defer allocator.free(task_json);
+            handleTaskJson(allocator, task_json, default_callback);
+        }
     }
 }
 
@@ -452,14 +475,14 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const default_callback = res.args.callback;
     const interval = res.args.interval orelse DEFAULT_WATCH_INTERVAL;
 
-    const agent_mode = res.args.mode orelse "sse";
-    if (std.mem.eql(u8, agent_mode, "sse")) {
+    const agent_mode = res.args.mode orelse "ws";
+    if (std.mem.eql(u8, agent_mode, "ws") or std.mem.eql(u8, agent_mode, "sse")) {
         runSseMode(allocator, endpoint, node_name, default_callback);
     } else if (std.mem.eql(u8, agent_mode, "watch")) {
         runWatchMode(allocator, endpoint, node_name, interval, default_callback);
     } else {
         std.debug.print("Invalid mode: {s}\n", .{agent_mode});
-        std.debug.print("Valid modes: sse, watch\n", .{});
+        std.debug.print("Valid modes: ws, watch\n", .{});
         return error.InvalidMode;
     }
 }
@@ -475,11 +498,11 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  hola agent [OPTIONS] <endpoint>
         \\
         \\Connect to an endpoint and execute provision scripts as tasks arrive.
-        \\Supports SSE (streaming) and watch (polling) modes.
+        \\Supports WebSocket (streaming) and watch (polling) modes.
         \\
         \\Options:
         \\  -n, --node-name NAME   Node name sent as X-Hola-Node header (default: hostname)
-        \\  -m, --mode MODE        Mode: sse (default) or watch
+        \\  -m, --mode MODE        Mode: ws (default) or watch
         \\  -i, --interval SECS    Watch polling interval in seconds (default: 10)
         \\  -c, --callback URL     Default callback URL (overridden by event payload)
         \\
@@ -494,9 +517,9 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  Original fields (minus url/callback) + result + node info
         \\  {"task_id": "abc", "result": {"status": "ok"}, "node": {"hostname": "...", ...}}
         \\
-        \\SSE Mode (default):
-        \\  hola agent https://worker.example.com/events
-        \\  hola agent --node-name web-01 https://worker.example.com/events
+        \\WebSocket Mode (default):
+        \\  hola agent https://hub.example.com/nodes/mynode/events
+        \\  hola agent --node-name web-01 https://hub.example.com/nodes/web-01/events
         \\
         \\Watch Mode:
         \\  hola agent --mode watch https://worker.example.com/pending

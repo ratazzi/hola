@@ -459,7 +459,7 @@ fn progressCallback(userdata: *anyopaque, dltotal: curl.curl_off_t, dlnow: curl.
     // Note: Logging disabled here to avoid log spam on large files (called very frequently)
     // Uncomment only for debugging: logger.debug("Progress: {d}/{d}", .{ downloaded, total });
     ctx.callback(downloaded, total, ctx.user_context);
-    return 0; // Return 0 to continue
+    return 0;
 }
 
 fn bodyWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
