@@ -667,6 +667,20 @@ export fn zig_add_file_edit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_valu
     );
 }
 
+// Zig callback for extract resource (cross-platform)
+export fn zig_add_extract_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addSimpleResourceWithMetadata(
+        resources.extract.Resource,
+        "extract",
+        "destination",
+        "extract",
+        "common",
+        mrb,
+        self,
+        resources.extract.zigAddResource,
+    );
+}
+
 const ResourcePlatform = enum {
     all,
     macos,
@@ -710,6 +724,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_group", .handler = zig_add_group_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_aws_kms", .handler = zig_add_aws_kms_resource, .args_spec = mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_file_edit", .handler = zig_add_file_edit_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_extract", .handler = zig_add_extract_resource, .args_spec = mruby.MRB_ARGS_REQ(8) | mruby.MRB_ARGS_OPT(5) },
     };
 
     inline for (bindings) |binding| {
@@ -840,6 +855,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     try mrb.evalString(resources.aws_kms.ruby_prelude);
     // Load file_edit resource
     try mrb.evalString(resources.file_edit.ruby_prelude);
+    // Load extract resource
+    try mrb.evalString(resources.extract.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
 

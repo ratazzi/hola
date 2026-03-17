@@ -14,6 +14,7 @@ pub const route = @import("resources/route.zig");
 pub const git = @import("resources/git.zig");
 pub const aws_kms = @import("resources/aws_kms.zig");
 pub const file_edit = @import("resources/file_edit.zig");
+pub const extract = @import("resources/extract.zig");
 
 // macOS-only resources
 pub const macos_dock = if (builtin.os.tag == .macos)
@@ -212,6 +213,7 @@ const ResourceMacOs = union(enum) {
     group: group.Resource,
     aws_kms: aws_kms.Resource,
     file_edit: file_edit.Resource,
+    extract: extract.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         deinitResourceUnion(self, allocator);
@@ -252,6 +254,7 @@ const ResourceGeneric = union(enum) {
     group: group.Resource,
     aws_kms: aws_kms.Resource,
     file_edit: file_edit.Resource,
+    extract: extract.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         deinitResourceUnion(self, allocator);
