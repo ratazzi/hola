@@ -89,6 +89,8 @@ pub const CURLoption = enum(c_int) {
     CURLOPT_CAPATH = 10097,
     CURLOPT_SSL_VERIFYPEER = 64,
     CURLOPT_SSL_VERIFYHOST = 81,
+    CURLOPT_SSLCERT = 10025,
+    CURLOPT_SSLKEY = 10087,
 
     // WebSocket
     CURLOPT_CONNECT_ONLY = 141,

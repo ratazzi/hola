@@ -41,6 +41,12 @@ pub const Config = struct {
     /// HTTP proxy URL (e.g., "http://proxy.example.com:8080")
     proxy: ?[]const u8 = null,
 
+    /// Client certificate for mTLS (PEM file path)
+    client_cert: ?[]const u8 = null,
+
+    /// Client private key for mTLS (PEM file path)
+    client_key: ?[]const u8 = null,
+
     /// Retry configuration
     retry: RetryConfig = .{},
 

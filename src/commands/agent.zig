@@ -8,9 +8,11 @@ const node_info = @import("../node_info.zig");
 const params = clap.parseParamsComptime(
     \\-h, --help                 Show help for agent
     \\-n, --node-name <NAME>     Node name (default: hostname)
-    \\-m, --mode <MODE>          Mode: sse (default) or watch
+    \\-m, --mode <MODE>          Mode: ws (default) or watch
     \\-i, --interval <SECONDS>   Watch polling interval in seconds (default: 10)
     \\-c, --callback <URL>       Default callback URL (overridden by event)
+    \\    --client-cert <PATH>   Client certificate for mTLS
+    \\    --client-key <PATH>    Client private key for mTLS
     \\<endpoint>                  Endpoint URL
     \\
 );
@@ -20,6 +22,7 @@ const parsers = .{
     .URL = clap.parsers.string,
     .NAME = clap.parsers.string,
     .MODE = clap.parsers.string,
+    .PATH = clap.parsers.string,
     .SECONDS = clap.parsers.int(u32, 10),
 };
 
@@ -36,6 +39,31 @@ fn maskUrlPassword(allocator: std.mem.Allocator, url: []const u8) []const u8 {
         host_part,
         uri.path.percent_encoded,
     }) catch url;
+}
+
+const TlsClientAuth = struct {
+    cert: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+};
+
+fn effectivePort(uri: std.Uri) u16 {
+    if (uri.port) |p| return p;
+    if (std.mem.eql(u8, uri.scheme, "https") or std.mem.eql(u8, uri.scheme, "wss")) return 443;
+    if (std.mem.eql(u8, uri.scheme, "http") or std.mem.eql(u8, uri.scheme, "ws")) return 80;
+    return 0;
+}
+
+fn originMatches(url_a: []const u8, url_b: []const u8) bool {
+    const uri_a = std.Uri.parse(url_a) catch return false;
+    const uri_b = std.Uri.parse(url_b) catch return false;
+    const host_a = if (uri_a.host) |h| h.percent_encoded else return false;
+    const host_b = if (uri_b.host) |h| h.percent_encoded else return false;
+    if (!std.mem.eql(u8, host_a, host_b)) return false;
+    if (effectivePort(uri_a) != effectivePort(uri_b)) return false;
+    // Treat https/wss and http/ws as equivalent scheme pairs
+    const secure_a = std.mem.eql(u8, uri_a.scheme, "https") or std.mem.eql(u8, uri_a.scheme, "wss");
+    const secure_b = std.mem.eql(u8, uri_b.scheme, "https") or std.mem.eql(u8, uri_b.scheme, "wss");
+    return secure_a == secure_b;
 }
 
 const INITIAL_BACKOFF_MS: u64 = 1000;
@@ -80,7 +108,7 @@ fn parseIso8601(s: []const u8) !i64 {
     return days * 86400 + @as(i64, hour) * 3600 + @as(i64, min) * 60 + sec;
 }
 
-fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callback: ?[]const u8) void {
+fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callback: ?[]const u8, endpoint: []const u8, tls_auth: TlsClientAuth) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |err| {
         std.debug.print("[agent] failed to parse task: {}\n", .{err});
         return;
@@ -156,7 +184,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     var prov_result = provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
-            sendCallback(allocator, cb, data, "error", @errorName(err), null);
+            sendCallback(allocator, cb, data, "error", @errorName(err), null, endpoint, tls_auth);
         }
         return;
     };
@@ -164,7 +192,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
 
     std.debug.print("[agent] provision complete\n", .{});
     if (callback_url) |cb| {
-        sendCallback(allocator, cb, data, "ok", null, &prov_result);
+        sendCallback(allocator, cb, data, "ok", null, &prov_result, endpoint, tls_auth);
     }
 }
 
@@ -261,7 +289,7 @@ fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json
     };
 }
 
-fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult) void {
+fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult, endpoint: []const u8, tls_auth: TlsClientAuth) void {
     const body = buildCallbackBody(allocator, event_data, status, err_msg, prov_result) catch |err| {
         std.debug.print("[agent] failed to build callback body: {}\n", .{err});
         return;
@@ -270,10 +298,28 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
 
     std.debug.print("[agent] callback POST {s}\n", .{callback_url});
 
-    var resp = http.post(allocator, callback_url, .{
+    // Use mTLS if callback host matches endpoint host
+    const use_tls_auth = originMatches(callback_url, endpoint);
+    const cfg = http.Config{
+        .client_cert = if (use_tls_auth) tls_auth.cert else null,
+        .client_key = if (use_tls_auth) tls_auth.key else null,
+    };
+    var client = http.Client.init(allocator, cfg) catch |err| {
+        std.debug.print("[agent] failed to init HTTP client: {}\n", .{err});
+        return;
+    };
+    defer client.deinit();
+
+    var req = http.Request.build(allocator, .POST, callback_url, .{
         .body = body,
         .headers = .{ .@"Content-Type" = "application/json" },
     }) catch |err| {
+        std.debug.print("[agent] failed to build request: {}\n", .{err});
+        return;
+    };
+    defer req.deinit();
+
+    var resp = client.request(req) catch |err| {
         std.debug.print("[agent] callback POST failed: {}\n", .{err});
         return;
     };
@@ -284,7 +330,7 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
 
 // -- WebSocket mode --
 
-fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) void {
+fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
     // Convert http(s) URL to ws(s) URL
     const ws_endpoint = blk: {
         if (std.mem.startsWith(u8, endpoint, "https://")) {
@@ -302,7 +348,7 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
 
     var backoff_ms: u64 = INITIAL_BACKOFF_MS;
     while (true) {
-        wsConnect(allocator, ws_endpoint, node_name, default_callback) catch {
+        wsConnect(allocator, ws_endpoint, node_name, default_callback, tls_auth) catch {
             std.debug.print("[agent] reconnecting in {d}ms...\n", .{backoff_ms});
             std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
             backoff_ms = @min(backoff_ms * 2, MAX_BACKOFF_MS);
@@ -317,17 +363,19 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
 const WsContext = struct {
     allocator: std.mem.Allocator,
     default_callback: ?[]const u8,
+    endpoint: []const u8,
+    tls_auth: TlsClientAuth,
 };
 
 fn wsWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
     const ctx: *WsContext = @ptrCast(@alignCast(userdata));
     const total = size * nmemb;
     if (total == 0) return 0;
-    handleWsMessage(ctx.allocator, ptr[0..total], ctx.default_callback);
+    handleWsMessage(ctx.allocator, ptr[0..total], ctx.default_callback, ctx.endpoint, ctx.tls_auth);
     return total;
 }
 
-fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) !void {
+fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) !void {
     const curl = @import("../curl.zig");
     const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
     defer curl.curl_easy_cleanup(handle);
@@ -335,6 +383,18 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     const url_z = try allocator.dupeZ(u8, endpoint);
     defer allocator.free(url_z);
     _ = curl.curl_easy_setopt(handle, .CURLOPT_URL, url_z.ptr);
+
+    // mTLS client certificate
+    if (tls_auth.cert) |cert| {
+        const cert_z = try allocator.dupeZ(u8, cert);
+        defer allocator.free(cert_z);
+        _ = curl.curl_easy_setopt(handle, .CURLOPT_SSLCERT, cert_z.ptr);
+    }
+    if (tls_auth.key) |key| {
+        const key_z = try allocator.dupeZ(u8, key);
+        defer allocator.free(key_z);
+        _ = curl.curl_easy_setopt(handle, .CURLOPT_SSLKEY, key_z.ptr);
+    }
 
     // Custom headers
     var headers: ?*curl.curl_slist = null;
@@ -353,7 +413,7 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     defer if (headers) |h| curl.curl_slist_free_all(h);
 
     // Write callback receives WebSocket text frame payloads
-    var ctx = WsContext{ .allocator = allocator, .default_callback = default_callback };
+    var ctx = WsContext{ .allocator = allocator, .default_callback = default_callback, .endpoint = endpoint, .tls_auth = tls_auth };
     _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEFUNCTION, @as(curl.WriteCallback, @ptrCast(&wsWriteCallback)));
     _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&ctx)));
 
@@ -366,7 +426,7 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     }
 }
 
-fn handleWsMessage(allocator: std.mem.Allocator, msg: []const u8, default_callback: ?[]const u8) void {
+fn handleWsMessage(allocator: std.mem.Allocator, msg: []const u8, default_callback: ?[]const u8, endpoint: []const u8, tls_auth: TlsClientAuth) void {
     // Parse {"type": "task"|"snapshot-task", "data": {...}}
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, msg, .{}) catch |err| {
         std.debug.print("[agent] failed to parse WS message: {}\n", .{err});
@@ -388,32 +448,48 @@ fn handleWsMessage(allocator: std.mem.Allocator, msg: []const u8, default_callba
         if (obj.get("data")) |data_val| {
             const task_json = std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data_val, .{})}) catch return;
             defer allocator.free(task_json);
-            handleTaskJson(allocator, task_json, default_callback);
+            handleTaskJson(allocator, task_json, default_callback, endpoint, tls_auth);
         }
     }
 }
 
 // -- Watch (polling) mode --
 
-fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, interval_s: u32, default_callback: ?[]const u8) void {
+fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, interval_s: u32, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
     const display_endpoint = maskUrlPassword(allocator, endpoint);
     defer if (display_endpoint.ptr != endpoint.ptr) allocator.free(display_endpoint);
     std.debug.print("[agent] watch mode, node={s}, polling {s} every {d}s\n", .{ node_name, display_endpoint, interval_s });
 
     while (true) {
-        pollOnce(allocator, endpoint, node_name, default_callback);
+        pollOnce(allocator, endpoint, node_name, default_callback, tls_auth);
         std.Thread.sleep(@as(u64, interval_s) * std.time.ns_per_s);
     }
 }
 
-fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8) void {
-    var resp = http.request(allocator, .GET, endpoint, .{
+fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
+    const cfg = http.Config{
+        .client_cert = tls_auth.cert,
+        .client_key = tls_auth.key,
+    };
+    var client = http.Client.init(allocator, cfg) catch |err| {
+        std.debug.print("[agent] failed to init HTTP client: {}\n", .{err});
+        return;
+    };
+    defer client.deinit();
+
+    var req = http.Request.build(allocator, .GET, endpoint, .{
         .headers = .{
             .@"X-Hola-Node" = node_name,
             .@"X-Hola-Platform" = node_info.getOs(),
             .@"X-Hola-Arch" = node_info.getCpuArch(),
         },
     }) catch |err| {
+        std.debug.print("[agent] failed to build request: {}\n", .{err});
+        return;
+    };
+    defer req.deinit();
+
+    var resp = client.request(req) catch |err| {
         std.debug.print("[agent] poll failed: {}\n", .{err});
         return;
     };
@@ -438,11 +514,11 @@ fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []con
                 if (item != .object) continue;
                 const task_json = std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(item, .{})}) catch continue;
                 defer allocator.free(task_json);
-                handleTaskJson(allocator, task_json, default_callback);
+                handleTaskJson(allocator, task_json, default_callback, endpoint, tls_auth);
             }
         },
         .object => {
-            handleTaskJson(allocator, resp.body, default_callback);
+            handleTaskJson(allocator, resp.body, default_callback, endpoint, tls_auth);
         },
         else => {
             std.debug.print("[agent] poll response is not a JSON object or array\n", .{});
@@ -474,12 +550,16 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const node_name = res.args.@"node-name" orelse getDefaultNodeName(allocator);
     const default_callback = res.args.callback;
     const interval = res.args.interval orelse DEFAULT_WATCH_INTERVAL;
+    const tls_auth = TlsClientAuth{
+        .cert = res.args.@"client-cert",
+        .key = res.args.@"client-key",
+    };
 
     const agent_mode = res.args.mode orelse "ws";
     if (std.mem.eql(u8, agent_mode, "ws") or std.mem.eql(u8, agent_mode, "sse")) {
-        runSseMode(allocator, endpoint, node_name, default_callback);
+        runSseMode(allocator, endpoint, node_name, default_callback, tls_auth);
     } else if (std.mem.eql(u8, agent_mode, "watch")) {
-        runWatchMode(allocator, endpoint, node_name, interval, default_callback);
+        runWatchMode(allocator, endpoint, node_name, interval, default_callback, tls_auth);
     } else {
         std.debug.print("Invalid mode: {s}\n", .{agent_mode});
         std.debug.print("Valid modes: ws, watch\n", .{});
@@ -501,10 +581,12 @@ fn printHelp(reason: ?[]const u8) !void {
         \\Supports WebSocket (streaming) and watch (polling) modes.
         \\
         \\Options:
-        \\  -n, --node-name NAME   Node name sent as X-Hola-Node header (default: hostname)
-        \\  -m, --mode MODE        Mode: ws (default) or watch
-        \\  -i, --interval SECS    Watch polling interval in seconds (default: 10)
-        \\  -c, --callback URL     Default callback URL (overridden by event payload)
+        \\  -n, --node-name NAME     Node name sent as X-Hola-Node header (default: hostname)
+        \\  -m, --mode MODE          Mode: ws (default) or watch
+        \\  -i, --interval SECS      Watch polling interval in seconds (default: 10)
+        \\  -c, --callback URL       Default callback URL (overridden by event payload)
+        \\      --client-cert PATH   Client certificate for mTLS (PEM)
+        \\      --client-key PATH    Client private key for mTLS (PEM)
         \\
         \\Task JSON Format:
         \\  {"url": "https://r2.example.com/task.rb", "callback": "https://example.com/done", ...}
@@ -599,4 +681,32 @@ test "buildCallbackBody with ProvisionResult" {
     allocator.free(name2);
     allocator.free(action2);
     allocator.free(skip2);
+}
+
+test "originMatches same origin" {
+    try std.testing.expect(originMatches("https://hub.example.com/events", "https://hub.example.com/callback"));
+}
+
+test "originMatches implicit vs explicit port 443" {
+    try std.testing.expect(originMatches("https://hub.example.com/a", "https://hub.example.com:443/b"));
+}
+
+test "originMatches wss equals https" {
+    try std.testing.expect(originMatches("wss://hub.example.com:443/ws", "https://hub.example.com/callback"));
+}
+
+test "originMatches different port" {
+    try std.testing.expect(!originMatches("https://hub.example.com/a", "https://hub.example.com:8443/b"));
+}
+
+test "originMatches https vs http" {
+    try std.testing.expect(!originMatches("https://hub.example.com/a", "http://hub.example.com/b"));
+}
+
+test "originMatches different host" {
+    try std.testing.expect(!originMatches("https://a.example.com/x", "https://b.example.com/x"));
+}
+
+test "originMatches invalid url" {
+    try std.testing.expect(!originMatches("not-a-url", "https://hub.example.com/x"));
 }
