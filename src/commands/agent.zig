@@ -303,6 +303,7 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     const cfg = http.Config{
         .client_cert = if (use_tls_auth) tls_auth.cert else null,
         .client_key = if (use_tls_auth) tls_auth.key else null,
+        .retry = .{ .max_attempts = 3, .initial_backoff_ms = 1000 },
     };
     var client = http.Client.init(allocator, cfg) catch |err| {
         std.debug.print("[agent] failed to init HTTP client: {}\n", .{err});
