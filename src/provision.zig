@@ -544,6 +544,24 @@ export fn zig_add_systemd_unit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_v
     );
 }
 
+// Zig callback for mount resource (Linux-only)
+export fn zig_add_mount_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_linux) {
+        return mruby.mrb_nil_value();
+    }
+
+    return addSimpleResourceWithMetadata(
+        resources.mount_res.Resource,
+        "mount",
+        "mount_point",
+        "mount_res",
+        "common",
+        mrb,
+        self,
+        resources.mount_res.zigAddResource,
+    );
+}
+
 // Zig callback for package resource (cross-platform)
 export fn zig_add_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
     return addPackageResourceWithMetadata(mrb, self);
@@ -715,6 +733,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(6), .platform = .macos },
         .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
         .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
+        .{ .name = "add_mount", .handler = zig_add_mount_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_package", .handler = zig_add_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
         .{ .name = "add_homebrew_package", .handler = zig_add_homebrew_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .macos },
         .{ .name = "add_apt_package", .handler = zig_add_apt_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
@@ -840,6 +859,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
     try mrb.evalString(resources.systemd_unit.ruby_prelude);
+    try mrb.evalString(resources.mount_res.ruby_prelude);
     // Load package resources (delegator and platform-specific)
     try mrb.evalString(resources.package.ruby_prelude);
     try mrb.evalString(resources.homebrew_package.ruby_prelude);

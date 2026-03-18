@@ -50,6 +50,13 @@ else
         pub const ruby_prelude = @embedFile("resources/systemd_unit_resource.rb");
     };
 
+pub const mount_res = if (builtin.os.tag == .linux)
+    @import("resources/mount.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/mount_resource.rb");
+    };
+
 // Cross-platform package resource (supports homebrew on macOS, apt on Linux)
 pub const package = @import("resources/package.zig");
 
@@ -124,6 +131,7 @@ fn payloadName(payload: anytype) []const u8 {
     }
     if (@hasField(Payload, "path")) return payload.path;
     if (@hasField(Payload, "target")) return payload.target;
+    if (@hasField(Payload, "mount_point")) return payload.mount_point;
     if (@hasField(Payload, "destination")) return payload.destination;
     if (@hasField(Payload, "username")) return payload.username;
     if (@hasField(Payload, "group_name")) return payload.group_name;
@@ -245,6 +253,7 @@ const ResourceGeneric = union(enum) {
     link: link.Resource,
     apt_repository: apt_repository.Resource,
     systemd_unit: systemd_unit.Resource,
+    mount_res: mount_res.Resource,
     package: package.Resource,
     apt_package: apt_package.Resource,
     ruby_block: ruby_block.Resource,
