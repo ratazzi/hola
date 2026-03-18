@@ -137,8 +137,12 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         }
     }
 
+    const logger = @import("../logger.zig");
     var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
+        if (logger.getLogPath()) |log_path| {
+            std.debug.print("Log file: {s}\n", .{log_path});
+        }
         return;
     };
     defer result.deinit(allocator);
