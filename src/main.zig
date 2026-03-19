@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const clap = @import("clap");
 const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
-const build_options = @import("build_options");
+pub const build_options = @import("build_options");
 const commands = @import("commands.zig");
 
 const is_macos = builtin.os.tag == .macos;
