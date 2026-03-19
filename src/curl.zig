@@ -89,6 +89,11 @@ pub const CURLoption = enum(c_int) {
     CURLOPT_CAPATH = 10097,
     CURLOPT_SSL_VERIFYPEER = 64,
     CURLOPT_SSL_VERIFYHOST = 81,
+    CURLOPT_SSLCERT = 10025,
+    CURLOPT_SSLKEY = 10087,
+
+    // WebSocket
+    CURLOPT_CONNECT_ONLY = 141,
 
     // Debug
     CURLOPT_VERBOSE = 41,
@@ -98,8 +103,12 @@ pub const CURLoption = enum(c_int) {
 
 pub const CURLINFO = enum(c_int) {
     CURLINFO_RESPONSE_CODE = 0x200002,
+    CURLINFO_ACTIVESOCKET = 0x500028,
     _,
 };
+
+pub const curl_socket_t = c_int;
+pub const CURL_SOCKET_BAD: curl_socket_t = -1;
 
 pub const CURL_HTTP_VERSION = enum(c_long) {
     CURL_HTTP_VERSION_NONE = 0,
@@ -145,6 +154,24 @@ pub extern fn curl_slist_free_all(list: ?*curl_slist) void;
 pub const WriteCallback = *const fn (ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize;
 pub const HeaderCallback = *const fn (ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize;
 pub const ProgressCallback = *const fn (clientp: *anyopaque, dltotal: c_longlong, dlnow: c_longlong, ultotal: c_longlong, ulnow: c_longlong) callconv(.c) c_int;
+
+// WebSocket
+pub const curl_ws_frame = extern struct {
+    age: c_int,
+    flags: c_int,
+    offset: curl_off_t,
+    bytesleft: curl_off_t,
+    len: usize,
+};
+
+pub const CURLWS_TEXT: c_uint = 1 << 0;
+pub const CURLWS_CLOSE: c_uint = 1 << 3;
+pub const CURLWS_PING: c_uint = 1 << 4;
+pub const CURLWS_PONG: c_uint = 1 << 6;
+
+pub extern fn curl_ws_recv(curl: *CURL, buffer: [*]u8, buflen: usize, recv: *usize, metap: *?*const curl_ws_frame) CURLcode;
+pub extern fn curl_ws_send(curl: *CURL, buffer: [*]const u8, buflen: usize, sent: *usize, fragsize: curl_off_t, flags: c_uint) CURLcode;
+pub extern fn curl_ws_meta(curl: *CURL) ?*const curl_ws_frame;
 
 // Proxy types
 pub const CURLproxytype = enum(c_long) {

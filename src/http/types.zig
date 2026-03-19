@@ -110,7 +110,7 @@ pub const Request = struct {
         if (T == @TypeOf(null)) return req;
 
         const info = @typeInfo(T);
-        if (info != .Struct) return req;
+        if (info != .@"struct") return req;
 
         // Handle body
         if (@hasField(T, "body")) {
@@ -120,10 +120,10 @@ pub const Request = struct {
         // Handle headers as anonymous struct
         if (@hasField(T, "headers")) {
             const headers_info = @typeInfo(@TypeOf(opts.headers));
-            if (headers_info == .Struct) {
+            if (headers_info == .@"struct") {
                 req.headers = std.StringHashMap([]const u8).init(allocator);
                 req.headers_owned = true;
-                inline for (headers_info.Struct.fields) |field| {
+                inline for (headers_info.@"struct".fields) |field| {
                     try req.headers.?.put(try allocator.dupe(u8, field.name), try allocator.dupe(u8, @field(opts.headers, field.name)));
                 }
             }

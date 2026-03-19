@@ -21,6 +21,39 @@ const AsyncExecutor = @import("async_executor.zig").AsyncExecutor;
 pub const Options = struct {
     script_path: []const u8,
     use_pretty_output: bool = true, // Default to pretty output
+    params_json: ?[]const u8 = null, // JSON string for data_bag injection
+};
+
+pub const ResourceResult = struct {
+    type_name: []const u8,
+    name: []const u8,
+    action: []const u8,
+    was_updated: bool,
+    skipped: bool,
+    skip_reason: ?[]const u8,
+    error_name: ?[]const u8,
+    output: ?[]const u8,
+};
+
+pub const ProvisionResult = struct {
+    executed_count: usize,
+    updated_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    duration_ms: i64,
+    resource_results: std.ArrayList(ResourceResult),
+
+    pub fn deinit(self: *ProvisionResult, allocator: std.mem.Allocator) void {
+        for (self.resource_results.items) |rr| {
+            allocator.free(rr.type_name);
+            allocator.free(rr.name);
+            allocator.free(rr.action);
+            if (rr.skip_reason) |sr| allocator.free(sr);
+            if (rr.error_name) |en| allocator.free(en);
+            if (rr.output) |o| allocator.free(o);
+        }
+        self.resource_results.deinit(allocator);
+    }
 };
 
 const ProvisionRunner = struct {
@@ -511,6 +544,24 @@ export fn zig_add_systemd_unit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_v
     );
 }
 
+// Zig callback for mount resource (Linux-only)
+export fn zig_add_mount_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_linux) {
+        return mruby.mrb_nil_value();
+    }
+
+    return addSimpleResourceWithMetadata(
+        resources.mount_res.Resource,
+        "mount",
+        "mount_point",
+        "mount_res",
+        "common",
+        mrb,
+        self,
+        resources.mount_res.zigAddResource,
+    );
+}
+
 // Zig callback for package resource (cross-platform)
 export fn zig_add_package_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
     return addPackageResourceWithMetadata(mrb, self);
@@ -634,6 +685,20 @@ export fn zig_add_file_edit_resource(mrb: *mruby.mrb_state, self: mruby.mrb_valu
     );
 }
 
+// Zig callback for extract resource (cross-platform)
+export fn zig_add_extract_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    return addSimpleResourceWithMetadata(
+        resources.extract.Resource,
+        "extract",
+        "destination",
+        "extract",
+        "common",
+        mrb,
+        self,
+        resources.extract.zigAddResource,
+    );
+}
+
 const ResourcePlatform = enum {
     all,
     macos,
@@ -668,6 +733,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(6), .platform = .macos },
         .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
         .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
+        .{ .name = "add_mount", .handler = zig_add_mount_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_package", .handler = zig_add_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
         .{ .name = "add_homebrew_package", .handler = zig_add_homebrew_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .macos },
         .{ .name = "add_apt_package", .handler = zig_add_apt_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
@@ -677,6 +743,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_group", .handler = zig_add_group_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_aws_kms", .handler = zig_add_aws_kms_resource, .args_spec = mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_file_edit", .handler = zig_add_file_edit_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_extract", .handler = zig_add_extract_resource, .args_spec = mruby.MRB_ARGS_REQ(8) | mruby.MRB_ARGS_OPT(5) },
     };
 
     inline for (bindings) |binding| {
@@ -692,7 +759,50 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
     }
 }
 
-pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
+/// Inject params JSON into mruby as $_hola_params global variable.
+/// Uses mruby's JSON.parse to convert the JSON string into a Ruby Hash.
+fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
+    // Build Ruby code: $_hola_params = JSON.parse('...')
+    // Escape single quotes in JSON to avoid breaking the Ruby string literal
+    var escaped_len: usize = 0;
+    for (params_json) |ch| {
+        escaped_len += if (ch == '\'' or ch == '\\') @as(usize, 2) else 1;
+    }
+
+    const allocator = std.heap.c_allocator;
+    const buf = try allocator.alloc(u8, escaped_len + 64 + 1); // prefix + suffix + null terminator
+    defer allocator.free(buf);
+
+    var pos: usize = 0;
+    const prefix = "$_hola_params = JSON.parse('";
+    @memcpy(buf[pos .. pos + prefix.len], prefix);
+    pos += prefix.len;
+
+    for (params_json) |ch| {
+        if (ch == '\'' or ch == '\\') {
+            buf[pos] = '\\';
+            pos += 1;
+        }
+        buf[pos] = ch;
+        pos += 1;
+    }
+
+    const suffix = "')";
+    @memcpy(buf[pos .. pos + suffix.len], suffix);
+    pos += suffix.len;
+
+    // Null-terminate and evaluate the Ruby code
+    buf[pos] = 0;
+    _ = mruby.mrb_load_string(mrb, buf.ptr);
+
+    const exc = mruby.mrb_get_exception(mrb);
+    if (mruby.mrb_test(exc)) {
+        mruby.mrb_print_error(mrb);
+        return error.MRubyException;
+    }
+}
+
+pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
 
@@ -749,6 +859,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
     try mrb.evalString(resources.apt_repository.ruby_prelude);
     try mrb.evalString(resources.systemd_unit.ruby_prelude);
+    try mrb.evalString(resources.mount_res.ruby_prelude);
     // Load package resources (delegator and platform-specific)
     try mrb.evalString(resources.package.ruby_prelude);
     try mrb.evalString(resources.homebrew_package.ruby_prelude);
@@ -764,8 +875,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     try mrb.evalString(resources.aws_kms.ruby_prelude);
     // Load file_edit resource
     try mrb.evalString(resources.file_edit.ruby_prelude);
+    // Load extract resource
+    try mrb.evalString(resources.extract.ruby_prelude);
     // Load Ruby-only custom resources
     try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
+
+    // Load data_bag support
+    try mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
+
+    // Inject params as $_hola_params if provided (agent mode)
+    if (opts.params_json) |params_json| {
+        try injectParams(mrb_ptr, params_json);
+    }
 
     // Load test helper only in debug builds
     if (builtin.mode == .Debug) {
@@ -778,6 +899,20 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Record start time for timer
     const start_time = std.time.nanoTimestamp();
+
+    // Initialize resource results collection
+    var resource_results = std.ArrayList(ResourceResult).empty;
+    errdefer {
+        for (resource_results.items) |rr| {
+            allocator.free(rr.type_name);
+            allocator.free(rr.name);
+            allocator.free(rr.action);
+            if (rr.skip_reason) |sr| allocator.free(sr);
+            if (rr.error_name) |en| allocator.free(en);
+            if (rr.output) |o| allocator.free(o);
+        }
+        resource_results.deinit(allocator);
+    }
 
     // Initialize modern display with the specified output mode
     var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.use_pretty_output);
@@ -1062,6 +1197,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             try display.resourceError(res.id.type_name, res.id.name, @errorName(err));
             try display.update();
 
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, ""),
+                .was_updated = false,
+                .skipped = false,
+                .skip_reason = null,
+                .error_name = try allocator.dupe(u8, @errorName(err)),
+                .output = null,
+            });
+
             // Check if this resource has ignore_failure set
             if (res.resource.shouldIgnoreFailure()) {
                 // Continue to next resource if ignore_failure is true
@@ -1071,6 +1217,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
                 return err;
             }
         };
+        // Free resource-allocated output after duping into resource_results
+        defer if (result.output) |o| std.heap.c_allocator.free(o);
         res.was_updated = result.was_updated;
 
         // Update resource status with action and skip reason
@@ -1079,6 +1227,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             // Pass skip_reason to resourceUpdated so it can handle "up to date" case
             try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason);
             try display.update();
+
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, result.action),
+                .was_updated = true,
+                .skipped = false,
+                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
+                .error_name = null,
+                .output = if (result.output) |o| try allocator.dupe(u8, o) else null,
+            });
 
             // Collect notifications from updated resources (only if actually updated, not "up to date")
             if (result.skip_reason == null or !std.mem.eql(u8, result.skip_reason.?, "up to date")) {
@@ -1099,6 +1258,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
             // Resource was not updated - show skip reason (including "up to date")
             try display.resourceSkipped(res.id.type_name, res.id.name, result.action, result.skip_reason);
             try display.update();
+
+            try resource_results.append(allocator, .{
+                .type_name = try allocator.dupe(u8, res.id.type_name),
+                .name = try allocator.dupe(u8, res.id.name),
+                .action = try allocator.dupe(u8, result.action),
+                .was_updated = false,
+                .skipped = true,
+                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
+                .error_name = null,
+                .output = null,
+            });
         }
     }
 
@@ -1142,4 +1312,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
 
     // Show execution summary with duration
     try display.showSummaryWithDuration(0, 0);
+
+    // Compute duration
+    const end_time = std.time.nanoTimestamp();
+    const elapsed_ms = @divTrunc(end_time - start_time, std.time.ns_per_ms);
+
+    return ProvisionResult{
+        .executed_count = display.executed_count,
+        .updated_count = display.updated_count,
+        .skipped_count = display.skipped_count,
+        .failed_count = display.failed_count,
+        .duration_ms = @intCast(elapsed_ms),
+        .resource_results = resource_results,
+    };
 }

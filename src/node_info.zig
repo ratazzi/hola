@@ -734,8 +734,8 @@ fn getDefaultGatewayMacOS(allocator: std.mem.Allocator) !?DefaultGateway {
         return null;
     }
 
-    // Allocate buffer
-    const buf = try allocator.alloc(u8, buf_size);
+    // Allocate buffer aligned for rt_msghdr
+    const buf = try allocator.alignedAlloc(u8, comptime std.mem.Alignment.of(c.struct_rt_msghdr), buf_size);
     defer allocator.free(buf);
 
     // Get routing table

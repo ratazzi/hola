@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const clap = @import("clap");
 const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
-const build_options = @import("build_options");
+pub const build_options = @import("build_options");
 const commands = @import("commands.zig");
 
 const is_macos = builtin.os.tag == .macos;
@@ -105,6 +105,10 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         try commands.node_info.run(allocator, iter);
         return;
     }
+    if (std.mem.eql(u8, command, "agent")) {
+        try commands.agent.run(allocator, iter);
+        return;
+    }
 
     try printMainHelp(command);
 }
@@ -146,6 +150,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
         .{ .command = "node-info", .description = "Display complete node information (like Chef Ohai)" },
         .{ .command = "apply", .description = "Execute full bootstrap sequence" },
+        .{ .command = "agent", .description = "Connect to SSE endpoint and run provision on events" },
         .{ .command = "help", .description = "Show this help menu" },
     };
     help_formatter.HelpFormatter.printCommandTable(&command_items);
@@ -163,6 +168,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .prefix = "Node information:", .command = "node-info" },
         .{ .prefix = "Full bootstrap:", .command = "apply --github user/dotfiles" },
         .{ .prefix = "Dry run:", .command = "apply --dry-run" },
+        .{ .prefix = "Agent mode:", .command = "agent https://worker.example.com/events" },
     };
     help_formatter.HelpFormatter.printExamples(&examples);
     help_formatter.HelpFormatter.newline();

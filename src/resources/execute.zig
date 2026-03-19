@@ -77,11 +77,12 @@ pub const Resource = struct {
 
         switch (self.action) {
             .run => {
-                try applyRun(self);
+                const output = try applyRun(self);
                 return base.ApplyResult{
                     .was_updated = true,
                     .action = "run",
                     .skip_reason = "up to date",
+                    .output = output,
                 };
             },
             .nothing => {
@@ -239,7 +240,7 @@ pub const Resource = struct {
         };
     }
 
-    fn applyRun(self: Resource) !void {
+    fn applyRun(self: Resource) !?[]const u8 {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -332,6 +333,15 @@ pub const Resource = struct {
                 return error.CommandFailed;
             },
         }
+
+        // Build combined output for structured result
+        const stdout_trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
+        const stderr_trimmed = std.mem.trim(u8, stderr, &std.ascii.whitespace);
+        if (stdout_trimmed.len == 0 and stderr_trimmed.len == 0) return null;
+
+        if (stderr_trimmed.len == 0) return try std.heap.c_allocator.dupe(u8, stdout_trimmed);
+        if (stdout_trimmed.len == 0) return try std.heap.c_allocator.dupe(u8, stderr_trimmed);
+        return try std.fmt.allocPrint(std.heap.c_allocator, "{s}\n{s}", .{ stdout_trimmed, stderr_trimmed });
     }
 };
 

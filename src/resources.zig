@@ -14,6 +14,7 @@ pub const route = @import("resources/route.zig");
 pub const git = @import("resources/git.zig");
 pub const aws_kms = @import("resources/aws_kms.zig");
 pub const file_edit = @import("resources/file_edit.zig");
+pub const extract = @import("resources/extract.zig");
 
 // macOS-only resources
 pub const macos_dock = if (builtin.os.tag == .macos)
@@ -47,6 +48,13 @@ pub const systemd_unit = if (builtin.os.tag == .linux)
 else
     struct {
         pub const ruby_prelude = @embedFile("resources/systemd_unit_resource.rb");
+    };
+
+pub const mount_res = if (builtin.os.tag == .linux)
+    @import("resources/mount.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/mount_resource.rb");
     };
 
 // Cross-platform package resource (supports homebrew on macOS, apt on Linux)
@@ -123,6 +131,7 @@ fn payloadName(payload: anytype) []const u8 {
     }
     if (@hasField(Payload, "path")) return payload.path;
     if (@hasField(Payload, "target")) return payload.target;
+    if (@hasField(Payload, "mount_point")) return payload.mount_point;
     if (@hasField(Payload, "destination")) return payload.destination;
     if (@hasField(Payload, "username")) return payload.username;
     if (@hasField(Payload, "group_name")) return payload.group_name;
@@ -212,6 +221,7 @@ const ResourceMacOs = union(enum) {
     group: group.Resource,
     aws_kms: aws_kms.Resource,
     file_edit: file_edit.Resource,
+    extract: extract.Resource,
 
     pub fn deinit(self: ResourceMacOs, allocator: std.mem.Allocator) void {
         deinitResourceUnion(self, allocator);
@@ -243,6 +253,7 @@ const ResourceGeneric = union(enum) {
     link: link.Resource,
     apt_repository: apt_repository.Resource,
     systemd_unit: systemd_unit.Resource,
+    mount_res: mount_res.Resource,
     package: package.Resource,
     apt_package: apt_package.Resource,
     ruby_block: ruby_block.Resource,
@@ -252,6 +263,7 @@ const ResourceGeneric = union(enum) {
     group: group.Resource,
     aws_kms: aws_kms.Resource,
     file_edit: file_edit.Resource,
+    extract: extract.Resource,
 
     pub fn deinit(self: ResourceGeneric, allocator: std.mem.Allocator) void {
         deinitResourceUnion(self, allocator);

@@ -177,6 +177,18 @@ pub const Client = struct {
         _ = curl.curl_easy_setopt(handle, .CURLOPT_SSL_VERIFYPEER, verify_peer);
         _ = curl.curl_easy_setopt(handle, .CURLOPT_SSL_VERIFYHOST, verify_host);
 
+        // mTLS client certificate
+        if (self.config.client_cert) |cert| {
+            const cert_z = try self.allocator.dupeZ(u8, cert);
+            defer self.allocator.free(cert_z);
+            _ = curl.curl_easy_setopt(handle, .CURLOPT_SSLCERT, cert_z.ptr);
+        }
+        if (self.config.client_key) |key| {
+            const key_z = try self.allocator.dupeZ(u8, key);
+            defer self.allocator.free(key_z);
+            _ = curl.curl_easy_setopt(handle, .CURLOPT_SSLKEY, key_z.ptr);
+        }
+
         // Protocol-specific configuration (reuse protocol variable from URL transformation above)
         switch (protocol) {
             .SFTP, .SCP => {
@@ -459,7 +471,7 @@ fn progressCallback(userdata: *anyopaque, dltotal: curl.curl_off_t, dlnow: curl.
     // Note: Logging disabled here to avoid log spam on large files (called very frequently)
     // Uncomment only for debugging: logger.debug("Progress: {d}/{d}", .{ downloaded, total });
     ctx.callback(downloaded, total, ctx.user_context);
-    return 0; // Return 0 to continue
+    return 0;
 }
 
 fn bodyWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
