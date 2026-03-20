@@ -177,11 +177,23 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     };
     defer if (params_json) |p| allocator.free(p);
 
+    // Extract secrets field as JSON string for secrets_bag injection
+    const secrets_json: ?[]const u8 = blk: {
+        if (obj.get("secrets")) |v| {
+            if (v == .object) {
+                const json_str = std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(v, .{})}) catch break :blk null;
+                break :blk json_str;
+            }
+        }
+        break :blk null;
+    };
+    defer if (secrets_json) |s| allocator.free(s);
+
     const display_url = maskUrlPassword(allocator, url);
     defer if (display_url.ptr != url.ptr) allocator.free(display_url);
     std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, display_url });
 
-    var prov_result = provision_cmd.runScript(allocator, url, false, params_json) catch |err| {
+    var prov_result = provision_cmd.runScript(allocator, url, false, params_json, secrets_json) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
             sendCallback(allocator, cb, data, "error", @errorName(err), null, endpoint, tls_auth);
@@ -208,6 +220,7 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
 
     _ = obj.fetchSwapRemove("url");
     _ = obj.fetchSwapRemove("callback");
+    _ = obj.fetchSwapRemove("secrets");
 
     var result = std.json.ObjectMap.init(aa);
     try result.put("status", .{ .string = status });
@@ -654,7 +667,7 @@ test "buildCallbackBody with ProvisionResult" {
     };
 
     const event_data =
-        \\{"id":"task-1","url":"https://example.com/script.rb","callback":"https://example.com/done"}
+        \\{"id":"task-1","url":"https://example.com/script.rb","callback":"https://example.com/done","secrets":{"api_key":"sk-123"}}
     ;
 
     const body = try buildCallbackBody(allocator, event_data, "ok", null, &prov_result);
@@ -670,9 +683,11 @@ test "buildCallbackBody with ProvisionResult" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"resources\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"/tmp/config\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"skip_reason\":\"up to date\"") != null);
-    // url and callback should be removed
+    // url, callback, and secrets should be removed
     try std.testing.expect(std.mem.indexOf(u8, body, "\"url\":") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"callback\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"secrets\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "sk-123") == null);
 
     // Free the duped strings
     allocator.free(type1);

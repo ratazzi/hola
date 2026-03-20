@@ -7,6 +7,7 @@ const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
     \\-o, --output <MODE>   Output mode: pretty (default) or plain
     \\-p, --params <JSON>   JSON string to inject as data_bag
+    \\-s, --secrets <JSON>  JSON string to inject as secrets_bag
     \\<path>                Path to provision file (.rb)
     \\
 );
@@ -20,7 +21,7 @@ const parsers = .{
 /// Download a remote script to a temp file, run provision, then clean up.
 /// Accepts both local paths and HTTP(S) URLs.
 /// params_json: optional JSON string to inject as data_bag (agent mode).
-pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8) !provision.ProvisionResult {
+pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8, secrets_json: ?[]const u8) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
@@ -106,6 +107,7 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         .script_path = script_path,
         .use_pretty_output = use_pretty_output,
         .params_json = params_json,
+        .secrets_json = secrets_json,
     });
 }
 
@@ -138,7 +140,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     }
 
     const logger = @import("../logger.zig");
-    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params) catch |err| {
+    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params, res.args.secrets) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
         if (logger.getLogPath()) |log_path| {
             std.debug.print("Log file: {s}\n", .{log_path});
@@ -163,6 +165,8 @@ fn printHelp(reason: ?[]const u8) !void {
         \\
         \\Options:
         \\  -o, --output MODE    Output mode: pretty (default) or plain
+        \\  -p, --params JSON    JSON string to inject as data_bag
+        \\  -s, --secrets JSON   JSON string to inject as secrets_bag
         \\
         \\Examples
         \\  # Local file

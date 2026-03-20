@@ -22,6 +22,7 @@ pub const Options = struct {
     script_path: []const u8,
     use_pretty_output: bool = true, // Default to pretty output
     params_json: ?[]const u8 = null, // JSON string for data_bag injection
+    secrets_json: ?[]const u8 = null, // JSON string for secrets_bag injection
 };
 
 pub const ResourceResult = struct {
@@ -759,26 +760,25 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
     }
 }
 
-/// Inject params JSON into mruby as $_hola_params global variable.
-/// Uses mruby's JSON.parse to convert the JSON string into a Ruby Hash.
-fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
-    // Build Ruby code: $_hola_params = JSON.parse('...')
-    // Escape single quotes in JSON to avoid breaking the Ruby string literal
+/// Inject a JSON string into mruby as a global variable via JSON.parse.
+fn injectJsonGlobal(mrb: *mruby.mrb_state, global_name: []const u8, json_str: []const u8) !void {
     var escaped_len: usize = 0;
-    for (params_json) |ch| {
+    for (json_str) |ch| {
         escaped_len += if (ch == '\'' or ch == '\\') @as(usize, 2) else 1;
     }
 
     const allocator = std.heap.c_allocator;
-    const buf = try allocator.alloc(u8, escaped_len + 64 + 1); // prefix + suffix + null terminator
+    const buf = try allocator.alloc(u8, global_name.len + escaped_len + 64 + 1);
     defer allocator.free(buf);
 
     var pos: usize = 0;
-    const prefix = "$_hola_params = JSON.parse('";
-    @memcpy(buf[pos .. pos + prefix.len], prefix);
-    pos += prefix.len;
+    @memcpy(buf[pos .. pos + global_name.len], global_name);
+    pos += global_name.len;
+    const assign = " = JSON.parse('";
+    @memcpy(buf[pos .. pos + assign.len], assign);
+    pos += assign.len;
 
-    for (params_json) |ch| {
+    for (json_str) |ch| {
         if (ch == '\'' or ch == '\\') {
             buf[pos] = '\\';
             pos += 1;
@@ -791,7 +791,6 @@ fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
     @memcpy(buf[pos .. pos + suffix.len], suffix);
     pos += suffix.len;
 
-    // Null-terminate and evaluate the Ruby code
     buf[pos] = 0;
     _ = mruby.mrb_load_string(mrb, buf.ptr);
 
@@ -800,6 +799,16 @@ fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
         mruby.mrb_print_error(mrb);
         return error.MRubyException;
     }
+}
+
+/// Inject params JSON into mruby as $_hola_params global variable.
+fn injectParams(mrb: *mruby.mrb_state, params_json: []const u8) !void {
+    try injectJsonGlobal(mrb, "$_hola_params", params_json);
+}
+
+/// Inject secrets JSON into mruby as $_hola_secrets global variable.
+fn injectSecrets(mrb: *mruby.mrb_state, secrets_json: []const u8) !void {
+    try injectJsonGlobal(mrb, "$_hola_secrets", secrets_json);
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
@@ -883,9 +892,17 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     // Load data_bag support
     try mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
 
+    // Load secrets_bag support
+    try mrb.evalString(@embedFile("ruby_prelude/secrets_bag.rb"));
+
     // Inject params as $_hola_params if provided (agent mode)
     if (opts.params_json) |params_json| {
         try injectParams(mrb_ptr, params_json);
+    }
+
+    // Inject secrets as $_hola_secrets if provided
+    if (opts.secrets_json) |secrets_json| {
+        try injectSecrets(mrb_ptr, secrets_json);
     }
 
     // Load test helper only in debug builds
@@ -1325,4 +1342,47 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         .duration_ms = @intCast(elapsed_ms),
         .resource_results = resource_results,
     };
+}
+
+test "injectSecrets and secrets_bag reads values correctly" {
+    var mrb = try mruby.State.init();
+    defer mrb.deinit();
+
+    const mrb_ptr = mrb.mrb orelse return error.MRubyNotInitialized;
+
+    // Register ZigBackend module with JSON functions
+    const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
+    json.setAllocator(std.testing.allocator);
+    for (json.mruby_module_def.getFunctions()) |func| {
+        mruby.mrb_define_module_function(mrb_ptr, zig_module, func.name.ptr, func.func, func.args);
+    }
+    try mrb.evalString(json.ruby_prelude);
+
+    // Load secrets_bag prelude
+    try mrb.evalString(@embedFile("ruby_prelude/secrets_bag.rb"));
+
+    // Inject secrets
+    try injectSecrets(mrb_ptr, "{\"api_key\":\"sk-123\",\"nested\":{\"token\":\"abc\"}}");
+
+    // Test simple key access
+    try mrb.evalString("$_test_result = secrets_bag('api_key')");
+    const sym = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result");
+    const result = mruby.mrb_gv_get(mrb_ptr, sym);
+    try std.testing.expect(mruby.zig_mrb_string_p(result) != 0);
+    const cstr = mruby.mrb_str_to_cstr(mrb_ptr, result);
+    try std.testing.expectEqualStrings("sk-123", std.mem.span(cstr));
+
+    // Test nested key access
+    try mrb.evalString("$_test_result2 = secrets_bag('nested', 'token')");
+    const sym2 = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result2");
+    const result2 = mruby.mrb_gv_get(mrb_ptr, sym2);
+    try std.testing.expect(mruby.zig_mrb_string_p(result2) != 0);
+    const cstr2 = mruby.mrb_str_to_cstr(mrb_ptr, result2);
+    try std.testing.expectEqualStrings("abc", std.mem.span(cstr2));
+
+    // Test missing key returns nil
+    try mrb.evalString("$_test_result3 = secrets_bag('nonexistent')");
+    const sym3 = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result3");
+    const result3 = mruby.mrb_gv_get(mrb_ptr, sym3);
+    try std.testing.expect(!mruby.mrb_test(result3));
 }
