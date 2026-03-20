@@ -146,6 +146,98 @@ pub const Resource = struct {
         }
     }
 
+    /// State for temporarily switching effective user/group identity.
+    /// Used so that libgit2 operations (clone, fetch, open) run under the
+    /// uid/gid specified by the resource's `user`/`group` attributes.
+    const MAX_NGROUPS = 64;
+
+    const UserSwitch = struct {
+        original_uid: c_uint,
+        original_gid: c_uint,
+        original_ngroups: c_int,
+        original_groups: [MAX_NGROUPS]c_uint,
+        switched: bool,
+    };
+
+    const posix_c = @cImport({
+        @cInclude("unistd.h");
+        @cInclude("pwd.h");
+        @cInclude("grp.h");
+    });
+
+    /// Switch the process effective uid/gid to the target user/group.
+    /// Returns a context that must be passed to `restoreEffectiveUser` to undo the switch.
+    /// If user and group are both null, returns a no-op context.
+    fn switchEffectiveUser(user: ?[]const u8, group: ?[]const u8) !UserSwitch {
+        if (user == null and group == null) {
+            return UserSwitch{ .original_uid = 0, .original_gid = 0, .original_ngroups = 0, .original_groups = undefined, .switched = false };
+        }
+
+        const original_uid = posix_c.geteuid();
+        const original_gid = posix_c.getegid();
+
+        // Save supplementary groups before initgroups overwrites them
+        var original_groups: [MAX_NGROUPS]c_uint = undefined;
+        const original_ngroups = posix_c.getgroups(MAX_NGROUPS, &original_groups);
+
+        // Set group first (must be done while still running as root)
+        if (group) |groupname| {
+            const gid = try base.getGroupId(groupname);
+            if (posix_c.setegid(gid) != 0) {
+                logger.err("[git] failed to setegid for group '{s}'", .{groupname});
+                return error.SetGroupFailed;
+            }
+        } else if (user) |username| {
+            // No explicit group — use the user's primary group
+            const username_z = try std.posix.toPosixPath(username);
+            const pwd = posix_c.getpwnam(&username_z);
+            if (pwd != null) {
+                _ = posix_c.setegid(pwd.*.pw_gid);
+            }
+        }
+
+        // Initialize supplementary groups for proper file access
+        if (user) |username| {
+            const username_z = try std.posix.toPosixPath(username);
+            const current_egid = posix_c.getegid();
+            _ = posix_c.initgroups(&username_z, @intCast(current_egid));
+        }
+
+        // Switch effective uid last (drops privileges)
+        if (user) |username| {
+            const uid = try base.getUserId(username);
+            if (posix_c.seteuid(uid) != 0) {
+                // Rollback group change
+                _ = posix_c.setegid(original_gid);
+                logger.err("[git] failed to seteuid for user '{s}'", .{username});
+                return error.SetUserFailed;
+            }
+            logger.debug("[git] switched effective user to '{s}' (uid={})", .{ username, uid });
+        }
+
+        return UserSwitch{
+            .original_uid = original_uid,
+            .original_gid = original_gid,
+            .original_ngroups = original_ngroups,
+            .original_groups = original_groups,
+            .switched = true,
+        };
+    }
+
+    /// Restore effective uid/gid to the values saved in the UserSwitch context.
+    fn restoreEffectiveUser(ctx: UserSwitch) void {
+        if (!ctx.switched) return;
+        // Restore uid first — real uid is still root so this always succeeds,
+        // and we need root back before we can restore the group.
+        _ = posix_c.seteuid(ctx.original_uid);
+        _ = posix_c.setegid(ctx.original_gid);
+        // Restore supplementary groups that initgroups may have overwritten
+        if (ctx.original_ngroups >= 0) {
+            _ = posix_c.setgroups(@intCast(ctx.original_ngroups), &ctx.original_groups);
+        }
+        logger.debug("[git] restored effective user (uid={}, gid={})", .{ ctx.original_uid, ctx.original_gid });
+    }
+
     /// Context for custom credentials and certificate callbacks
     const SshContext = struct {
         ssh_key_path: ?[]const u8,
@@ -365,9 +457,18 @@ pub const Resource = struct {
         clone_opts.fetch_opts.callbacks.certificate_check = certificateCheckCallback;
         clone_opts.fetch_opts.callbacks.payload = &ssh_ctx;
 
+        // Switch effective user so libgit2 creates files with correct ownership
+        // and passes safe.directory / SSH key permission checks
+        const user_ctx = try switchEffectiveUser(self.user, self.group);
+        errdefer restoreEffectiveUser(user_ctx);
+
         // Perform clone
         var repo_ptr: ?*c.git_repository = null;
         const code = c.git_clone(&repo_ptr, url_c.ptr, dest_c.ptr, &clone_opts);
+
+        // Restore root before ownership fixup (chown requires root)
+        restoreEffectiveUser(user_ctx);
+
         if (code != 0) {
             const err = c.git_error_last();
             if (err != null) {
@@ -415,6 +516,10 @@ pub const Resource = struct {
         // Initialize libgit2 in this thread
         var git = try git_client.Client.init();
         defer git.deinit();
+
+        // Switch effective user for fetch/reset operations
+        const user_ctx = try switchEffectiveUser(self.user, self.group);
+        defer restoreEffectiveUser(user_ctx);
 
         // Fetch from remote
         const remote_c = try dupZ(allocator, self.remote);
@@ -515,28 +620,45 @@ pub const Resource = struct {
 
         if (!dest_exists or !isGitRepo(self.destination)) {
             // Clone the repository with custom credentials (async)
+            // (cloneRepositoryImpl handles user switching internally)
             try self.cloneRepository(allocator);
             was_updated = true;
         } else {
-            // Repository exists, fetch and reset (async)
-            const repo = try openRepository(allocator, self.destination) orelse return error.OpenRepoFailed;
-            defer c.git_repository_free(repo);
+            // Switch effective user for git_repository_open (safe.directory check)
+            const open_ctx = try switchEffectiveUser(self.user, self.group);
+            const repo = openRepository(allocator, self.destination) catch |err| {
+                restoreEffectiveUser(open_ctx);
+                return err;
+            };
+            restoreEffectiveUser(open_ctx);
+
+            const repo_nonnull = repo orelse return error.OpenRepoFailed;
+            defer c.git_repository_free(repo_nonnull);
 
             const fetch_ctx = FetchContext{
                 .resource = self,
                 .allocator = allocator,
-                .repo = repo,
+                .repo = repo_nonnull,
             };
             was_updated = try AsyncExecutor.executeWithContext(FetchContext, bool, fetch_ctx, fetchAndUpdateAsync);
         }
 
         // Update submodules if enabled
         if (self.enable_submodules and was_updated) {
-            const repo = try openRepository(allocator, self.destination) orelse return error.OpenRepoFailed;
-            defer c.git_repository_free(repo);
+            const sub_ctx = try switchEffectiveUser(self.user, self.group);
+            const sub_repo_opt = openRepository(allocator, self.destination) catch |err| {
+                restoreEffectiveUser(sub_ctx);
+                return err;
+            };
+            const sub_repo = sub_repo_opt orelse {
+                restoreEffectiveUser(sub_ctx);
+                return error.OpenRepoFailed;
+            };
+            defer c.git_repository_free(sub_repo);
 
             // Initialize and update submodules
-            const code = c.git_submodule_foreach(repo, submoduleUpdateCallback, null);
+            const code = c.git_submodule_foreach(sub_repo, submoduleUpdateCallback, null);
+            restoreEffectiveUser(sub_ctx);
             if (code != 0) {
                 logger.warn("[git] submodule update failed", .{});
             }
