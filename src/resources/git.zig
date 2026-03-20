@@ -565,13 +565,21 @@ pub const Resource = struct {
         defer allocator.free(current_rev);
 
         // Resolve target revision
-        const target_ref = if (std.mem.eql(u8, self.revision, "HEAD"))
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote, self.checkout_branch orelse "deploy" })
-        else
-            try allocator.dupe(u8, self.revision);
-        defer allocator.free(target_ref);
-
-        const target_rev = try resolveRevision(allocator, repo, target_ref);
+        // For "HEAD", use checkout_branch on the remote.
+        // For other values, try as-is first (tag, SHA, or already-qualified ref),
+        // then fall back to {remote}/{revision} (bare branch name after fetch).
+        const target_rev = blk: {
+            if (std.mem.eql(u8, self.revision, "HEAD")) {
+                const ref = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote, self.checkout_branch orelse "deploy" });
+                defer allocator.free(ref);
+                break :blk try resolveRevision(allocator, repo, ref);
+            }
+            break :blk resolveRevision(allocator, repo, self.revision) catch {
+                const qualified = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote, self.revision });
+                defer allocator.free(qualified);
+                break :blk try resolveRevision(allocator, repo, qualified);
+            };
+        };
         defer allocator.free(target_rev);
 
         // Compare revisions
