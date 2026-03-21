@@ -9,7 +9,7 @@ jobs:
     name: Format Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: jdx/mise-action@v2
@@ -21,7 +21,7 @@ jobs:
     name: Run Tests
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: jdx/mise-action@v2
@@ -47,7 +47,7 @@ jobs:
           - name: Linux
             triple: x86_64-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: jdx/mise-action@v2
