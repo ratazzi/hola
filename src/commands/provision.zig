@@ -8,6 +8,8 @@ const params = clap.parseParamsComptime(
     \\-o, --output <MODE>   Output mode: pretty (default) or plain
     \\-p, --params <JSON>   JSON string to inject as data_bag
     \\-s, --secrets <JSON>  JSON string to inject as secrets_bag
+    \\    --client-cert <PATH>   Client certificate for mTLS
+    \\    --client-key <PATH>    Client private key for mTLS
     \\<path>                Path to provision file (.rb)
     \\
 );
@@ -16,12 +18,18 @@ const parsers = .{
     .path = clap.parsers.string,
     .MODE = clap.parsers.string,
     .JSON = clap.parsers.string,
+    .PATH = clap.parsers.string,
 };
 
 /// Download a remote script to a temp file, run provision, then clean up.
 /// Accepts both local paths and HTTP(S) URLs.
 /// params_json: optional JSON string to inject as data_bag (agent mode).
-pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8, secrets_json: ?[]const u8) !provision.ProvisionResult {
+const TlsClientAuth = struct {
+    cert: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+};
+
+pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8, secrets_json: ?[]const u8, tls_auth: TlsClientAuth) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
@@ -61,7 +69,10 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}-{s}.rb", .{ temp_dir, std.time.timestamp(), &rand_hex });
         temp_file_path = temp_file;
 
-        const cfg = http.Config{};
+        const cfg = http.Config{
+            .client_cert = tls_auth.cert,
+            .client_key = tls_auth.key,
+        };
         var client = http.Client.init(allocator, cfg) catch |err| {
             std.debug.print("\nError: Failed to initialize HTTP client: {}\n", .{err});
             return error.DownloadFailed;
@@ -140,7 +151,11 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     }
 
     const logger = @import("../logger.zig");
-    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params, res.args.secrets) catch |err| {
+    const tls_auth = TlsClientAuth{
+        .cert = res.args.@"client-cert",
+        .key = res.args.@"client-key",
+    };
+    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params, res.args.secrets, tls_auth) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
         if (logger.getLogPath()) |log_path| {
             std.debug.print("Log file: {s}\n", .{log_path});
@@ -164,9 +179,11 @@ fn printHelp(reason: ?[]const u8) !void {
         \\Supports both local files and remote URLs.
         \\
         \\Options:
-        \\  -o, --output MODE    Output mode: pretty (default) or plain
-        \\  -p, --params JSON    JSON string to inject as data_bag
-        \\  -s, --secrets JSON   JSON string to inject as secrets_bag
+        \\  -o, --output MODE        Output mode: pretty (default) or plain
+        \\  -p, --params JSON        JSON string to inject as data_bag
+        \\  -s, --secrets JSON       JSON string to inject as secrets_bag
+        \\      --client-cert PATH   Client certificate for mTLS (PEM)
+        \\      --client-key PATH    Client private key for mTLS (PEM)
         \\
         \\Examples
         \\  # Local file

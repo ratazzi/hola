@@ -193,7 +193,12 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     defer if (display_url.ptr != url.ptr) allocator.free(display_url);
     std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, display_url });
 
-    var prov_result = provision_cmd.runScript(allocator, url, false, params_json, secrets_json) catch |err| {
+    // Only pass mTLS credentials if script URL matches agent endpoint origin
+    const use_tls_for_download = originMatches(url, endpoint);
+    var prov_result = provision_cmd.runScript(allocator, url, false, params_json, secrets_json, .{
+        .cert = if (use_tls_for_download) tls_auth.cert else null,
+        .key = if (use_tls_for_download) tls_auth.key else null,
+    }) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
             sendCallback(allocator, cb, data, "error", @errorName(err), null, endpoint, tls_auth);
