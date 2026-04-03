@@ -138,23 +138,17 @@ pub const Resource = struct {
     /// Set ownership for a symbolic link (does not follow the link)
     fn setLinkOwnership(link_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
         const c = @cImport({
-            @cDefine("_GNU_SOURCE", {});
-            @cInclude("sys/stat.h");
             @cInclude("unistd.h");
         });
 
-        const path_z = try std.posix.toPosixPath(link_path);
-
         // Get current ownership using lstat (doesn't follow symlinks)
-        var stat_buf: c.struct_stat = undefined;
-        if (c.lstat(&path_z, &stat_buf) != 0) {
-            return error.StatFailed;
-        }
+        const stat = try std.posix.fstatat(std.posix.AT.FDCWD, link_path, std.posix.AT.SYMLINK_NOFOLLOW);
 
-        const uid = if (owner) |o| try base.getUserId(o) else stat_buf.st_uid;
-        const gid = if (group) |g| try base.getGroupId(g) else stat_buf.st_gid;
+        const uid = if (owner) |o| try base.getUserId(o) else stat.uid;
+        const gid = if (group) |g| try base.getGroupId(g) else stat.gid;
 
         // Use lchown to change ownership without following the link
+        const path_z = try std.posix.toPosixPath(link_path);
         if (c.lchown(&path_z, uid, gid) != 0) {
             return error.ChownFailed;
         }

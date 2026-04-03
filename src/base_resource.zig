@@ -399,23 +399,18 @@ pub fn setFileMode(file_path: []const u8, mode: u32) void {
 /// On macOS, uses chown system call (requires root or matching uid)
 pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
     const c = @cImport({
-        @cDefine("_GNU_SOURCE", {});
-        @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
 
     // Get UID from username
     const uid = try getUserId(owner);
 
-    // Get current GID (we're not changing group) using stat
-    const path_z = try std.posix.toPosixPath(file_path);
-    var stat_buf: c.struct_stat = undefined;
-    if (c.stat(&path_z, &stat_buf) != 0) {
-        return error.StatFailed;
-    }
-    const gid = stat_buf.st_gid;
+    // Get current GID (we're not changing group) using fstatat
+    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
+    const gid = stat.gid;
 
     // Change ownership
+    const path_z = try std.posix.toPosixPath(file_path);
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
@@ -424,23 +419,18 @@ pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
 /// Set file group for a given file path
 pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
     const c = @cImport({
-        @cDefine("_GNU_SOURCE", {});
-        @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
 
     // Get GID from group name
     const gid = try getGroupId(group);
 
-    // Get current UID (we're not changing owner) using stat
-    const path_z = try std.posix.toPosixPath(file_path);
-    var stat_buf: c.struct_stat = undefined;
-    if (c.stat(&path_z, &stat_buf) != 0) {
-        return error.StatFailed;
-    }
-    const uid = stat_buf.st_uid;
+    // Get current UID (we're not changing owner) using fstatat
+    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
+    const uid = stat.uid;
 
     // Change ownership
+    const path_z = try std.posix.toPosixPath(file_path);
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
@@ -449,20 +439,15 @@ pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
 /// Set file owner and group together
 pub fn setFileOwnerAndGroup(file_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
     const c = @cImport({
-        @cDefine("_GNU_SOURCE", {});
-        @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
 
+    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
+
+    const uid = if (owner) |o| try getUserId(o) else stat.uid;
+    const gid = if (group) |g| try getGroupId(g) else stat.gid;
+
     const path_z = try std.posix.toPosixPath(file_path);
-    var stat_buf: c.struct_stat = undefined;
-    if (c.stat(&path_z, &stat_buf) != 0) {
-        return error.StatFailed;
-    }
-
-    const uid = if (owner) |o| try getUserId(o) else stat_buf.st_uid;
-    const gid = if (group) |g| try getGroupId(g) else stat_buf.st_gid;
-
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
