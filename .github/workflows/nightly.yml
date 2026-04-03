@@ -46,8 +46,10 @@ jobs:
         target:
           - name: macos
             triple: aarch64-macos
-          - name: linux
+          - name: linux-x86_64
             triple: x86_64-linux-gnu
+          - name: linux-aarch64
+            triple: aarch64-linux-gnu
     steps:
       - uses: actions/checkout@v6
 
@@ -110,6 +112,7 @@ jobs:
             ## Downloads
             - `hola-macos-aarch64` - macOS Apple Silicon (M1/M2/M3)
             - `hola-linux-x86_64` - Linux x86_64
+            - `hola-linux-aarch64` - Linux ARM64
           files: artifacts/*/hola-*
           draft: false
           prerelease: true

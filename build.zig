@@ -25,7 +25,9 @@ pub fn build(b: *std.Build) !void {
     const strip = b.option(bool, "strip", "Strip debug info");
 
     // Determine which hola_deps package to use based on target platform
-    const hola_deps_name = if (target.result.os.tag == .linux)
+    const hola_deps_name = if (target.result.os.tag == .linux and target.result.cpu.arch == .aarch64)
+        "hola_deps_linux_aarch64"
+    else if (target.result.os.tag == .linux)
         "hola_deps_linux_x86_64"
     else
         "hola_deps_macos_arm64";

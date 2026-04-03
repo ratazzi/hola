@@ -14,8 +14,10 @@ jobs:
         target:
           - name: macos
             triple: aarch64-macos
-          - name: linux
+          - name: linux-x86_64
             triple: x86_64-linux-gnu
+          - name: linux-aarch64
+            triple: aarch64-linux-gnu
     steps:
       - uses: actions/checkout@v6
 
