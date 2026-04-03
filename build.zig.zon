@@ -34,7 +34,7 @@
     .dependencies = .{
         .hola_deps_macos_arm64 = .{
             .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly-curl/hola-deps-macos-arm64-curl.tar.gz",
-            .hash = "hola_deps-0.1.0-clHq_7J0TQP3a0yZGP0FSXzRkFt3cspCqcG1WrG48dLG",
+            .hash = "hola_deps-0.1.0-clHq_7J0TQN1Q0ijbuJ16u2WyrtdTHnNQcId9sr0tD3E",
         },
         .hola_deps_linux_x86_64 = .{
             .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly-curl/hola-deps-linux-x86_64-curl.tar.gz",
