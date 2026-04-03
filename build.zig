@@ -137,6 +137,10 @@ pub fn build(b: *std.Build) !void {
     if (target.result.os.tag == .linux) {
         exe.root_module.link_libc = true;
         exe.addAssemblyFile(b.path("src/linux_linker_shims.s"));
+        // aarch64: provide sigsetjmp symbol for OpenSSL armcap.c
+        if (target.result.cpu.arch == .aarch64) {
+            exe.addAssemblyFile(b.path("src/linux_aarch64_shims.S"));
+        }
     }
 
     // Platform-specific configuration
