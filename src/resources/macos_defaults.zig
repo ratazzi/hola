@@ -711,24 +711,6 @@ pub fn zigAddResource(
 ) mruby.mrb_value {
     _ = self;
 
-    // DEBUG: COMMENTING OUT CFPreferencesCopyValue - it may interfere with writes!
-    // {
-    //     const domain = "com.apple.finder";
-    //     const key = "AppleShowAllFiles";
-    //     const domain_cf = c.CFStringCreateWithCString(null, domain.ptr, c.kCFStringEncodingUTF8);
-    //     const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
-    //     const value = c.CFPreferencesCopyValue(key_cf, domain_cf, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
-    //     std.debug.print("[DEBUG zigAddResource START] CFPreferencesCopyValue returned: {*}\n", .{value orelse @as(*const anyopaque, @ptrFromInt(1))});
-    //     if (value) |v| {
-    //         if (c.CFGetTypeID(v) == c.CFBooleanGetTypeID()) {
-    //             std.debug.print("[DEBUG zigAddResource START] Boolean value: {}\n", .{c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(v)))});
-    //         }
-    //         c.CFRelease(v);
-    //     }
-    //     c.CFRelease(key_cf);
-    //     c.CFRelease(domain_cf);
-    // }
-
     var domain_val: mruby.mrb_value = undefined;
     var key_val: mruby.mrb_value = undefined;
     var value_val: mruby.mrb_value = undefined;
@@ -818,24 +800,6 @@ pub fn zigAddResource(
         value_to_free.deinit(allocator);
         return mruby.mrb_nil_value();
     };
-
-    // DEBUG: COMMENTING OUT CFPreferencesCopyValue - it may interfere with writes!
-    // {
-    //     const domain_test = "com.apple.finder";
-    //     const key_test = "AppleShowAllFiles";
-    //     const domain_cf_test = c.CFStringCreateWithCString(null, domain_test.ptr, c.kCFStringEncodingUTF8);
-    //     const key_cf_test = c.CFStringCreateWithCString(null, key_test.ptr, c.kCFStringEncodingUTF8);
-    //     const value_test = c.CFPreferencesCopyValue(key_cf_test, domain_cf_test, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
-    //     std.debug.print("[DEBUG zigAddResource END] CFPreferencesCopyValue returned: {*}\n", .{value_test orelse @as(*const anyopaque, @ptrFromInt(1))});
-    //     if (value_test) |v| {
-    //         if (c.CFGetTypeID(v) == c.CFBooleanGetTypeID()) {
-    //             std.debug.print("[DEBUG zigAddResource END] Boolean value: {}\n", .{c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(v)))});
-    //         }
-    //         c.CFRelease(v);
-    //     }
-    //     c.CFRelease(key_cf_test);
-    //     c.CFRelease(domain_cf_test);
-    // }
 
     return mruby.mrb_nil_value();
 }

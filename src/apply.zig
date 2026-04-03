@@ -292,7 +292,7 @@ fn installHomebrew(allocator: std.mem.Allocator, display: *modern_display.Modern
 fn findBrewAfterInstall(allocator: std.mem.Allocator) ![]const u8 {
     return brew.findBrew(allocator);
 }
-//// Step 3: Install packages in parallel (brew bundle + mise) on macOS
+/// Step 3: Install packages in parallel (brew bundle + mise) on macOS
 fn installPackagesParallelImpl(allocator: std.mem.Allocator, config_root: []const u8) !void {
     // Note: Section display is handled in child functions to avoid thread safety issues
 

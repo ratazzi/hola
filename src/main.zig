@@ -48,7 +48,7 @@ pub fn main() !void {
     }
 
     if (parsed.args.version != 0) {
-        try printVersion(allocator);
+        try printVersion();
         return;
     }
 
@@ -66,7 +66,7 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         return;
     }
     if (std.mem.eql(u8, command, "version")) {
-        try printVersion(allocator);
+        try printVersion();
         return;
     }
     if (std.mem.eql(u8, command, "git-clone")) {
@@ -177,8 +177,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
     help_formatter.HelpFormatter.printNote("Use 'hola <command> --help' for detailed command information");
 }
 
-fn printVersion(allocator: std.mem.Allocator) !void {
-    _ = allocator;
+fn printVersion() !void {
     const curl = @import("curl.zig");
 
     // Get curl version info
