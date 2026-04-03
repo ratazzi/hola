@@ -138,6 +138,7 @@ pub const Resource = struct {
     /// Set ownership for a symbolic link (does not follow the link)
     fn setLinkOwnership(link_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
         const c = @cImport({
+            @cInclude("time.h");
             @cInclude("sys/stat.h");
             @cInclude("unistd.h");
         });

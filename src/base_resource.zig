@@ -399,6 +399,7 @@ pub fn setFileMode(file_path: []const u8, mode: u32) void {
 /// On macOS, uses chown system call (requires root or matching uid)
 pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
     const c = @cImport({
+        @cInclude("time.h");
         @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
@@ -423,6 +424,7 @@ pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
 /// Set file group for a given file path
 pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
     const c = @cImport({
+        @cInclude("time.h");
         @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
@@ -447,6 +449,7 @@ pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
 /// Set file owner and group together
 pub fn setFileOwnerAndGroup(file_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
     const c = @cImport({
+        @cInclude("time.h");
         @cInclude("sys/stat.h");
         @cInclude("unistd.h");
     });
