@@ -11,6 +11,16 @@ pub const XDG = struct {
         return Self{ .allocator = allocator };
     }
 
+    fn getHomeDir(self: Self) ![]const u8 {
+        return std.process.getEnvVarOwned(self.allocator, "HOME") catch |err| {
+            if (err == error.EnvironmentVariableNotFound) {
+                std.debug.print("Error: HOME environment variable is not set\n", .{});
+                std.debug.print("Hint: if running with sudo, use 'sudo -E' or 'sudo --preserve-env=HOME' to preserve HOME\n", .{});
+            }
+            return err;
+        };
+    }
+
     /// Get XDG_CONFIG_HOME directory for hola
     /// Default: ~/.config/hola
     /// Environment variable: XDG_CONFIG_HOME (if set, uses $XDG_CONFIG_HOME/hola)
@@ -19,7 +29,7 @@ pub const XDG = struct {
             defer self.allocator.free(xdg_config);
             return std.fs.path.join(self.allocator, &.{ xdg_config, "hola" });
         } else |_| {
-            const home = try std.process.getEnvVarOwned(self.allocator, "HOME");
+            const home = try self.getHomeDir();
             defer self.allocator.free(home);
             return std.fs.path.join(self.allocator, &.{ home, ".config", "hola" });
         }
@@ -33,7 +43,7 @@ pub const XDG = struct {
             defer self.allocator.free(xdg_data);
             return std.fs.path.join(self.allocator, &.{ xdg_data, "hola" });
         } else |_| {
-            const home = try std.process.getEnvVarOwned(self.allocator, "HOME");
+            const home = try self.getHomeDir();
             defer self.allocator.free(home);
             return std.fs.path.join(self.allocator, &.{ home, ".local", "share", "hola" });
         }
@@ -47,7 +57,7 @@ pub const XDG = struct {
             defer self.allocator.free(xdg_cache);
             return std.fs.path.join(self.allocator, &.{ xdg_cache, "hola" });
         } else |_| {
-            const home = try std.process.getEnvVarOwned(self.allocator, "HOME");
+            const home = try self.getHomeDir();
             defer self.allocator.free(home);
             return std.fs.path.join(self.allocator, &.{ home, ".cache", "hola" });
         }
@@ -61,7 +71,7 @@ pub const XDG = struct {
             defer self.allocator.free(xdg_state);
             return std.fs.path.join(self.allocator, &.{ xdg_state, "hola" });
         } else |_| {
-            const home = try std.process.getEnvVarOwned(self.allocator, "HOME");
+            const home = try self.getHomeDir();
             defer self.allocator.free(home);
             return std.fs.path.join(self.allocator, &.{ home, ".local", "state", "hola" });
         }
