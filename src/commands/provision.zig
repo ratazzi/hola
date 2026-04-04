@@ -5,7 +5,7 @@ const http = @import("../http.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
-    \\-o, --output <MODE>   Output mode: pretty (default) or plain
+    \\-o, --output <MODE>   Output mode: pretty or plain (auto-detect: pretty if TTY)
     \\    --data-bag <JSON>        JSON string to inject as data_bag
     \\    --data-bag-url <URL>     Fetch data_bag JSON from URL
     \\    --secrets-bag <JSON>     JSON string to inject as secrets_bag
@@ -190,7 +190,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
 
-    var use_pretty_output = true;
+    var use_pretty_output = std.posix.isatty(std.posix.STDOUT_FILENO);
     if (res.args.output) |output_mode| {
         if (std.mem.eql(u8, output_mode, "plain")) {
             use_pretty_output = false;
@@ -272,7 +272,7 @@ fn printHelp(reason: ?[]const u8) !void {
         \\Supports both local files and remote URLs.
         \\
         \\Options:
-        \\  -o, --output MODE          Output mode: pretty (default) or plain
+        \\  -o, --output MODE          Output mode: pretty or plain (auto-detect: pretty if TTY)
         \\      --data-bag JSON        JSON string to inject as data_bag
         \\      --data-bag-url URL     Fetch data_bag JSON from URL
         \\      --secrets-bag JSON     JSON string to inject as secrets_bag
