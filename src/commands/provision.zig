@@ -6,10 +6,12 @@ const http = @import("../http.zig");
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
     \\-o, --output <MODE>   Output mode: pretty (default) or plain
-    \\-p, --params <JSON>   JSON string to inject as data_bag
-    \\-s, --secrets <JSON>  JSON string to inject as secrets_bag
-    \\    --client-cert <PATH>   Client certificate for mTLS
-    \\    --client-key <PATH>    Client private key for mTLS
+    \\    --data-bag <JSON>        JSON string to inject as data_bag
+    \\    --data-bag-url <URL>     Fetch data_bag JSON from URL
+    \\    --secrets-bag <JSON>     JSON string to inject as secrets_bag
+    \\    --secrets-bag-url <URL>  Fetch secrets_bag JSON from URL
+    \\    --client-cert <PATH>     Client certificate for mTLS
+    \\    --client-key <PATH>      Client private key for mTLS
     \\<path>                Path to provision file (.rb)
     \\
 );
@@ -19,6 +21,7 @@ const parsers = .{
     .MODE = clap.parsers.string,
     .JSON = clap.parsers.string,
     .PATH = clap.parsers.string,
+    .URL = clap.parsers.string,
 };
 
 /// Download a remote script to a temp file, run provision, then clean up.
@@ -28,6 +31,56 @@ const TlsClientAuth = struct {
     cert: ?[]const u8 = null,
     key: ?[]const u8 = null,
 };
+
+/// Fetch JSON content from a URL, using optional mTLS credentials.
+/// Returns the response body as an owned slice that the caller must free.
+fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: TlsClientAuth) ![]const u8 {
+    const uri = std.Uri.parse(url) catch |err| {
+        std.debug.print("Error: Invalid URL: {}\n", .{err});
+        return error.FetchFailed;
+    };
+
+    const display_url = if (uri.password != null) display_blk: {
+        const user_part = if (uri.user) |u| u.percent_encoded else "";
+        const host_part = if (uri.host) |h| h.percent_encoded else "";
+        break :display_blk std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
+            uri.scheme,
+            user_part,
+            host_part,
+            uri.path.percent_encoded,
+        }) catch return error.FetchFailed;
+    } else url;
+    defer if (uri.password != null) allocator.free(display_url);
+
+    std.debug.print("[fetch] Fetching JSON from {s}\n", .{display_url});
+
+    const cfg = http.Config{
+        .client_cert = tls_auth.cert,
+        .client_key = tls_auth.key,
+    };
+    var client = http.Client.init(allocator, cfg) catch |err| {
+        std.debug.print("\nError: Failed to initialize HTTP client: {}\n", .{err});
+        return error.FetchFailed;
+    };
+    defer client.deinit();
+
+    const response = client.get(url, null) catch |err| {
+        std.debug.print("\nError: Failed to fetch JSON from URL: {}\n", .{err});
+        std.debug.print("URL: {s}\n", .{display_url});
+        return error.FetchFailed;
+    };
+    defer {
+        var mut_resp = response;
+        mut_resp.deinit();
+    }
+
+    if (response.status < 200 or response.status >= 300) {
+        std.debug.print("\nError: HTTP {d} when fetching JSON from {s}\n", .{ response.status, display_url });
+        return error.FetchFailed;
+    }
+
+    return allocator.dupe(u8, response.body) catch return error.FetchFailed;
+}
 
 pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8, secrets_json: ?[]const u8, tls_auth: TlsClientAuth) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
@@ -150,17 +203,57 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         }
     }
 
+    // Validate mutual exclusivity
+    if (res.args.@"data-bag" != null and res.args.@"data-bag-url" != null) {
+        std.debug.print("Error: --data-bag and --data-bag-url are mutually exclusive\n", .{});
+        return error.InvalidArguments;
+    }
+    if (res.args.@"secrets-bag" != null and res.args.@"secrets-bag-url" != null) {
+        std.debug.print("Error: --secrets-bag and --secrets-bag-url are mutually exclusive\n", .{});
+        return error.InvalidArguments;
+    }
+
     const logger = @import("../logger.zig");
     const tls_auth = TlsClientAuth{
         .cert = res.args.@"client-cert",
         .key = res.args.@"client-key",
     };
-    var result = runScript(allocator, script_path_or_url, use_pretty_output, res.args.params, res.args.secrets, tls_auth) catch |err| {
+
+    // Resolve data_bag: from URL or inline JSON
+    var fetched_data_bag: ?[]const u8 = null;
+    defer if (fetched_data_bag) |p| allocator.free(p);
+    if (res.args.@"data-bag-url") |url| {
+        fetched_data_bag = fetchJsonFromUrl(allocator, url, tls_auth) catch {
+            std.debug.print("Failed to fetch data_bag from URL\n", .{});
+            if (logger.getLogPath()) |log_path| {
+                std.debug.print("Log file: {s}\n", .{log_path});
+            }
+            return error.FetchFailed;
+        };
+    }
+
+    // Resolve secrets_bag: from URL or inline JSON
+    var fetched_secrets_bag: ?[]const u8 = null;
+    defer if (fetched_secrets_bag) |s| allocator.free(s);
+    if (res.args.@"secrets-bag-url") |url| {
+        fetched_secrets_bag = fetchJsonFromUrl(allocator, url, tls_auth) catch {
+            std.debug.print("Failed to fetch secrets_bag from URL\n", .{});
+            if (logger.getLogPath()) |log_path| {
+                std.debug.print("Log file: {s}\n", .{log_path});
+            }
+            return error.FetchFailed;
+        };
+    }
+
+    const effective_data_bag = fetched_data_bag orelse res.args.@"data-bag";
+    const effective_secrets_bag = fetched_secrets_bag orelse res.args.@"secrets-bag";
+
+    var result = runScript(allocator, script_path_or_url, use_pretty_output, effective_data_bag, effective_secrets_bag, tls_auth) catch |err| {
         std.debug.print("Provision failed: {}\n", .{err});
         if (logger.getLogPath()) |log_path| {
             std.debug.print("Log file: {s}\n", .{log_path});
         }
-        return;
+        return err;
     };
     defer result.deinit(allocator);
 }
@@ -179,11 +272,13 @@ fn printHelp(reason: ?[]const u8) !void {
         \\Supports both local files and remote URLs.
         \\
         \\Options:
-        \\  -o, --output MODE        Output mode: pretty (default) or plain
-        \\  -p, --params JSON        JSON string to inject as data_bag
-        \\  -s, --secrets JSON       JSON string to inject as secrets_bag
-        \\      --client-cert PATH   Client certificate for mTLS (PEM)
-        \\      --client-key PATH    Client private key for mTLS (PEM)
+        \\  -o, --output MODE          Output mode: pretty (default) or plain
+        \\      --data-bag JSON        JSON string to inject as data_bag
+        \\      --data-bag-url URL     Fetch data_bag JSON from URL
+        \\      --secrets-bag JSON     JSON string to inject as secrets_bag
+        \\      --secrets-bag-url URL  Fetch secrets_bag JSON from URL
+        \\      --client-cert PATH     Client certificate for mTLS (PEM)
+        \\      --client-key PATH      Client private key for mTLS (PEM)
         \\
         \\Examples
         \\  # Local file
@@ -193,7 +288,15 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  # Remote URL
         \\  hola provision https://example.com/provision.rb
         \\  hola provision https://username:password@example.com/provision.rb
-        \\  hola provision https://raw.githubusercontent.com/user/dotfiles/master/.config/hola/provision.rb
+        \\
+        \\  # With data_bag / secrets_bag
+        \\  hola provision --data-bag '{"env":"prod"}' provision.rb
+        \\  hola provision --secrets-bag '{"token":"sk-xxx"}' provision.rb
+        \\
+        \\  # Fetch from URL (supports mTLS)
+        \\  hola provision --data-bag-url https://config.example.com/params.json provision.rb
+        \\  hola provision --secrets-bag-url https://vault.example.com/secrets.json \
+        \\    --client-cert cert.pem --client-key key.pem provision.rb
         \\
         \\  # With output mode
         \\  hola provision --output plain provision.rb
