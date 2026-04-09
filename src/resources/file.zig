@@ -18,6 +18,7 @@ pub const Resource = struct {
     pub const Action = enum {
         create,
         delete,
+        touch,
     };
 
     pub fn deinit(self: Resource, allocator: std.mem.Allocator) void {
@@ -36,6 +37,7 @@ pub const Resource = struct {
             const action_name = switch (self.action) {
                 .create => "create",
                 .delete => "delete",
+                .touch => "touch",
             };
             return base.ApplyResult{
                 .was_updated = false,
@@ -47,6 +49,7 @@ pub const Resource = struct {
         const action_name = switch (self.action) {
             .create => "create",
             .delete => "delete",
+            .touch => "touch",
         };
 
         switch (self.action) {
@@ -65,6 +68,14 @@ pub const Resource = struct {
                     .was_updated = false,
                     .action = action_name,
                     .skip_reason = "up to date",
+                };
+            },
+            .touch => {
+                const was_updated = try applyTouch(self);
+                return base.ApplyResult{
+                    .was_updated = was_updated,
+                    .action = action_name,
+                    .skip_reason = if (was_updated) null else "up to date",
                 };
             },
         }
@@ -207,6 +218,63 @@ pub const Resource = struct {
         return .{ .was_updated = true, .output = diff_output };
     }
 
+    /// Chef :touch semantics — ensure the file exists and bump atime/mtime
+    /// without ever rewriting the content. If the file is missing, an empty
+    /// file is created; otherwise its bytes are left untouched. The `content`
+    /// property is intentionally ignored for touch.
+    fn applyTouch(self: Resource) !bool {
+        try base.ensureParentDir(self.path);
+        const is_abs = std.fs.path.isAbsolute(self.path);
+
+        // Separate "create if missing" from "update timestamps": createFile
+        // opens with O_WRONLY which fails on a 0444 file even for its owner,
+        // yet standard touch / Chef :touch must succeed for the owner via
+        // utimensat (checks inode ownership, not write permission).
+        const exists = blk: {
+            if (is_abs) {
+                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                    error.FileNotFound => break :blk false,
+                    else => return err,
+                };
+            } else {
+                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                    error.FileNotFound => break :blk false,
+                    else => return err,
+                };
+            }
+            break :blk true;
+        };
+
+        if (!exists) {
+            const new_file = if (is_abs)
+                try std.fs.createFileAbsolute(self.path, .{})
+            else
+                try std.fs.cwd().createFile(self.path, .{});
+            new_file.close();
+        }
+
+        // Path-based utimensat with times=null sets both atime and mtime
+        // to the current time.  Unlike fd-based futimens, this does not
+        // require opening the file at all, so it works regardless of the
+        // file's read/write permission bits (only inode ownership or
+        // CAP_FOWNER is checked).
+        const path_z = try std.posix.toPosixPath(self.path);
+        switch (std.posix.errno(std.c.utimensat(std.posix.AT.FDCWD, &path_z, null, 0))) {
+            .SUCCESS => {},
+            .ACCES => return error.AccessDenied,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+
+        // Apply file attributes (mode/owner/group) if requested.
+        base.applyFileAttributes(self.path, self.attrs) catch |err| {
+            logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
+        };
+
+        return true;
+    }
+
     fn applyDelete(self: Resource) !void {
         const is_abs = std.fs.path.isAbsolute(self.path);
         if (is_abs) {
@@ -264,6 +332,8 @@ pub fn zigAddResource(
     const action_str = std.mem.span(action_cstr);
     const action: Resource.Action = if (std.mem.eql(u8, action_str, "delete"))
         .delete
+    else if (std.mem.eql(u8, action_str, "touch"))
+        .touch
     else
         .create;
 
