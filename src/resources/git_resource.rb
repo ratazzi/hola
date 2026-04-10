@@ -11,6 +11,7 @@ class GitResource
     @depth = nil
     @enable_checkout = true
     @enable_submodules = false
+    @environment = {}
     @ssh_key = nil
     @enable_strict_host_key_checking = true
     @user = nil
@@ -35,6 +36,7 @@ class GitResource
     # Convert notifications and subscriptions arrays to format: [[target, action, timing], ...]
     notifications_arg = @notifications.map { |n| [n[:target], n[:action], n[:timing]] }
     subscriptions_arg = @subscriptions.map { |s| [s[:target], s[:action], s[:timing]] }
+    environment_arg = @environment.map { |k, v| [k.to_s, v.to_s] }
 
     # Call Zig backend if available
     if ZigBackend.respond_to?(:add_git)
@@ -51,6 +53,7 @@ class GitResource
         @enable_strict_host_key_checking,
         @user || "",
         @group || "",
+        environment_arg,
         @action,
         only_if_arg,
         not_if_arg,
@@ -87,6 +90,10 @@ class GitResource
 
   def enable_submodules(value)
     @enable_submodules = value
+  end
+
+  def environment(value)
+    @environment = value
   end
 
   def ssh_key(value)

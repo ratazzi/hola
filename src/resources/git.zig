@@ -25,6 +25,7 @@ pub const Resource = struct {
     enable_strict_host_key_checking: bool, // Verify SSH host keys (default: true for security)
     user: ?[]const u8, // File owner after clone (e.g., "deploy", "www-data")
     group: ?[]const u8, // File group after clone (e.g., "deploy", "www-data")
+    environment: ?[]const u8, // Environment variables ("KEY=VALUE\0KEY2=VALUE2\0")
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -47,6 +48,7 @@ pub const Resource = struct {
         if (self.ssh_wrapper) |wrapper| allocator.free(wrapper);
         if (self.user) |u| allocator.free(u);
         if (self.group) |g| allocator.free(g);
+        if (self.environment) |env| allocator.free(env);
 
         // Deinit common props
         var common = self.common;
@@ -366,6 +368,12 @@ pub const Resource = struct {
         var repo: ?*c.git_repository = null;
         const code = c.git_repository_open(&repo, path_c.ptr);
         if (code != 0) {
+            const err = c.git_error_last();
+            if (err != null) {
+                logger.err("[git] failed to open repository at {s}: {s}", .{ path, std.mem.span(err.*.message) });
+            } else {
+                logger.err("[git] failed to open repository at {s} (error code: {})", .{ path, code });
+            }
             return null;
         }
         return repo;
@@ -532,6 +540,32 @@ pub const Resource = struct {
         }
         defer if (remote) |r| c.git_remote_free(r);
 
+        // Ensure remote URL matches the resource's repository URL
+        if (remote) |r| {
+            const current_url_ptr = c.git_remote_url(r);
+            if (current_url_ptr != null) {
+                const current_url = std.mem.span(current_url_ptr);
+                if (!std.mem.eql(u8, current_url, self.repository)) {
+                    const repo_url_c = try dupZ(allocator, self.repository);
+                    defer allocator.free(repo_url_c);
+                    const set_code = c.git_remote_set_url(repo, remote_c.ptr, repo_url_c.ptr);
+                    if (set_code != 0) {
+                        const err = c.git_error_last();
+                        if (err != null) {
+                            logger.err("[git] failed to update remote URL: {s}", .{std.mem.span(err.*.message)});
+                        }
+                        return error.RemoteSetUrlFailed;
+                    }
+                    logger.info("[git] updated remote '{s}' URL: {s} -> {s}", .{ self.remote, current_url, self.repository });
+                    // Re-lookup remote to pick up the new URL
+                    c.git_remote_free(r);
+                    remote = null;
+                    code = c.git_remote_lookup(&remote, repo, remote_c.ptr);
+                    if (code != 0) return error.RemoteLookupFailed;
+                }
+            }
+        }
+
         // Perform fetch with custom credentials
         var fetch_opts: c.git_fetch_options = undefined;
         code = c.git_fetch_options_init(&fetch_opts, c.GIT_FETCH_OPTIONS_VERSION);
@@ -606,14 +640,145 @@ pub const Resource = struct {
         return false; // not updated
     }
 
+    /// Apply environment variables from "KEY=VALUE\0..." format string using setenv().
+    /// Returns saved original values for restoration.
+    fn applyEnvironment(allocator: std.mem.Allocator, env_str: []const u8) !std.ArrayList(EnvSaved) {
+        var saved = std.ArrayList(EnvSaved).empty;
+        errdefer restoreEnvironment(allocator, &saved);
+        var pos: usize = 0;
+        while (pos < env_str.len) {
+            const start = pos;
+            while (pos < env_str.len and env_str[pos] != 0) : (pos += 1) {}
+            const pair = env_str[start..pos];
+            if (pair.len > 0) {
+                if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
+                    const key = pair[0..eq_pos];
+                    const value = pair[eq_pos + 1 ..];
+                    // Save original value
+                    const key_z = try allocator.dupeZ(u8, key);
+                    const orig = std.posix.getenv(key);
+                    const orig_dup: ?[]const u8 = if (orig) |o| try allocator.dupe(u8, o) else null;
+                    try saved.append(allocator, .{ .key = key_z, .original = orig_dup });
+                    // Set new value
+                    const value_z = try allocator.dupeZ(u8, value);
+                    defer allocator.free(value_z);
+                    _ = setenv(key_z.ptr, value_z.ptr, 1);
+                }
+            }
+            pos += 1;
+        }
+        return saved;
+    }
+
+    const EnvSaved = struct {
+        key: [:0]u8,
+        original: ?[]const u8,
+    };
+
+    fn restoreEnvironment(allocator: std.mem.Allocator, saved: *std.ArrayList(EnvSaved)) void {
+        for (saved.items) |entry| {
+            if (entry.original) |orig| {
+                const orig_z = allocator.dupeZ(u8, orig) catch continue;
+                defer allocator.free(orig_z);
+                _ = setenv(entry.key.ptr, orig_z.ptr, 1);
+                allocator.free(orig);
+            } else {
+                _ = unsetenv(entry.key.ptr);
+            }
+            allocator.free(entry.key);
+        }
+        saved.deinit(allocator);
+    }
+
+    extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern fn unsetenv(name: [*:0]const u8) c_int;
+
+    const SAVED_HOME_BUF_SIZE = 4096; // PATH_MAX on Linux; covers all POSIX platforms
+    threadlocal var saved_home_buf: [SAVED_HOME_BUF_SIZE]u8 = undefined;
+
+    const HomedirState = struct {
+        changed: bool = false,
+        has_original_home: bool = false,
+    };
+
+    /// Set home directory for the target user (from passwd).
+    /// Updates libgit2 search paths and HOME env var so that gitconfig
+    /// loading and SSH key discovery work when running as root with seteuid.
+    fn setHomedirForUser(user: []const u8) !HomedirState {
+        var state = HomedirState{};
+
+        const username_z = std.posix.toPosixPath(user) catch return state;
+        const pwd = posix_c.getpwnam(&username_z);
+        if (pwd == null) return state;
+        const home = pwd.*.pw_dir orelse return state;
+
+        // Copy original HOME to stable buffer before setenv may invalidate getenv pointer
+        const original_c = getenv("HOME");
+        if (original_c) |orig| {
+            const span = std.mem.span(orig);
+            if (span.len >= SAVED_HOME_BUF_SIZE) {
+                logger.err("[git] original HOME too long ({d} bytes), cannot safely switch homedir", .{span.len});
+                return error.HomePathTooLong;
+            }
+            @memcpy(saved_home_buf[0..span.len], span);
+            saved_home_buf[span.len] = 0;
+            state.has_original_home = true;
+        }
+
+        // Set libgit2 internal search paths
+        _ = c.git_libgit2_opts(c.GIT_OPT_SET_HOMEDIR, home);
+        _ = c.git_libgit2_opts(c.GIT_OPT_SET_SEARCH_PATH, c.GIT_CONFIG_LEVEL_GLOBAL, home);
+
+        // Set HOME env var for SSH key discovery in credential callback
+        _ = setenv("HOME", home, 1);
+
+        state.changed = true;
+        logger.debug("[git] set homedir to '{s}' for user '{s}'", .{ std.mem.span(home), user });
+        return state;
+    }
+
+    fn restoreHomedir(state: *const HomedirState) void {
+        if (!state.changed) return;
+
+        if (state.has_original_home) {
+            const ptr: [*:0]const u8 = @ptrCast(&saved_home_buf);
+            _ = setenv("HOME", ptr, 1);
+            _ = c.git_libgit2_opts(c.GIT_OPT_SET_HOMEDIR, ptr);
+            _ = c.git_libgit2_opts(c.GIT_OPT_SET_SEARCH_PATH, c.GIT_CONFIG_LEVEL_GLOBAL, ptr);
+        } else {
+            _ = unsetenv("HOME");
+            const null_ptr: ?[*:0]const u8 = null;
+            _ = c.git_libgit2_opts(c.GIT_OPT_SET_HOMEDIR, null_ptr);
+            _ = c.git_libgit2_opts(c.GIT_OPT_SET_SEARCH_PATH, c.GIT_CONFIG_LEVEL_GLOBAL, null_ptr);
+        }
+    }
+
+    extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
     fn applySync(self: Resource) !bool {
         // Initialize libgit2
         var git = try git_client.Client.init();
         defer git.deinit();
 
+        // Disable owner validation — hola manages user context via seteuid,
+        // and libgit2's check can fail under root-with-seteuid scenarios.
+        _ = c.git_libgit2_opts(c.GIT_OPT_SET_OWNER_VALIDATION, @as(c_int, 0));
+
         var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
+
+        // Set home directory for the target user so that gitconfig loading
+        // and SSH key discovery work when running as root with seteuid.
+        var homedir_state = if (self.user) |user| try setHomedirForUser(user) else HomedirState{};
+        defer restoreHomedir(&homedir_state);
+
+        // Apply environment variables if specified
+        var env_saved = if (self.environment) |env|
+            try applyEnvironment(allocator, env)
+        else
+            std.ArrayList(EnvSaved).empty;
+        defer restoreEnvironment(allocator, &env_saved);
 
         // Check if destination exists and is a git repo
         const dest_exists = blk: {
@@ -718,6 +883,16 @@ pub const Resource = struct {
         var git = try git_client.Client.init();
         defer git.deinit();
 
+        _ = c.git_libgit2_opts(c.GIT_OPT_SET_OWNER_VALIDATION, @as(c_int, 0));
+        var homedir_state = if (self.user) |user| try setHomedirForUser(user) else HomedirState{};
+        defer restoreHomedir(&homedir_state);
+
+        var env_saved = if (self.environment) |env|
+            try applyEnvironment(allocator, env)
+        else
+            std.ArrayList(EnvSaved).empty;
+        defer restoreEnvironment(allocator, &env_saved);
+
         try self.cloneRepository(allocator);
 
         // Set file ownership if user or group is specified
@@ -768,6 +943,7 @@ pub fn zigAddResource(
     var enable_strict_host_key_checking_val: mruby.mrb_value = undefined;
     var user_val: mruby.mrb_value = undefined;
     var group_val: mruby.mrb_value = undefined;
+    var environment_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_block: mruby.mrb_value = undefined;
     var not_if_block: mruby.mrb_value = undefined;
@@ -775,9 +951,9 @@ pub fn zigAddResource(
     var notifications_array: mruby.mrb_value = undefined;
     var subscriptions_array: mruby.mrb_value = undefined;
 
-    // Get arguments: 13 required + 5 optional
-    // S=string, o=object (bool), i=integer, |=optional separator, A=array
-    _ = mruby.mrb_get_args(mrb, "SSSSSiooSoSSS|oooAA", &repository_val, &destination_val, &revision_val, &checkout_branch_val, &remote_val, &depth_val, &enable_checkout_val, &enable_submodules_val, &ssh_key_val, &enable_strict_host_key_checking_val, &user_val, &group_val, &action_val, &only_if_block, &not_if_block, &ignore_failure_val, &notifications_array, &subscriptions_array);
+    // Get arguments: 14 required + 5 optional
+    // S=string, o=object (bool), i=integer, A=array, |=optional separator
+    _ = mruby.mrb_get_args(mrb, "SSSSSiooSoSSAS|oooAA", &repository_val, &destination_val, &revision_val, &checkout_branch_val, &remote_val, &depth_val, &enable_checkout_val, &enable_submodules_val, &ssh_key_val, &enable_strict_host_key_checking_val, &user_val, &group_val, &environment_val, &action_val, &only_if_block, &not_if_block, &ignore_failure_val, &notifications_array, &subscriptions_array);
 
     // Extract required arguments
     const repository = std.mem.span(mruby.mrb_str_to_cstr(mrb, repository_val));
@@ -832,6 +1008,37 @@ pub fn zigAddResource(
         break :blk .sync; // Default
     };
 
+    // Parse environment array [[key, value], ...]
+    var environment: ?[]const u8 = null;
+    const env_len = mruby.mrb_ary_len(mrb, environment_val);
+    if (env_len > 0) {
+        var env_list = std.ArrayList(u8).initCapacity(allocator, @intCast(env_len * 32)) catch std.ArrayList(u8).empty;
+        defer env_list.deinit(allocator);
+
+        var i: mruby.mrb_int = 0;
+        while (i < env_len) : (i += 1) {
+            const pair = mruby.mrb_ary_ref(mrb, environment_val, i);
+            if (mruby.mrb_ary_len(mrb, pair) != 2) continue;
+
+            const key_val = mruby.mrb_ary_ref(mrb, pair, 0);
+            const val_val = mruby.mrb_ary_ref(mrb, pair, 1);
+            const key_cstr = mruby.mrb_str_to_cstr(mrb, key_val);
+            const val_cstr = mruby.mrb_str_to_cstr(mrb, val_val);
+            const key_span = std.mem.span(key_cstr);
+            const val_span = std.mem.span(val_cstr);
+
+            env_list.appendSlice(allocator, key_span) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, '=') catch return mruby.mrb_nil_value();
+            env_list.appendSlice(allocator, val_span) catch return mruby.mrb_nil_value();
+            env_list.append(allocator, 0) catch return mruby.mrb_nil_value();
+        }
+
+        if (env_list.items.len > 0) {
+            environment = allocator.dupe(u8, env_list.items) catch return mruby.mrb_nil_value();
+        }
+    }
+    errdefer if (environment) |env| allocator.free(env);
+
     // Duplicate required strings with cleanup on failure
     const repository_dup = allocator.dupe(u8, repository) catch return mruby.mrb_nil_value();
     errdefer allocator.free(repository_dup);
@@ -863,6 +1070,7 @@ pub fn zigAddResource(
         .enable_strict_host_key_checking = enable_strict_host_key_checking,
         .user = user,
         .group = group,
+        .environment = environment,
         .action = action,
         .common = common,
     };
@@ -878,6 +1086,7 @@ pub fn zigAddResource(
         if (ssh_key) |key| allocator.free(key);
         if (user) |u| allocator.free(u);
         if (group) |g| allocator.free(g);
+        if (environment) |env| allocator.free(env);
         common.deinit(allocator);
         return mruby.mrb_nil_value();
     };

@@ -739,7 +739,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_homebrew_package", .handler = zig_add_homebrew_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .macos },
         .{ .name = "add_apt_package", .handler = zig_add_apt_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_ruby_block", .handler = zig_add_ruby_block_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_git", .handler = zig_add_git_resource, .args_spec = mruby.MRB_ARGS_REQ(13) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_git", .handler = zig_add_git_resource, .args_spec = mruby.MRB_ARGS_REQ(14) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_user", .handler = zig_add_user_resource, .args_spec = mruby.MRB_ARGS_REQ(11) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_group", .handler = zig_add_group_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_aws_kms", .handler = zig_add_aws_kms_resource, .args_spec = mruby.MRB_ARGS_REQ(15) | mruby.MRB_ARGS_OPT(5) },
