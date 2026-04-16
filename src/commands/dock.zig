@@ -1,60 +1,144 @@
 const std = @import("std");
 const plist = @import("../plist.zig");
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
-    _ = iter;
+const c_cf = @cImport({
+    @cInclude("CoreFoundation/CoreFoundation.h");
+});
 
-    const readDockPref = struct {
-        fn call(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
-            const c = @cImport({
-                @cInclude("CoreFoundation/CoreFoundation.h");
-            });
+/// Read a dock preference from a specific host domain (AnyHost or CurrentHost).
+fn readDockPrefFromHost(alloc: std.mem.Allocator, key: []const u8, host: c_cf.CFStringRef) !?plist.Value {
+    const key_cf = c_cf.CFStringCreateWithCString(null, key.ptr, c_cf.kCFStringEncodingUTF8);
+    if (key_cf == null) return error.OutOfMemory;
+    defer c_cf.CFRelease(key_cf);
 
-            const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
-            if (key_cf == null) return error.OutOfMemory;
-            defer c.CFRelease(key_cf);
+    const domain = c_cf.CFStringCreateWithCString(null, "com.apple.dock", c_cf.kCFStringEncodingUTF8);
+    if (domain == null) return error.OutOfMemory;
+    defer c_cf.CFRelease(domain);
 
-            const domain = c.CFStringCreateWithCString(null, "com.apple.dock", c.kCFStringEncodingUTF8);
-            if (domain == null) return error.OutOfMemory;
-            defer c.CFRelease(domain);
+    const value_cf = c_cf.CFPreferencesCopyValue(key_cf, domain, c_cf.kCFPreferencesCurrentUser, host);
+    if (value_cf == null) return null;
+    defer c_cf.CFRelease(value_cf);
 
-            const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
-            if (value_cf == null) {
-                return null;
-            }
-            defer c.CFRelease(value_cf);
+    const type_id = c_cf.CFGetTypeID(value_cf);
 
-            const type_id = c.CFGetTypeID(value_cf);
-
-            if (type_id == c.CFNumberGetTypeID()) {
-                const num = @as(c.CFNumberRef, @ptrCast(value_cf));
-                var int_val: c_longlong = undefined;
-                if (c.CFNumberGetValue(num, c.kCFNumberLongLongType, &int_val) != 0) {
-                    return plist.Value{ .integer = @as(i64, @intCast(int_val)) };
-                }
-                return null;
-            } else if (type_id == c.CFBooleanGetTypeID()) {
-                const bool_val = c.CFBooleanGetValue(@as(c.CFBooleanRef, @ptrCast(value_cf)));
-                return plist.Value{ .boolean = bool_val != 0 };
-            } else if (type_id == c.CFStringGetTypeID()) {
-                const str = @as(c.CFStringRef, @ptrCast(value_cf));
-                const max_len = c.CFStringGetMaximumSizeForEncoding(c.CFStringGetLength(str), c.kCFStringEncodingUTF8);
-                var buf = try alloc.alloc(u8, @as(usize, @intCast(max_len)) + 1);
-                if (c.CFStringGetCString(str, buf.ptr, @as(c_long, @intCast(buf.len)), c.kCFStringEncodingUTF8) == 0) {
-                    alloc.free(buf);
-                    return null;
-                }
-                const len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
-                const str_slice = try alloc.dupe(u8, buf[0..len]);
-                alloc.free(buf);
-                return plist.Value{ .string = str_slice };
-            } else if (type_id == c.CFArrayGetTypeID()) {
-                return plist.Value{ .array = undefined };
-            }
-
+    if (type_id == c_cf.CFNumberGetTypeID()) {
+        const num = @as(c_cf.CFNumberRef, @ptrCast(value_cf));
+        var int_val: c_longlong = undefined;
+        if (c_cf.CFNumberGetValue(num, c_cf.kCFNumberLongLongType, &int_val) != 0) {
+            return plist.Value{ .integer = @as(i64, @intCast(int_val)) };
+        }
+        return null;
+    } else if (type_id == c_cf.CFBooleanGetTypeID()) {
+        const bool_val = c_cf.CFBooleanGetValue(@as(c_cf.CFBooleanRef, @ptrCast(value_cf)));
+        return plist.Value{ .boolean = bool_val != 0 };
+    } else if (type_id == c_cf.CFStringGetTypeID()) {
+        const str = @as(c_cf.CFStringRef, @ptrCast(value_cf));
+        const max_len = c_cf.CFStringGetMaximumSizeForEncoding(c_cf.CFStringGetLength(str), c_cf.kCFStringEncodingUTF8);
+        var buf = try alloc.alloc(u8, @as(usize, @intCast(max_len)) + 1);
+        if (c_cf.CFStringGetCString(str, buf.ptr, @as(c_long, @intCast(buf.len)), c_cf.kCFStringEncodingUTF8) == 0) {
+            alloc.free(buf);
             return null;
         }
-    }.call;
+        const len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+        const str_slice = try alloc.dupe(u8, buf[0..len]);
+        alloc.free(buf);
+        return plist.Value{ .string = str_slice };
+    } else if (type_id == c_cf.CFArrayGetTypeID()) {
+        return plist.Value{ .array = undefined };
+    }
+
+    return null;
+}
+
+/// Compare two scalar plist values for equality. Treats bool and integer 0/1
+/// as equivalent because CFPreferences sometimes stores booleans as CFNumbers.
+fn scalarValuesEqual(a: plist.Value, b: plist.Value) bool {
+    return switch (a) {
+        .boolean => |x| switch (b) {
+            .boolean => |y| x == y,
+            .integer => |y| (if (x) @as(i64, 1) else 0) == y,
+            else => false,
+        },
+        .integer => |x| switch (b) {
+            .integer => |y| x == y,
+            .boolean => |y| x == (if (y) @as(i64, 1) else 0),
+            else => false,
+        },
+        .float => |x| switch (b) {
+            .float => |y| x == y,
+            else => false,
+        },
+        .string => |x| switch (b) {
+            .string => |y| std.mem.eql(u8, x, y),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn fmtScalarValue(val: plist.Value, buf: *[32]u8) []const u8 {
+    return switch (val) {
+        .boolean => |b| if (b) "true" else "false",
+        .integer => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "<int>",
+        .string => |s| s,
+        else => "<complex>",
+    };
+}
+
+/// Return the `defaults` type flag for the scalar so the migration hint
+/// writes the value back into AnyHost with the correct type.
+fn defaultsTypeFlag(val: plist.Value) []const u8 {
+    return switch (val) {
+        .boolean => "-bool",
+        .integer => "-int",
+        .float => "-float",
+        .string => "-string",
+        else => "",
+    };
+}
+
+/// Read a dock preference from AnyHost (matches defaults(1) default behavior),
+/// falling back to CurrentHost when AnyHost is unset so that legacy installs
+/// with only ByHost values still export their real configuration. Warn to
+/// stderr when the two domains disagree or when CurrentHost is shadowing an
+/// expected AnyHost value. Callers own the returned value and must deinit it.
+fn readDockPref(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
+    const any = try readDockPrefFromHost(alloc, key, c_cf.kCFPreferencesAnyHost);
+    var cur = try readDockPrefFromHost(alloc, key, c_cf.kCFPreferencesCurrentHost);
+    var return_cur = false;
+    defer if (!return_cur) {
+        if (cur) |*v| v.deinit(alloc);
+    };
+
+    var fmt_buf1: [32]u8 = undefined;
+    var fmt_buf2: [32]u8 = undefined;
+
+    if (any) |any_val| {
+        if (cur) |cur_val| {
+            if (!scalarValuesEqual(any_val, cur_val)) {
+                std.debug.print("warning: com.apple.dock/{s}: AnyHost={s}, CurrentHost={s} (stale); using AnyHost\n", .{
+                    key, fmtScalarValue(any_val, &fmt_buf1), fmtScalarValue(cur_val, &fmt_buf2),
+                });
+                std.debug.print("  hint: defaults -currentHost delete com.apple.dock {s}\n", .{key});
+            }
+        }
+        return any;
+    } else if (cur) |cur_val| {
+        std.debug.print("warning: com.apple.dock/{s}: only CurrentHost={s} is set; using it for compatibility\n", .{
+            key, fmtScalarValue(cur_val, &fmt_buf1),
+        });
+        std.debug.print("  hint: migrate with: defaults write com.apple.dock {s} {s} {s} && defaults -currentHost delete com.apple.dock {s}\n", .{
+            key, defaultsTypeFlag(cur_val), fmtScalarValue(cur_val, &fmt_buf2), key,
+        });
+        return_cur = true;
+        return cur;
+    }
+
+    return null;
+}
+
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+    _ = iter;
 
     const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch {
         std.debug.print("Error: HOME environment variable not set\n", .{});
@@ -219,5 +303,6 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     try std.fmt.format(output.writer(allocator), "  largesize {d}\n", .{largesize});
     try output.appendSlice(allocator, "end\n");
 
-    std.debug.print("{s}", .{output.items});
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll(output.items);
 }
