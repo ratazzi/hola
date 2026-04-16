@@ -18,7 +18,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
             if (domain == null) return error.OutOfMemory;
             defer c.CFRelease(domain);
 
-            const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+            const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
             if (value_cf == null) {
                 return null;
             }

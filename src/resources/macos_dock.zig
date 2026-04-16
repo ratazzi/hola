@@ -102,15 +102,16 @@ pub const Resource = struct {
         // Use CFPreferences to get actual current value (may not be in plist file)
         if (self.tilesize) |size| {
             const current_size_value = readDockPrefWithCFPreferences(allocator, "tilesize") catch null;
-            const needs_change = if (current_size_value) |val| blk: {
-                defer val.deinit(allocator);
+            defer if (current_size_value) |*v| v.deinit(allocator);
+            const has_shadow = currentHostHasShadow("tilesize");
+            const needs_change = has_shadow or if (current_size_value) |val| blk: {
                 switch (val) {
                     .integer => |i| break :blk i != size,
                     else => break :blk true,
                 }
             } else true;
 
-            logger.debug("macos_dock: tilesize requested={d}, current={?}, needs_change={}", .{ size, current_size_value, needs_change });
+            logger.debug("macos_dock: tilesize requested={d}, current={?}, shadow={}, needs_change={}", .{ size, current_size_value, has_shadow, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "tilesize", .{ .integer = size });
@@ -122,8 +123,9 @@ pub const Resource = struct {
 
         if (self.orientation) |orient| {
             const current_orient_value = readDockPrefWithCFPreferences(allocator, "orientation") catch null;
-            const needs_change = if (current_orient_value) |val| blk: {
-                defer val.deinit(allocator);
+            defer if (current_orient_value) |*v| v.deinit(allocator);
+            const has_shadow = currentHostHasShadow("orientation");
+            const needs_change = has_shadow or if (current_orient_value) |val| blk: {
                 const current_orient = switch (val) {
                     .string => |s| s,
                     else => break :blk true,
@@ -131,7 +133,7 @@ pub const Resource = struct {
                 break :blk !std.mem.eql(u8, current_orient, orient);
             } else true;
 
-            logger.debug("macos_dock: orientation requested={s}, current={?}, needs_change={}", .{ orient, current_orient_value, needs_change });
+            logger.debug("macos_dock: orientation requested={s}, current={?}, shadow={}, needs_change={}", .{ orient, current_orient_value, has_shadow, needs_change });
 
             if (needs_change) {
                 const orient_copy = try allocator.dupe(u8, orient);
@@ -145,8 +147,9 @@ pub const Resource = struct {
 
         if (self.autohide) |hide| {
             const current_autohide_value = readDockPrefWithCFPreferences(allocator, "autohide") catch null;
-            const needs_change = if (current_autohide_value) |val| blk: {
-                defer val.deinit(allocator);
+            defer if (current_autohide_value) |*v| v.deinit(allocator);
+            const has_shadow = currentHostHasShadow("autohide");
+            const needs_change = has_shadow or if (current_autohide_value) |val| blk: {
                 const current_autohide = switch (val) {
                     .boolean => |b| b,
                     else => break :blk true,
@@ -154,7 +157,7 @@ pub const Resource = struct {
                 break :blk current_autohide != hide;
             } else true;
 
-            logger.debug("macos_dock: autohide requested={}, current={?}, needs_change={}", .{ hide, current_autohide_value, needs_change });
+            logger.debug("macos_dock: autohide requested={}, current={?}, shadow={}, needs_change={}", .{ hide, current_autohide_value, has_shadow, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "autohide", .{ .boolean = hide });
@@ -166,8 +169,9 @@ pub const Resource = struct {
 
         if (self.magnification) |mag| {
             const current_mag_value = readDockPrefWithCFPreferences(allocator, "magnification") catch null;
-            const needs_change = if (current_mag_value) |val| blk: {
-                defer val.deinit(allocator);
+            defer if (current_mag_value) |*v| v.deinit(allocator);
+            const has_shadow = currentHostHasShadow("magnification");
+            const needs_change = has_shadow or if (current_mag_value) |val| blk: {
                 const current_mag = switch (val) {
                     .boolean => |b| b,
                     else => break :blk true,
@@ -175,7 +179,7 @@ pub const Resource = struct {
                 break :blk current_mag != mag;
             } else true;
 
-            logger.debug("macos_dock: magnification requested={}, current={?}, needs_change={}", .{ mag, current_mag_value, needs_change });
+            logger.debug("macos_dock: magnification requested={}, current={?}, shadow={}, needs_change={}", .{ mag, current_mag_value, has_shadow, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "magnification", .{ .boolean = mag });
@@ -187,8 +191,9 @@ pub const Resource = struct {
 
         if (self.largesize) |size| {
             const current_size_value = readDockPrefWithCFPreferences(allocator, "largesize") catch null;
-            const needs_change = if (current_size_value) |val| blk: {
-                defer val.deinit(allocator);
+            defer if (current_size_value) |*v| v.deinit(allocator);
+            const has_shadow = currentHostHasShadow("largesize");
+            const needs_change = has_shadow or if (current_size_value) |val| blk: {
                 const current_size = switch (val) {
                     .integer => |i| i,
                     else => break :blk true,
@@ -196,7 +201,7 @@ pub const Resource = struct {
                 break :blk current_size != size;
             } else true;
 
-            logger.debug("macos_dock: largesize requested={d}, current={?}, needs_change={}", .{ size, current_size_value, needs_change });
+            logger.debug("macos_dock: largesize requested={d}, current={?}, shadow={}, needs_change={}", .{ size, current_size_value, has_shadow, needs_change });
 
             if (needs_change) {
                 try updateDockPrefWithCFPreferences(allocator, "largesize", .{ .integer = size });
@@ -669,7 +674,7 @@ pub const Resource = struct {
         if (domain == null) return error.OutOfMemory;
         defer c.CFRelease(domain);
 
-        const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+        const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
         if (value_cf == null) {
             // Key doesn't exist
             return null;
@@ -705,6 +710,29 @@ pub const Resource = struct {
         }
 
         return null;
+    }
+
+    /// Return true when the given key has any value set in the CurrentHost
+    /// (ByHost) domain. Such a value will shadow AnyHost at Dock runtime, so
+    /// the caller must force a write path to clean it up even if the AnyHost
+    /// value already matches the desired state.
+    fn currentHostHasShadow(key: []const u8) bool {
+        const c = @cImport({
+            @cInclude("CoreFoundation/CoreFoundation.h");
+        });
+
+        const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
+        if (key_cf == null) return false;
+        defer c.CFRelease(key_cf);
+
+        const domain = c.CFStringCreateWithCString(null, "com.apple.dock", c.kCFStringEncodingUTF8);
+        if (domain == null) return false;
+        defer c.CFRelease(domain);
+
+        const value_cf = c.CFPreferencesCopyValue(key_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+        if (value_cf == null) return false;
+        c.CFRelease(value_cf);
+        return true;
     }
 
     fn updateDockPrefWithCFPreferences(_: std.mem.Allocator, key: []const u8, value: plist.Value) !void {
@@ -743,9 +771,21 @@ pub const Resource = struct {
         if (domain == null) return error.OutOfMemory;
         defer c.CFRelease(domain);
 
-        c.CFPreferencesSetValue(key_cf, value_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+        c.CFPreferencesSetValue(key_cf, value_cf, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost);
 
-        // Synchronize to ensure cache is updated and written to disk
+        // Clear any stale CurrentHost value for the same key so legacy ByHost
+        // residue cannot shadow the AnyHost value at runtime (Dock reads the
+        // CurrentHost domain first when a value exists there).
+        c.CFPreferencesSetValue(key_cf, null, domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost);
+
+        // Synchronize to ensure cache is updated and written to disk.
+        // Both domains participate in the write path now: AnyHost holds the
+        // new value and CurrentHost has the stale shadow cleared, so a failure
+        // on either side means the Dock runtime could still see the old ByHost
+        // value. Treat both as hard failures instead of best-effort.
+        if (c.CFPreferencesSynchronize(domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesAnyHost) == 0) {
+            return error.PreferencesSyncFailed;
+        }
         if (c.CFPreferencesSynchronize(domain, c.kCFPreferencesCurrentUser, c.kCFPreferencesCurrentHost) == 0) {
             return error.PreferencesSyncFailed;
         }
