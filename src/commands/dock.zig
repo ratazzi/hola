@@ -85,23 +85,12 @@ fn fmtScalarValue(val: plist.Value, buf: *[32]u8) []const u8 {
     };
 }
 
-/// Return the `defaults` type flag for the scalar so the migration hint
-/// writes the value back into AnyHost with the correct type.
-fn defaultsTypeFlag(val: plist.Value) []const u8 {
-    return switch (val) {
-        .boolean => "-bool",
-        .integer => "-int",
-        .float => "-float",
-        .string => "-string",
-        else => "",
-    };
-}
-
 /// Read a dock preference from AnyHost (matches defaults(1) default behavior),
 /// falling back to CurrentHost when AnyHost is unset so that legacy installs
-/// with only ByHost values still export their real configuration. Warn to
-/// stderr when the two domains disagree or when CurrentHost is shadowing an
-/// expected AnyHost value. Callers own the returned value and must deinit it.
+/// with only ByHost values still export their real configuration. Only warn
+/// when AnyHost and CurrentHost disagree, since a conflict means the exported
+/// DSL may not match what Dock actually displays. Callers own the returned
+/// value and must deinit it.
 fn readDockPref(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
     const any = try readDockPrefFromHost(alloc, key, c_cf.kCFPreferencesAnyHost);
     var cur = try readDockPrefFromHost(alloc, key, c_cf.kCFPreferencesCurrentHost);
@@ -110,26 +99,18 @@ fn readDockPref(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
         if (cur) |*v| v.deinit(alloc);
     };
 
-    var fmt_buf1: [32]u8 = undefined;
-    var fmt_buf2: [32]u8 = undefined;
-
     if (any) |any_val| {
         if (cur) |cur_val| {
             if (!scalarValuesEqual(any_val, cur_val)) {
+                var fmt_buf1: [32]u8 = undefined;
+                var fmt_buf2: [32]u8 = undefined;
                 std.debug.print("warning: com.apple.dock/{s}: AnyHost={s}, CurrentHost={s} (stale); using AnyHost\n", .{
                     key, fmtScalarValue(any_val, &fmt_buf1), fmtScalarValue(cur_val, &fmt_buf2),
                 });
-                std.debug.print("  hint: defaults -currentHost delete com.apple.dock {s}\n", .{key});
             }
         }
         return any;
-    } else if (cur) |cur_val| {
-        std.debug.print("warning: com.apple.dock/{s}: only CurrentHost={s} is set; using it for compatibility\n", .{
-            key, fmtScalarValue(cur_val, &fmt_buf1),
-        });
-        std.debug.print("  hint: migrate with: defaults write com.apple.dock {s} {s} {s} && defaults -currentHost delete com.apple.dock {s}\n", .{
-            key, defaultsTypeFlag(cur_val), fmtScalarValue(cur_val, &fmt_buf2), key,
-        });
+    } else if (cur != null) {
         return_cur = true;
         return cur;
     }
