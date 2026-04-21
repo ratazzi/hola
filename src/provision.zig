@@ -33,6 +33,7 @@ pub const ResourceResult = struct {
     skipped: bool,
     skip_reason: ?[]const u8,
     error_name: ?[]const u8,
+    error_message: ?[]const u8 = null,
     output: ?[]const u8,
 };
 
@@ -51,6 +52,7 @@ pub const ProvisionResult = struct {
             allocator.free(rr.action);
             if (rr.skip_reason) |sr| allocator.free(sr);
             if (rr.error_name) |en| allocator.free(en);
+            if (rr.error_message) |em| allocator.free(em);
             if (rr.output) |o| allocator.free(o);
         }
         self.resource_results.deinit(allocator);
@@ -926,6 +928,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
             allocator.free(rr.action);
             if (rr.skip_reason) |sr| allocator.free(sr);
             if (rr.error_name) |en| allocator.free(en);
+            if (rr.error_message) |em| allocator.free(em);
             if (rr.output) |o| allocator.free(o);
         }
         resource_results.deinit(allocator);
@@ -1212,7 +1215,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
 
         const result = res.resource.apply() catch |err| {
-            const error_display = base.getGuardError() orelse @errorName(err);
+            const guard_msg = base.getGuardError();
+            const error_display = guard_msg orelse @errorName(err);
             try display.resourceError(res.id.type_name, res.id.name, error_display);
             try display.update();
 
@@ -1223,10 +1227,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .was_updated = false,
                 .skipped = false,
                 .skip_reason = null,
-                .error_name = try allocator.dupe(u8, error_display),
+                .error_name = try allocator.dupe(u8, @errorName(err)),
+                .error_message = if (guard_msg) |m| try allocator.dupe(u8, m) else null,
                 .output = null,
             });
-            base.clearGuardError();
 
             // Check if this resource has ignore_failure set
             if (res.resource.shouldIgnoreFailure()) {
