@@ -814,6 +814,10 @@ fn injectSecrets(mrb: *mruby.mrb_state, secrets_json: []const u8) !void {
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
+    // Guard-error buffer is threadlocal; clear at entry so a prior invocation
+    // on this thread can't leak into this run.
+    base.clearGuardError();
+
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
 
