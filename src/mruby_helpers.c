@@ -3,6 +3,9 @@
 #include <mruby/value.h>
 #include <mruby/string.h>
 #include <mruby/hash.h>
+#include <mruby/variable.h>
+#include <mruby/class.h>
+#include <mruby/error.h>
 #include <stdio.h>
 
 #ifdef __linux__
@@ -155,4 +158,28 @@ mrb_value zig_mrb_get_exception(mrb_state *mrb) {
 // Helper to convert object pointer to mrb_value
 mrb_value zig_mrb_obj_value(void *obj) {
     return mrb_obj_value(obj);
+}
+
+// Safely format "ClassName: message" for an exception value into buf.
+// Reads the message directly from struct RException->mesg so it works
+// while mrb->exc is set (no Ruby-level callbacks).
+void zig_mrb_exc_summary(mrb_state *mrb, mrb_value exc, char *buf, size_t buflen) {
+    if (buflen == 0) return;
+    buf[0] = '\0';
+    if (mrb_type(exc) != MRB_TT_EXCEPTION) {
+        snprintf(buf, buflen, "(not an exception)");
+        return;
+    }
+    struct RClass *klass = mrb_obj_class(mrb, exc);
+    const char *class_name = mrb_class_name(mrb, klass);
+    struct RException *rexc = mrb_exc_ptr(exc);
+    if (rexc->mesg && rexc->mesg->tt == MRB_TT_STRING) {
+        mrb_value mesg = mrb_obj_value(rexc->mesg);
+        snprintf(buf, buflen, "%s: %.*s",
+                 class_name,
+                 (int)RSTRING_LEN(mesg),
+                 RSTRING_PTR(mesg));
+    } else {
+        snprintf(buf, buflen, "%s", class_name);
+    }
 }

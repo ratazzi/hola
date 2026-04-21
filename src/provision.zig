@@ -1165,6 +1165,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
     // Phase 1: Execute resources and collect notifications
     for (runner.resources.items) |*res| {
+        base.clearGuardError();
         try display.startResource(res.id.type_name, res.id.name);
         try display.update();
 
@@ -1211,7 +1212,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
 
         const result = res.resource.apply() catch |err| {
-            try display.resourceError(res.id.type_name, res.id.name, @errorName(err));
+            const error_display = base.getGuardError() orelse @errorName(err);
+            try display.resourceError(res.id.type_name, res.id.name, error_display);
             try display.update();
 
             try resource_results.append(allocator, .{
@@ -1221,9 +1223,10 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .was_updated = false,
                 .skipped = false,
                 .skip_reason = null,
-                .error_name = try allocator.dupe(u8, @errorName(err)),
+                .error_name = try allocator.dupe(u8, error_display),
                 .output = null,
             });
+            base.clearGuardError();
 
             // Check if this resource has ignore_failure set
             if (res.resource.shouldIgnoreFailure()) {
