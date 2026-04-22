@@ -3,6 +3,7 @@ const clap = @import("clap");
 const http = @import("../http.zig");
 const provision_cmd = @import("provision.zig");
 const provision = @import("../provision.zig");
+const base_resource = @import("../base_resource.zig");
 const node_info = @import("../node_info.zig");
 
 const params = clap.parseParamsComptime(
@@ -109,6 +110,10 @@ fn parseIso8601(s: []const u8) !i64 {
 }
 
 fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callback: ?[]const u8, endpoint: []const u8, tls_auth: TlsClientAuth) void {
+    // Start each task with a clean guard-error buffer so a previous task's
+    // guard message can't leak into this task's failure callback.
+    base_resource.clearGuardError();
+
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |err| {
         std.debug.print("[agent] failed to parse task: {}\n", .{err});
         return;
@@ -201,7 +206,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     }) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
-            sendCallback(allocator, cb, data, "error", @errorName(err), null, endpoint, tls_auth);
+            sendCallback(allocator, cb, data, "error", @errorName(err), base_resource.getGuardError(), null, endpoint, tls_auth);
         }
         return;
     };
@@ -209,11 +214,11 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
 
     std.debug.print("[agent] provision complete\n", .{});
     if (callback_url) |cb| {
-        sendCallback(allocator, cb, data, "ok", null, &prov_result, endpoint, tls_auth);
+        sendCallback(allocator, cb, data, "ok", null, null, &prov_result, endpoint, tls_auth);
     }
 }
 
-fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult) ![]const u8 {
+fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, err_detail: ?[]const u8, prov_result: ?*const provision.ProvisionResult) ![]const u8 {
     // Use arena for all intermediate JSON allocations; only the final string is duped to caller's allocator.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -231,6 +236,9 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
     try result.put("status", .{ .string = status });
     if (err_msg) |msg| {
         try result.put("error", .{ .string = msg });
+    }
+    if (err_detail) |detail| {
+        try result.put("error_message", .{ .string = detail });
     }
 
     if (prov_result) |pr| {
@@ -255,6 +263,9 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
             }
             if (rr.error_name) |en| {
                 try res_obj.put("error", .{ .string = en });
+            }
+            if (rr.error_message) |em| {
+                try res_obj.put("error_message", .{ .string = em });
             }
             if (rr.output) |o| {
                 try res_obj.put("output", .{ .string = o });
@@ -307,8 +318,8 @@ fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json
     };
 }
 
-fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, prov_result: ?*const provision.ProvisionResult, endpoint: []const u8, tls_auth: TlsClientAuth) void {
-    const body = buildCallbackBody(allocator, event_data, status, err_msg, prov_result) catch |err| {
+fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_data: []const u8, status: []const u8, err_msg: ?[]const u8, err_detail: ?[]const u8, prov_result: ?*const provision.ProvisionResult, endpoint: []const u8, tls_auth: TlsClientAuth) void {
+    const body = buildCallbackBody(allocator, event_data, status, err_msg, err_detail, prov_result) catch |err| {
         std.debug.print("[agent] failed to build callback body: {}\n", .{err});
         return;
     };
@@ -675,7 +686,7 @@ test "buildCallbackBody with ProvisionResult" {
         \\{"id":"task-1","url":"https://example.com/script.rb","callback":"https://example.com/done","secrets":{"api_key":"sk-123"}}
     ;
 
-    const body = try buildCallbackBody(allocator, event_data, "ok", null, &prov_result);
+    const body = try buildCallbackBody(allocator, event_data, "ok", null, null, &prov_result);
     defer allocator.free(body);
 
     // Verify key fields exist in the JSON output

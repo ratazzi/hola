@@ -3,6 +3,41 @@ const mruby = @import("mruby.zig");
 pub const notification = @import("notification.zig");
 const builtin = @import("builtin");
 
+// --- Guard-error context ---------------------------------------------------
+// When an only_if/not_if block raises, we capture a friendly summary
+// (e.g. "only_if block raised: Errno::ENOENT: No such file or directory ...")
+// into a thread-local buffer so the top-level apply loop can show it to the
+// user instead of the raw Zig error name "MRubyException".
+const GUARD_ERROR_BUF_SIZE = 256;
+threadlocal var guard_error_buf: [GUARD_ERROR_BUF_SIZE]u8 = undefined;
+threadlocal var guard_error_len: usize = 0;
+
+pub fn clearGuardError() void {
+    guard_error_len = 0;
+}
+
+pub fn getGuardError() ?[]const u8 {
+    if (guard_error_len == 0) return null;
+    return guard_error_buf[0..guard_error_len];
+}
+
+fn recordGuardError(mrb: *mruby.mrb_state, exc: mruby.mrb_value, guard_kind: []const u8) void {
+    var summary_buf: [200]u8 = undefined;
+    mruby.zig_mrb_exc_summary(mrb, exc, &summary_buf, summary_buf.len);
+    const summary = std.mem.sliceTo(&summary_buf, 0);
+
+    const written = std.fmt.bufPrint(
+        &guard_error_buf,
+        "{s} block raised: {s}",
+        .{ guard_kind, summary },
+    ) catch blk: {
+        const fallback = "guard block raised (message truncated)";
+        @memcpy(guard_error_buf[0..fallback.len], fallback);
+        break :blk guard_error_buf[0..fallback.len];
+    };
+    guard_error_len = written.len;
+}
+
 /// Result of applying a resource
 pub const ApplyResult = struct {
     was_updated: bool,
@@ -88,6 +123,7 @@ pub const CommonProps = struct {
             // Check for exceptions during call
             const exc = mruby.mrb_get_exception(mrb);
             if (mruby.mrb_test(exc)) {
+                recordGuardError(mrb, exc, "only_if");
                 mruby.mrb_print_error(mrb);
                 return error.MRubyException;
             }
@@ -113,6 +149,7 @@ pub const CommonProps = struct {
             // Check for exceptions during call
             const exc = mruby.mrb_get_exception(mrb);
             if (mruby.mrb_test(exc)) {
+                recordGuardError(mrb, exc, "not_if");
                 mruby.mrb_print_error(mrb);
                 return error.MRubyException;
             }

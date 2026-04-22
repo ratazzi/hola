@@ -48,6 +48,10 @@ extern fn zig_mrb_get_exception(mrb: *mrb_state) mrb_value;
 pub const mrb_get_exception = zig_mrb_get_exception;
 pub extern fn mrb_raise(mrb: *mrb_state, class: *RClass, msg: [*c]const u8) noreturn;
 
+// Format "ClassName: message" for an exception value into buf. Safe to call
+// while mrb->exc is set (no Ruby-level callbacks).
+pub extern fn zig_mrb_exc_summary(mrb: *mrb_state, exc: mrb_value, buf: [*c]u8, buflen: usize) void;
+
 // Block/Proc handling
 pub extern fn mrb_yield(mrb: *mrb_state, b: mrb_value, arg: mrb_value) mrb_value;
 pub extern fn mrb_yield_argv(mrb: *mrb_state, b: mrb_value, argc: mrb_int, argv: [*c]const mrb_value) mrb_value;
