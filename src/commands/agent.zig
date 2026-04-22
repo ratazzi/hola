@@ -110,9 +110,9 @@ fn parseIso8601(s: []const u8) !i64 {
 }
 
 fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callback: ?[]const u8, endpoint: []const u8, tls_auth: TlsClientAuth) void {
-    // Start each task with a clean guard-error buffer so a previous task's
-    // guard message can't leak into this task's failure callback.
-    base_resource.clearGuardError();
+    // Start each task with a clean provision-error-detail buffer so a previous
+    // task's friendly error message can't leak into this task's failure callback.
+    base_resource.clearProvisionErrorDetail();
 
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |err| {
         std.debug.print("[agent] failed to parse task: {}\n", .{err});
@@ -206,7 +206,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     }) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
-            sendCallback(allocator, cb, data, "error", @errorName(err), base_resource.getGuardError(), null, endpoint, tls_auth);
+            sendCallback(allocator, cb, data, "error", @errorName(err), base_resource.getProvisionErrorDetail(), null, endpoint, tls_auth);
         }
         return;
     };

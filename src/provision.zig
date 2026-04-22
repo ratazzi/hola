@@ -814,9 +814,9 @@ fn injectSecrets(mrb: *mruby.mrb_state, secrets_json: []const u8) !void {
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
-    // Guard-error buffer is threadlocal; clear at entry so a prior invocation
-    // on this thread can't leak into this run.
-    base.clearGuardError();
+    // Provision error detail buffer is threadlocal; clear at entry so a prior
+    // invocation on this thread can't leak into this run.
+    base.clearProvisionErrorDetail();
 
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
@@ -917,8 +917,20 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     }
 
     // Load and execute user's recipe
-    // Use evalFile instead of evalString to preserve file path and line numbers in error messages
-    try mrb.evalFile(opts.script_path);
+    // Use evalFile instead of evalString to preserve file path and line numbers in error messages.
+    // On failure, capture the mruby exception summary (ClassName + message) so
+    // the agent callback / top-level caller can surface something friendlier
+    // than the bare "MRubyException" Zig error name. mrb_print_error() inside
+    // evalFile doesn't clear mrb->exc, so we can still read it here.
+    mrb.evalFile(opts.script_path) catch |err| {
+        if (err == error.MRubyException) {
+            const exc = mruby.mrb_get_exception(mrb_ptr);
+            if (mruby.mrb_test(exc)) {
+                base.recordProvisionException(mrb_ptr, exc, "script raised");
+            }
+        }
+        return err;
+    };
 
     // Record start time for timer
     const start_time = std.time.nanoTimestamp();
@@ -1172,7 +1184,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
     // Phase 1: Execute resources and collect notifications
     for (runner.resources.items) |*res| {
-        base.clearGuardError();
+        base.clearProvisionErrorDetail();
         try display.startResource(res.id.type_name, res.id.name);
         try display.update();
 
@@ -1219,8 +1231,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
 
         const result = res.resource.apply() catch |err| {
-            const guard_msg = base.getGuardError();
-            const error_display = guard_msg orelse @errorName(err);
+            const detail_msg = base.getProvisionErrorDetail();
+            const error_display = detail_msg orelse @errorName(err);
             try display.resourceError(res.id.type_name, res.id.name, error_display);
             try display.update();
 
@@ -1232,7 +1244,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
                 .skipped = false,
                 .skip_reason = null,
                 .error_name = try allocator.dupe(u8, @errorName(err)),
-                .error_message = if (guard_msg) |m| try allocator.dupe(u8, m) else null,
+                .error_message = if (detail_msg) |m| try allocator.dupe(u8, m) else null,
                 .output = null,
             });
 
