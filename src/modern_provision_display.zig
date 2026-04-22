@@ -484,11 +484,17 @@ pub const ModernProvisionDisplay = struct {
         }
     }
 
-    /// Mark resource as updated
-    /// Mark resource as updated (or up to date)
+    /// Mark resource as updated. When skip_reason is set (e.g. "up to date"),
+    /// the action ran but did not change state; otherwise the resource was
+    /// actually modified.
     pub fn resourceUpdated(self: *Self, resource_type: []const u8, resource_name: []const u8, action: []const u8, skip_reason: ?[]const u8) !void {
-        _ = skip_reason; // Always show "up to date" for updated resources
         self.updated_count += 1;
+
+        const suffix: []const u8 = if (skip_reason) |reason|
+            try std.fmt.allocPrint(self.allocator, " ({s})", .{reason})
+        else
+            "";
+        defer if (skip_reason != null) self.allocator.free(suffix);
 
         if (!self.show_progress) {
             const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
@@ -499,7 +505,7 @@ pub const ModernProvisionDisplay = struct {
             while (i < padding) : (i += 1) {
                 padding_str[i] = ' ';
             }
-            std.debug.print("{s}\x1b[32m✓ [{s}{d}/{d}]  {s}[{s}] action {s} (up to date)\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action });
+            std.debug.print("{s}\x1b[32m✓ [{s}{d}/{d}]  {s}[{s}] action {s}{s}\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action, suffix });
             return;
         }
 
@@ -510,7 +516,7 @@ pub const ModernProvisionDisplay = struct {
 
             const base = try self.buildResourceMessage(resource_type, resource_name, "");
             defer self.allocator.free(base);
-            const message = try std.fmt.allocPrint(self.allocator, "{s} action {s} (up to date)", .{ base, action });
+            const message = try std.fmt.allocPrint(self.allocator, "{s} action {s}{s}", .{ base, action, suffix });
             defer self.allocator.free(message);
             // Add indentation and checkmark icon before the message
             const base_with_checkmark = try std.fmt.allocPrint(self.allocator, "{s}✓ {s}", .{ INDENT_RESOURCE, message });
