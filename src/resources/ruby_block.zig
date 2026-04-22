@@ -180,6 +180,12 @@ pub const Resource = struct {
                 // Log the error message
                 logger.err("Ruby block execution failed: {s}", .{err_msg});
 
+                // Capture a friendly "ruby_block raised: ClassName: message"
+                // summary into the shared provision error-detail buffer so the
+                // top-level apply loop / agent callback can surface it instead
+                // of the raw Zig error name.
+                base.recordProvisionException(mrb, exc, "ruby_block raised");
+
                 // Also print to stderr for consistency
                 mruby.mrb_print_error(mrb);
                 return error.RubyBlockFailed;
