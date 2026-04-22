@@ -33,15 +33,15 @@
     // internet connectivity.
     .dependencies = .{
         .hola_deps_macos_arm64 = .{
-            .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly-curl/hola-deps-macos-arm64-curl.tar.gz",
-            .hash = "hola_deps-0.1.0-clHq_7J0TQN1Q0ijbuJ16u2WyrtdTHnNQcId9sr0tD3E",
+            .url = "https://github.com/ratazzi/hola-deps/releases/download/v0.1.0/hola-deps-macos-arm64-0.1.0-curl.tar.gz",
+            .hash = "hola_deps-0.1.0-clHq_7J0TQNbrsyL1gsiBDcCI8SBeeUQIG6kJ3PCA08D",
         },
         .hola_deps_linux_x86_64 = .{
-            .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly-curl/hola-deps-linux-x86_64-curl.tar.gz",
+            .url = "https://github.com/ratazzi/hola-deps/releases/download/v0.1.0/hola-deps-linux-x86_64-0.1.0-curl.tar.gz",
             .hash = "hola_deps-0.1.0-clHq_1wbPgNNMb5Zag4eJicAHUGuSU42HVh33L-5jyn2",
         },
         .hola_deps_linux_aarch64 = .{
-            .url = "https://github.com/ratazzi/hola-deps/releases/download/nightly-curl/hola-deps-linux-aarch64-curl.tar.gz",
+            .url = "https://github.com/ratazzi/hola-deps/releases/download/v0.1.0/hola-deps-linux-aarch64-0.1.0-curl.tar.gz",
             .hash = "hola_deps-0.1.0-clHq_4phygPUei1-OdqkH8iNfgMIYER4ctv5-D92LTKI",
         },
         .clap = .{
