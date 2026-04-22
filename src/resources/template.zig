@@ -345,24 +345,21 @@ pub const Resource = struct {
 
         const result_val = mruby.mrb_load_string(mrb, code_with_null.ptr);
 
-        // Print any errors first
-        mruby.mrb_print_error(mrb);
-
-        // Try to convert result to string
-        // If it's an exception, mrb_str_to_cstr might fail or return error message
-        const result_cstr = mruby.mrb_str_to_cstr(mrb, result_val);
-        const result_str = std.mem.span(result_cstr);
-
-        // Check if result looks like an error (starts with error indicators)
-        // This is a heuristic - proper way would be to check mrb_type
-        if (result_str.len > 0 and
-            (std.mem.startsWith(u8, result_str, "SyntaxError") or
-                std.mem.startsWith(u8, result_str, "NameError") or
-                std.mem.startsWith(u8, result_str, "RuntimeError") or
-                std.mem.startsWith(u8, result_str, "TypeError")))
-        {
+        // Check for an exception directly instead of relying on a string-match
+        // heuristic over the result. When the ERB code raised, also capture a
+        // friendly "template raised: ClassName: message" summary into the
+        // shared provision error-detail buffer so the top-level apply loop /
+        // agent callback can surface it instead of the raw "TemplateRenderFailed".
+        const exc = mruby.mrb_get_exception(mrb);
+        if (mruby.mrb_test(exc)) {
+            base.recordProvisionException(mrb, exc, "template raised");
+            mruby.mrb_print_error(mrb);
             return error.TemplateRenderFailed;
         }
+
+        // Convert result to string
+        const result_cstr = mruby.mrb_str_to_cstr(mrb, result_val);
+        const result_str = std.mem.span(result_cstr);
 
         return try std.heap.c_allocator.dupe(u8, result_str);
     }
