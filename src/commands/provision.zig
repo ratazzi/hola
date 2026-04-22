@@ -249,11 +249,17 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     const effective_secrets_bag = fetched_secrets_bag orelse res.args.@"secrets-bag";
 
     var result = runScript(allocator, script_path_or_url, use_pretty_output, effective_data_bag, effective_secrets_bag, tls_auth) catch |err| {
+        if (err == error.MRubyException) {
+            if (logger.getLogPath()) |log_path| {
+                std.debug.print("\nLog file: {s}\n", .{log_path});
+            }
+            std.process.exit(1);
+        }
         std.debug.print("Provision failed: {}\n", .{err});
         if (logger.getLogPath()) |log_path| {
             std.debug.print("Log file: {s}\n", .{log_path});
         }
-        return err;
+        std.process.exit(1);
     };
     defer result.deinit(allocator);
 }
