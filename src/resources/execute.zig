@@ -81,7 +81,7 @@ pub const Resource = struct {
                 return base.ApplyResult{
                     .was_updated = true,
                     .action = "run",
-                    .skip_reason = "up to date",
+                    .skip_reason = null,
                     .output = output,
                 };
             },
