@@ -66,6 +66,9 @@ fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: Tls
 
     const response = client.get(url, null) catch |err| {
         std.debug.print("\nError: Failed to fetch JSON from URL: {}\n", .{err});
+        if (http.getLastError()) |detail| {
+            std.debug.print("  {s}\n", .{detail});
+        }
         std.debug.print("URL: {s}\n", .{display_url});
         return error.FetchFailed;
     };
@@ -134,11 +137,15 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
 
         const response = client.get(script_path_or_url, null) catch |err| {
             std.debug.print("\nError: Failed to download provision script: {}\n", .{err});
+            if (http.getLastError()) |detail| {
+                std.debug.print("  {s}\n", .{detail});
+            }
             std.debug.print("URL: {s}\n", .{display_url});
             std.debug.print("\nPossible reasons:\n", .{});
             std.debug.print("  • URL is not accessible\n", .{});
             std.debug.print("  • Network connectivity issues\n", .{});
             std.debug.print("  • Invalid credentials (if using Basic Auth)\n", .{});
+            std.debug.print("  • Client certificate / key unreadable or invalid (if using mTLS)\n", .{});
             std.debug.print("  • Server returned an error\n", .{});
             return error.DownloadFailed;
         };
@@ -218,6 +225,11 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         .cert = res.args.@"client-cert",
         .key = res.args.@"client-key",
     };
+    // Fail fast (with a specific reason) if cert/key aren't readable by us;
+    // libcurl would otherwise report only a generic "unable to set private
+    // key file" without distinguishing permission vs not-found. Message is
+    // already printed inside the helper.
+    http.validateClientAuthFiles(tls_auth.cert, tls_auth.key) catch std.process.exit(1);
 
     // Resolve data_bag: from URL or inline JSON
     var fetched_data_bag: ?[]const u8 = null;

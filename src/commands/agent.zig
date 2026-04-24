@@ -351,6 +351,9 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
 
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] callback POST failed: {}\n", .{err});
+        if (http.getLastError()) |detail| {
+            std.debug.print("[agent]   {s}\n", .{detail});
+        }
         return;
     };
     defer resp.deinit();
@@ -521,6 +524,9 @@ fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []con
 
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] poll failed: {}\n", .{err});
+        if (http.getLastError()) |detail| {
+            std.debug.print("[agent]   {s}\n", .{detail});
+        }
         return;
     };
     defer resp.deinit();
@@ -584,6 +590,10 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         .cert = res.args.@"client-cert",
         .key = res.args.@"client-key",
     };
+    // Fail fast (with a specific reason) if cert/key aren't readable by us;
+    // libcurl would otherwise report only a generic "unable to set private
+    // key file". Message is already printed inside the helper.
+    http.validateClientAuthFiles(tls_auth.cert, tls_auth.key) catch std.process.exit(1);
 
     const agent_mode = res.args.mode orelse "ws";
     if (std.mem.eql(u8, agent_mode, "ws") or std.mem.eql(u8, agent_mode, "sse")) {

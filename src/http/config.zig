@@ -72,6 +72,30 @@ pub const Config = struct {
     };
 };
 
+/// Pre-flight check that mTLS client cert / key files are readable. libcurl's
+/// diagnostic for an unreadable key is the generic "unable to set private key
+/// file: ... type PEM" — it does not surface the underlying errno. Opening
+/// the files ourselves first lets us report the specific OS reason
+/// (FileNotFound / AccessDenied) before handing the path to libcurl.
+pub fn validateClientAuthFiles(cert: ?[]const u8, key: ?[]const u8) error{InvalidClientAuth}!void {
+    if (cert) |path| try ensureReadable(path, "client certificate");
+    if (key) |path| try ensureReadable(path, "client private key");
+}
+
+fn ensureReadable(path: []const u8, label: []const u8) error{InvalidClientAuth}!void {
+    var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        if (!builtin.is_test) {
+            switch (err) {
+                error.FileNotFound => std.debug.print("Error: {s} file not found: {s}\n", .{ label, path }),
+                error.AccessDenied => std.debug.print("Error: {s} file is not readable (permission denied): {s}\n", .{ label, path }),
+                else => std.debug.print("Error: cannot open {s} file '{s}': {}\n", .{ label, path, err }),
+            }
+        }
+        return error.InvalidClientAuth;
+    };
+    file.close();
+}
+
 /// Version string for User-Agent from build.zig.zon
 const VERSION = if (@hasDecl(build_options, "version")) build_options.version else "0.1.0";
 const IS_NIGHTLY = if (@hasDecl(build_options, "is_nightly")) build_options.is_nightly else false;
@@ -105,6 +129,57 @@ pub fn getUserAgent(allocator: std.mem.Allocator) ![]const u8 {
 
 // Tests
 const testing = @import("std").testing;
+
+test "validateClientAuthFiles: both null is a no-op" {
+    try validateClientAuthFiles(null, null);
+}
+
+test "validateClientAuthFiles: accepts readable cert and key" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = "-----BEGIN CERT-----\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "-----BEGIN KEY-----\n" });
+
+    const cert_path = try tmp.dir.realpathAlloc(testing.allocator, "cert.pem");
+    defer testing.allocator.free(cert_path);
+    const key_path = try tmp.dir.realpathAlloc(testing.allocator, "key.pem");
+    defer testing.allocator.free(key_path);
+
+    try validateClientAuthFiles(cert_path, key_path);
+}
+
+test "validateClientAuthFiles: rejects missing cert path" {
+    try testing.expectError(
+        error.InvalidClientAuth,
+        validateClientAuthFiles("/definitely/does/not/exist/cert.pem", null),
+    );
+}
+
+test "validateClientAuthFiles: rejects missing key path" {
+    try testing.expectError(
+        error.InvalidClientAuth,
+        validateClientAuthFiles(null, "/definitely/does/not/exist/key.pem"),
+    );
+}
+
+test "validateClientAuthFiles: rejects unreadable key (chmod 000)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Root bypasses POSIX file mode, so a chmod 000 file is still readable.
+    if (std.posix.getuid() == 0) return error.SkipZigTest;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "secret" });
+    const key_path = try tmp.dir.realpathAlloc(testing.allocator, "key.pem");
+    defer testing.allocator.free(key_path);
+
+    try std.posix.chmod(key_path, 0o000);
+    defer std.posix.chmod(key_path, 0o600) catch {};
+
+    try testing.expectError(error.InvalidClientAuth, validateClientAuthFiles(null, key_path));
+}
 
 test "getUserAgent format and memory management" {
     const allocator = testing.allocator;
