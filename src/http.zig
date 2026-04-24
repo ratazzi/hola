@@ -14,6 +14,7 @@ pub const ProgressCallback = types.ProgressCallback;
 pub const config = @import("http/config.zig");
 pub const Config = config.Config;
 pub const getUserAgent = config.getUserAgent;
+pub const validateClientAuthFiles = config.validateClientAuthFiles;
 
 // Re-export client
 pub const client = @import("http/client.zig");

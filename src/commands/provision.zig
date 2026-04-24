@@ -225,6 +225,11 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         .cert = res.args.@"client-cert",
         .key = res.args.@"client-key",
     };
+    // Fail fast (with a specific reason) if cert/key aren't readable by us;
+    // libcurl would otherwise report only a generic "unable to set private
+    // key file" without distinguishing permission vs not-found. Message is
+    // already printed inside the helper.
+    http.validateClientAuthFiles(tls_auth.cert, tls_auth.key) catch std.process.exit(1);
 
     // Resolve data_bag: from URL or inline JSON
     var fetched_data_bag: ?[]const u8 = null;

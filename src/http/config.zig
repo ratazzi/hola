@@ -72,6 +72,28 @@ pub const Config = struct {
     };
 };
 
+/// Pre-flight check that mTLS client cert / key files are readable. libcurl's
+/// diagnostic for an unreadable key is the generic "unable to set private key
+/// file: ... type PEM" — it does not surface the underlying errno. Opening
+/// the files ourselves first lets us report the specific OS reason
+/// (FileNotFound / AccessDenied) before handing the path to libcurl.
+pub fn validateClientAuthFiles(cert: ?[]const u8, key: ?[]const u8) error{InvalidClientAuth}!void {
+    if (cert) |path| try ensureReadable(path, "client certificate");
+    if (key) |path| try ensureReadable(path, "client private key");
+}
+
+fn ensureReadable(path: []const u8, label: []const u8) error{InvalidClientAuth}!void {
+    var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        switch (err) {
+            error.FileNotFound => std.debug.print("Error: {s} file not found: {s}\n", .{ label, path }),
+            error.AccessDenied => std.debug.print("Error: {s} file is not readable (permission denied): {s}\n", .{ label, path }),
+            else => std.debug.print("Error: cannot open {s} file '{s}': {}\n", .{ label, path, err }),
+        }
+        return error.InvalidClientAuth;
+    };
+    file.close();
+}
+
 /// Version string for User-Agent from build.zig.zon
 const VERSION = if (@hasDecl(build_options, "version")) build_options.version else "0.1.0";
 const IS_NIGHTLY = if (@hasDecl(build_options, "is_nightly")) build_options.is_nightly else false;
