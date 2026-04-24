@@ -19,6 +19,12 @@ pub const getUserAgent = config.getUserAgent;
 pub const client = @import("http/client.zig");
 pub const Client = client.Client;
 
+// Thread-local last-error detail from libcurl (populated on failed requests).
+// Callers can read this after catching an HTTP error to surface a human-
+// readable reason (e.g. "could not load PEM client certificate").
+pub const getLastError = client.getLastCurlError;
+pub const clearLastError = client.clearLastCurlError;
+
 // Re-export utilities
 pub const utils = @import("http/utils.zig");
 pub const parseHeadersFromJson = utils.parseHeadersFromJson;

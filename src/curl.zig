@@ -21,9 +21,14 @@ pub const CURLcode = enum(c_int) {
     CURLE_WRITE_ERROR = 23,
     CURLE_SSL_CONNECT_ERROR = 35,
     CURLE_PEER_FAILED_VERIFICATION = 51,
+    CURLE_SSL_CERTPROBLEM = 58,
+    CURLE_SSL_CACERT_BADFILE = 77,
     CURLE_ABORTED_BY_CALLBACK = 42,
     _,
 };
+
+/// Size of the error buffer passed to CURLOPT_ERRORBUFFER (bytes).
+pub const CURL_ERROR_SIZE: usize = 256;
 
 pub const CURLoption = enum(c_int) {
     CURLOPT_URL = 10002,
@@ -97,6 +102,9 @@ pub const CURLoption = enum(c_int) {
 
     // Debug
     CURLOPT_VERBOSE = 41,
+
+    // Error reporting
+    CURLOPT_ERRORBUFFER = 10010,
 
     _,
 };

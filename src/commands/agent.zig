@@ -351,6 +351,9 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
 
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] callback POST failed: {}\n", .{err});
+        if (http.getLastError()) |detail| {
+            std.debug.print("[agent]   {s}\n", .{detail});
+        }
         return;
     };
     defer resp.deinit();
@@ -521,6 +524,9 @@ fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []con
 
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] poll failed: {}\n", .{err});
+        if (http.getLastError()) |detail| {
+            std.debug.print("[agent]   {s}\n", .{detail});
+        }
         return;
     };
     defer resp.deinit();

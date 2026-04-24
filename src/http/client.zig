@@ -9,6 +9,41 @@ const Response = types.Response;
 const Method = types.Method;
 const Config = config_mod.Config;
 
+// --- Last curl-error detail ------------------------------------------------
+// When curl_easy_perform fails we copy libcurl's CURLOPT_ERRORBUFFER text
+// (or, if that's empty, curl_easy_strerror output) into this thread-local
+// buffer. Callers that want to show the user a specific reason (e.g. "could
+// not load PEM client certificate /path/to/client.crt: No such file or
+// directory") can read it after catching the error.
+threadlocal var last_curl_error_buf: [curl.CURL_ERROR_SIZE]u8 = undefined;
+threadlocal var last_curl_error_len: usize = 0;
+
+pub fn clearLastCurlError() void {
+    last_curl_error_len = 0;
+}
+
+pub fn getLastCurlError() ?[]const u8 {
+    if (last_curl_error_len == 0) return null;
+    return last_curl_error_buf[0..last_curl_error_len];
+}
+
+/// Copy an errbuf populated by libcurl (null-terminated within
+/// CURL_ERROR_SIZE) plus a curl_easy_strerror fallback into the
+/// thread-local buffer. `errbuf` must be the one registered with
+/// CURLOPT_ERRORBUFFER on the handle that just failed.
+fn recordCurlError(errbuf: *const [curl.CURL_ERROR_SIZE]u8, code: curl.CURLcode) void {
+    const libcurl_msg = std.mem.sliceTo(errbuf, 0);
+    const source = if (libcurl_msg.len > 0)
+        libcurl_msg
+    else blk: {
+        const fallback_cstr = curl.curl_easy_strerror(code);
+        break :blk std.mem.span(fallback_cstr);
+    };
+    const n = @min(source.len, last_curl_error_buf.len);
+    @memcpy(last_curl_error_buf[0..n], source[0..n]);
+    last_curl_error_len = n;
+}
+
 /// HTTP Client based on libcurl
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -32,6 +67,11 @@ pub const Client = struct {
 
     /// Perform HTTP request
     pub fn request(self: *Client, req: Request) !Response {
+        // Reset thread-local last-curl-error so callers that read
+        // getLastCurlError() in their catch block see only the detail from
+        // *this* call (or null on success / non-libcurl failure).
+        clearLastCurlError();
+
         var attempt: u32 = 0;
         const max_attempts = @max(1, self.config.retry.max_attempts); // Ensure at least 1 attempt
 
@@ -273,6 +313,12 @@ pub const Client = struct {
         const header_list = try self.setupCurlHandle(handle, req);
         defer if (header_list) |list| curl.curl_slist_free_all(list);
 
+        // Register an error buffer so libcurl can store a human-readable
+        // reason (e.g. "could not load PEM client certificate") beyond what
+        // the bare CURLcode conveys. Must live until curl_easy_cleanup.
+        var errbuf: [curl.CURL_ERROR_SIZE]u8 = [_]u8{0} ** curl.CURL_ERROR_SIZE;
+        _ = curl.curl_easy_setopt(handle, .CURLOPT_ERRORBUFFER, &errbuf);
+
         // Response body
         var body_ctx = BodyContext{
             .allocator = self.allocator,
@@ -304,6 +350,7 @@ pub const Client = struct {
         // Perform request
         const res = curl.curl_easy_perform(handle);
         if (res != .CURLE_OK) {
+            recordCurlError(&errbuf, res);
             return curlErrorToZig(res);
         }
 
@@ -340,12 +387,23 @@ pub const Client = struct {
         progress_callback: ?types.ProgressCallback,
         progress_context: ?*anyopaque,
     ) !StreamResult {
+        // Reset thread-local last-curl-error so callers that read
+        // getLastCurlError() in their catch block see only the detail from
+        // *this* call (or null on success / non-libcurl failure).
+        clearLastCurlError();
+
         const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
         defer curl.curl_easy_cleanup(handle);
 
         // Setup common curl options
         const header_list = try self.setupCurlHandle(handle, req);
         defer if (header_list) |list| curl.curl_slist_free_all(list);
+
+        // Register an error buffer so libcurl can store a human-readable
+        // reason beyond what the bare CURLcode conveys. Must live until
+        // curl_easy_cleanup.
+        var errbuf: [curl.CURL_ERROR_SIZE]u8 = [_]u8{0} ** curl.CURL_ERROR_SIZE;
+        _ = curl.curl_easy_setopt(handle, .CURLOPT_ERRORBUFFER, &errbuf);
 
         // Stream context
         var stream_ctx = StreamContext{
@@ -391,6 +449,7 @@ pub const Client = struct {
         // Perform
         const res = curl.curl_easy_perform(handle);
         if (res != .CURLE_OK) {
+            recordCurlError(&errbuf, res);
             return curlErrorToZig(res);
         }
 
@@ -539,7 +598,11 @@ fn curlErrorToZig(code: curl.CURLcode) types.Error {
         .CURLE_OPERATION_TIMEDOUT => error.Timeout,
         .CURLE_URL_MALFORMAT => error.InvalidUrl,
         .CURLE_COULDNT_RESOLVE_PROXY => error.DNSResolutionFailed,
-        .CURLE_SSL_CONNECT_ERROR, .CURLE_PEER_FAILED_VERIFICATION => error.TLSError,
+        .CURLE_SSL_CONNECT_ERROR,
+        .CURLE_PEER_FAILED_VERIFICATION,
+        .CURLE_SSL_CERTPROBLEM,
+        .CURLE_SSL_CACERT_BADFILE,
+        => error.TLSError,
         else => error.Unknown,
     };
 }
