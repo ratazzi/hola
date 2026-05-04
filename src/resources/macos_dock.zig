@@ -939,3 +939,64 @@ pub fn zigAddResource(
 
     return mruby.mrb_nil_value();
 }
+
+// Test-only bridge: mruby C ABI expects `fn(mrb, self) mrb_value`, but
+// `zigAddResource` needs an extra resources slice + allocator. Stash them in
+// threadlocal vars so the test can call back into `zigAddResource`.
+threadlocal var test_collected: ?*std.ArrayList(Resource) = null;
+threadlocal var test_allocator: ?std.mem.Allocator = null;
+
+fn testAddMacosDockCallback(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const collected = test_collected orelse @panic("test_collected not set");
+    const alloc = test_allocator orelse @panic("test_allocator not set");
+    return zigAddResource(mrb, self, collected, alloc);
+}
+
+test "zigAddResource: autohide/magnification tri-state parsing (regression for issue #12)" {
+    const allocator = std.testing.allocator;
+
+    var collected: std.ArrayList(Resource) = .empty;
+    defer {
+        for (collected.items) |res| res.deinit(allocator);
+        collected.deinit(allocator);
+    }
+
+    test_collected = &collected;
+    test_allocator = allocator;
+    defer {
+        test_collected = null;
+        test_allocator = null;
+    }
+
+    var state = try mruby.State.init();
+    defer state.deinit();
+    const mrb_ptr = state.mrb orelse return error.MRubyNotInitialized;
+
+    const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_macos_dock",
+        testAddMacosDockCallback,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(10),
+    );
+
+    // Case 1: autohide=true, magnification=false — both bools must round-trip.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', true, false, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 1), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, true), collected.items[0].autohide);
+    try std.testing.expectEqual(@as(?bool, false), collected.items[0].magnification);
+
+    // Case 2: autohide=nil, magnification=nil — DSL leaves them unset; tri-state
+    // must preserve null so applyConfigure skips the CFPreferences write.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', nil, nil, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 2), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, null), collected.items[1].autohide);
+    try std.testing.expectEqual(@as(?bool, null), collected.items[1].magnification);
+
+    // Case 3: autohide=false, magnification=true — false must NOT collapse to nil.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', false, true, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 3), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, false), collected.items[2].autohide);
+    try std.testing.expectEqual(@as(?bool, true), collected.items[2].magnification);
+}
