@@ -233,6 +233,12 @@ fn printVersion() !void {
     , .{});
 }
 
+comptime {
+    if (builtin.os.tag == .macos) {
+        _ = @import("resources/macos_dock.zig");
+    }
+}
+
 test "simple test" {
     const gpa = std.testing.allocator;
     var list: std.ArrayList(i32) = .empty;

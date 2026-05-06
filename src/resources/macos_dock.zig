@@ -5,6 +5,8 @@ const plist = @import("../plist.zig");
 const logger = @import("../logger.zig");
 const builtin = @import("builtin");
 
+extern fn zig_mrb_nil_p(val: mruby.mrb_value) c_int;
+
 comptime {
     if (builtin.os.tag != .macos) {
         @compileError("macos_dock resource is only available on macOS");
@@ -868,20 +870,25 @@ pub fn zigAddResource(
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Format: A|iSbbioooAA
+    // Format: A|iSooioooAA
     // A: required array (apps)
     // |: optional args start
     // i: optional integer (tilesize)
     // S: optional string (orientation)
-    // b: optional boolean (autohide)
-    // b: optional boolean (magnification)
+    // o: optional object (autohide — accept nil/true/false to preserve tri-state)
+    // o: optional object (magnification — same as autohide)
     // i: optional integer (largesize)
     // o: optional object (only_if)
     // o: optional object (not_if)
     // o: optional object (ignore_failure)
     // A: optional array (notifications)
     // A: optional array (subscriptions)
-    _ = mruby.mrb_get_args(mrb, "A|iSbbioooAA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    //
+    // Note: format `b` would write a single `mrb_bool` (u8) into the variable's
+    // first byte and leave the remaining 7 bytes as stack garbage; pairing that
+    // with our `mrb_value` slot caused boolean detection to fail almost every
+    // time and silently dropped `autohide` / `magnification` settings (issue #12).
+    _ = mruby.mrb_get_args(mrb, "A|iSooioooAA", &apps_val, &tilesize_val, &orientation_val, &autohide_val, &magnification_val, &largesize_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     // Parse apps array
     var apps = std.ArrayList([]const u8).initCapacity(allocator, 0) catch std.ArrayList([]const u8).empty;
@@ -908,21 +915,8 @@ pub fn zigAddResource(
         }
     }
 
-    // For boolean values in mruby word boxing:
-    // - nil:   0xAAAAAAAAAAAAAAAA
-    // - false: 0xAAAAAAAAAAAAAA00
-    // - true:  0xAAAAAAAAAAAAAA01
-    var autohide: ?bool = null;
-    // Check if the upper bits match the boolean pattern
-    if ((autohide_val.w & 0xFFFFFFFFFFFFFF00) == 0xAAAAAAAAAAAAAA00) {
-        // It's a boolean, check the last byte
-        autohide = (autohide_val.w & 0x01) != 0;
-    }
-
-    var magnification: ?bool = null;
-    if ((magnification_val.w & 0xFFFFFFFFFFFFFF00) == 0xAAAAAAAAAAAAAA00) {
-        magnification = (magnification_val.w & 0x01) != 0;
-    }
+    const autohide: ?bool = if (zig_mrb_nil_p(autohide_val) != 0) null else mruby.mrb_test(autohide_val);
+    const magnification: ?bool = if (zig_mrb_nil_p(magnification_val) != 0) null else mruby.mrb_test(magnification_val);
 
     var largesize: ?i64 = null;
     if (mruby.mrb_test(largesize_val)) {
@@ -944,4 +938,65 @@ pub fn zigAddResource(
     }) catch return mruby.mrb_nil_value();
 
     return mruby.mrb_nil_value();
+}
+
+// Test-only bridge: mruby C ABI expects `fn(mrb, self) mrb_value`, but
+// `zigAddResource` needs an extra resources slice + allocator. Stash them in
+// threadlocal vars so the test can call back into `zigAddResource`.
+threadlocal var test_collected: ?*std.ArrayList(Resource) = null;
+threadlocal var test_allocator: ?std.mem.Allocator = null;
+
+fn testAddMacosDockCallback(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    const collected = test_collected orelse @panic("test_collected not set");
+    const alloc = test_allocator orelse @panic("test_allocator not set");
+    return zigAddResource(mrb, self, collected, alloc);
+}
+
+test "zigAddResource: autohide/magnification tri-state parsing (regression for issue #12)" {
+    const allocator = std.testing.allocator;
+
+    var collected: std.ArrayList(Resource) = .empty;
+    defer {
+        for (collected.items) |res| res.deinit(allocator);
+        collected.deinit(allocator);
+    }
+
+    test_collected = &collected;
+    test_allocator = allocator;
+    defer {
+        test_collected = null;
+        test_allocator = null;
+    }
+
+    var state = try mruby.State.init();
+    defer state.deinit();
+    const mrb_ptr = state.mrb orelse return error.MRubyNotInitialized;
+
+    const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
+    mruby.mrb_define_module_function(
+        mrb_ptr,
+        zig_module,
+        "add_macos_dock",
+        testAddMacosDockCallback,
+        mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(10),
+    );
+
+    // Case 1: autohide=true, magnification=false — both bools must round-trip.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', true, false, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 1), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, true), collected.items[0].autohide);
+    try std.testing.expectEqual(@as(?bool, false), collected.items[0].magnification);
+
+    // Case 2: autohide=nil, magnification=nil — DSL leaves them unset; tri-state
+    // must preserve null so applyConfigure skips the CFPreferences write.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', nil, nil, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 2), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, null), collected.items[1].autohide);
+    try std.testing.expectEqual(@as(?bool, null), collected.items[1].magnification);
+
+    // Case 3: autohide=false, magnification=true — false must NOT collapse to nil.
+    try state.evalString("ZigBackend.add_macos_dock([], 50, 'bottom', false, true, 64, nil, nil, false, [], [])");
+    try std.testing.expectEqual(@as(usize, 3), collected.items.len);
+    try std.testing.expectEqual(@as(?bool, false), collected.items[2].autohide);
+    try std.testing.expectEqual(@as(?bool, true), collected.items[2].magnification);
 }

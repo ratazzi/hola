@@ -729,7 +729,7 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(4) },
         .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(4) },
         .{ .name = "add_template", .handler = zig_add_template_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_macos_dock", .handler = zig_add_macos_dock_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(9), .platform = .macos },
+        .{ .name = "add_macos_dock", .handler = zig_add_macos_dock_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(10), .platform = .macos },
         .{ .name = "add_directory", .handler = zig_add_directory_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(7) },
         .{ .name = "add_link", .handler = zig_add_link_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_route", .handler = zig_add_route_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
