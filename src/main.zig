@@ -237,6 +237,8 @@ comptime {
     if (builtin.os.tag == .macos) {
         _ = @import("resources/macos_dock.zig");
     }
+    // Force test discovery for files only reached via indirect imports.
+    _ = @import("provision.zig");
 }
 
 test "simple test" {

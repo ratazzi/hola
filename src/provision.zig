@@ -725,22 +725,22 @@ const ResourceBinding = struct {
 
 fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass) void {
     const bindings = [_]ResourceBinding{
-        .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_template", .handler = zig_add_template_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(12) | mruby.MRB_ARGS_OPT(15) },
+        .{ .name = "add_template", .handler = zig_add_template_resource, .args_spec = mruby.MRB_ARGS_REQ(7) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_macos_dock", .handler = zig_add_macos_dock_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(10), .platform = .macos },
-        .{ .name = "add_directory", .handler = zig_add_directory_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(7) },
-        .{ .name = "add_link", .handler = zig_add_link_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(5) },
-        .{ .name = "add_route", .handler = zig_add_route_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(4) },
-        .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(6), .platform = .macos },
-        .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
-        .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4), .platform = .linux },
+        .{ .name = "add_directory", .handler = zig_add_directory_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_link", .handler = zig_add_link_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
+        .{ .name = "add_route", .handler = zig_add_route_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(9), .platform = .macos },
+        .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
+        .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_mount", .handler = zig_add_mount_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_package", .handler = zig_add_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
         .{ .name = "add_homebrew_package", .handler = zig_add_homebrew_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .macos },
         .{ .name = "add_apt_package", .handler = zig_add_apt_package_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
-        .{ .name = "add_ruby_block", .handler = zig_add_ruby_block_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(4) },
+        .{ .name = "add_ruby_block", .handler = zig_add_ruby_block_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_git", .handler = zig_add_git_resource, .args_spec = mruby.MRB_ARGS_REQ(14) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_user", .handler = zig_add_user_resource, .args_spec = mruby.MRB_ARGS_REQ(11) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_group", .handler = zig_add_group_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
@@ -856,6 +856,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
     // Load OpenStruct utility class (used by node object and other resources)
     try mrb.evalString(@embedFile("ruby_prelude/open_struct.rb"));
+
+    // Load Time.parse polyfill (mruby ships no Regexp, no Time.parse)
+    try mrb.evalString(@embedFile("ruby_prelude/time_parse.rb"));
 
     // Load Ruby DSL preludes for resource types
     try mrb.evalString(resources.file.ruby_prelude);
@@ -1387,25 +1390,84 @@ test "injectSecrets and secrets_bag reads values correctly" {
     // Inject secrets
     try injectSecrets(mrb_ptr, "{\"api_key\":\"sk-123\",\"nested\":{\"token\":\"abc\"}}");
 
+    // Note: mruby's `$_xxx` is the special `$_` variable family — assignments
+    // silently no-op. Use plain `$result1` / `$result2` / `$result3` instead.
+
     // Test simple key access
-    try mrb.evalString("$_test_result = secrets_bag('api_key')");
-    const sym = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result");
+    try mrb.evalString("$result1 = secrets_bag('api_key')");
+    const sym = mruby.mrb_intern_cstr(mrb_ptr, "$result1");
     const result = mruby.mrb_gv_get(mrb_ptr, sym);
     try std.testing.expect(mruby.zig_mrb_string_p(result) != 0);
     const cstr = mruby.mrb_str_to_cstr(mrb_ptr, result);
     try std.testing.expectEqualStrings("sk-123", std.mem.span(cstr));
 
     // Test nested key access
-    try mrb.evalString("$_test_result2 = secrets_bag('nested', 'token')");
-    const sym2 = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result2");
+    try mrb.evalString("$result2 = secrets_bag('nested', 'token')");
+    const sym2 = mruby.mrb_intern_cstr(mrb_ptr, "$result2");
     const result2 = mruby.mrb_gv_get(mrb_ptr, sym2);
     try std.testing.expect(mruby.zig_mrb_string_p(result2) != 0);
     const cstr2 = mruby.mrb_str_to_cstr(mrb_ptr, result2);
     try std.testing.expectEqualStrings("abc", std.mem.span(cstr2));
 
     // Test missing key returns nil
-    try mrb.evalString("$_test_result3 = secrets_bag('nonexistent')");
-    const sym3 = mruby.mrb_intern_cstr(mrb_ptr, "$_test_result3");
+    try mrb.evalString("$result3 = secrets_bag('nonexistent')");
+    const sym3 = mruby.mrb_intern_cstr(mrb_ptr, "$result3");
     const result3 = mruby.mrb_gv_get(mrb_ptr, sym3);
     try std.testing.expect(!mruby.mrb_test(result3));
+}
+
+test "Time.parse handles ISO 8601 / RFC 3339" {
+    var mrb = try mruby.State.init();
+    defer mrb.deinit();
+    const mrb_ptr = mrb.mrb orelse return error.MRubyNotInitialized;
+
+    try mrb.evalString(@embedFile("ruby_prelude/time_parse.rb"));
+
+    // Note: mruby treats `$_xxx` as the special `$_` variable family — assignments
+    // to `$_t` etc. silently no-op. Use plain `$t` / `$e` names instead.
+
+    // 2026-05-09T08:41:20 UTC == epoch 1778316080
+    const utc_epoch: i64 = 1778316080;
+    const cases = [_]struct { src: []const u8, expected_to_i: i64 }{
+        .{ .src = "Time.parse(\"2026-05-09T08:41:20Z\").to_i", .expected_to_i = utc_epoch },
+        .{ .src = "Time.parse(\"2026-05-09T08:41:20.123Z\").to_i", .expected_to_i = utc_epoch },
+        .{ .src = "Time.parse(\"2026-05-09 08:41:20\").to_i", .expected_to_i = utc_epoch },
+        .{ .src = "Time.parse(\"2026-05-09T16:41:20+08:00\").to_i", .expected_to_i = utc_epoch },
+        .{ .src = "Time.parse(\"2026-05-09T16:41:20+0800\").to_i", .expected_to_i = utc_epoch },
+        .{ .src = "Time.parse(\"2026-05-09T03:41:20-05:00\").to_i", .expected_to_i = utc_epoch },
+        // Date-only is midnight UTC == 2026-05-09 00:00:00 UTC
+        .{ .src = "Time.parse(\"2026-05-09\").to_i", .expected_to_i = 1778284800 },
+    };
+
+    for (cases) |c| {
+        const ruby = try std.fmt.allocPrint(std.testing.allocator, "$t = {s}", .{c.src});
+        defer std.testing.allocator.free(ruby);
+        try mrb.evalString(ruby);
+
+        const sym = mruby.mrb_intern_cstr(mrb_ptr, "$t");
+        const got = mruby.mrb_gv_get(mrb_ptr, sym);
+        const got_int = mruby.zig_mrb_fixnum(mrb_ptr, got);
+        std.testing.expectEqual(c.expected_to_i, got_int) catch |err| {
+            std.debug.print("Time.parse case failed: {s} (got {d}, want {d})\n", .{ c.src, got_int, c.expected_to_i });
+            return err;
+        };
+    }
+
+    // Bad inputs raise ArgumentError. (mruby has no $! / inline `rescue` modifier,
+    // so use the explicit begin/rescue form.)
+    const bad_inputs = [_][]const u8{
+        "",
+        "not a date",
+        "2026/05/09",
+        "2026-05-09T08:41:20+9",
+    };
+    for (bad_inputs) |bad| {
+        const ruby = try std.fmt.allocPrint(std.testing.allocator, "$e = \"none\"; begin; Time.parse(\"{s}\"); rescue => err; $e = err.class.to_s; end", .{bad});
+        defer std.testing.allocator.free(ruby);
+        try mrb.evalString(ruby);
+
+        const got = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, "$e"));
+        try std.testing.expect(mruby.zig_mrb_string_p(got) != 0);
+        try std.testing.expectEqualStrings("ArgumentError", std.mem.span(mruby.mrb_str_to_cstr(mrb_ptr, got)));
+    }
 }
