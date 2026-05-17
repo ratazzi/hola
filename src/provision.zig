@@ -1462,9 +1462,7 @@ test "Time.parse handles ISO 8601 / RFC 3339" {
         "2026-05-09T08:41:20+9",
     };
     for (bad_inputs) |bad| {
-        const ruby = try std.fmt.allocPrint(std.testing.allocator,
-            "$e = \"none\"; begin; Time.parse(\"{s}\"); rescue => err; $e = err.class.to_s; end",
-            .{bad});
+        const ruby = try std.fmt.allocPrint(std.testing.allocator, "$e = \"none\"; begin; Time.parse(\"{s}\"); rescue => err; $e = err.class.to_s; end", .{bad});
         defer std.testing.allocator.free(ruby);
         try mrb.evalString(ruby);
 
