@@ -398,12 +398,17 @@ const WsContext = struct {
     default_callback: ?[]const u8,
     endpoint: []const u8,
     tls_auth: TlsClientAuth,
+    first_frame: bool = true,
 };
 
 fn wsWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
     const ctx: *WsContext = @ptrCast(@alignCast(userdata));
     const total = size * nmemb;
     if (total == 0) return 0;
+    if (ctx.first_frame) {
+        std.debug.print("[agent] WebSocket connected, receiving frames\n", .{});
+        ctx.first_frame = false;
+    }
     handleWsMessage(ctx.allocator, ptr[0..total], ctx.default_callback, ctx.endpoint, ctx.tls_auth);
     return total;
 }
