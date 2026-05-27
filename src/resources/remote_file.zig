@@ -620,10 +620,11 @@ pub const Resource = struct {
         }
 
         if (http.getLastError()) |detail| {
+            var detail_buf: [1024]u8 = undefined;
             return std.fmt.bufPrint(
                 buf,
                 "remote_file[{s}] {s} failed: {s}: {s}",
-                .{ self.path, operation, @errorName(err), detail },
+                .{ self.path, operation, @errorName(err), http.redactPassword(self.source, detail, &detail_buf) },
             ) catch fallbackRemoteFileFailure(buf, self.path, operation, err);
         }
 

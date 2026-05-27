@@ -179,9 +179,10 @@ pub fn downloadFileWithClient(
         var url_buf: [512]u8 = undefined;
         const display_url = utils.maskUrlPassword(url, &url_buf);
         if (http_client.getLastCurlError()) |curl_detail| {
+            var detail_buf: [1024]u8 = undefined;
             recordLastDownloadError(
                 "download {s} failed: {s}: {s}",
-                .{ display_url, @errorName(err), curl_detail },
+                .{ display_url, @errorName(err), utils.redactPassword(url, curl_detail, &detail_buf) },
             );
         } else {
             recordLastDownloadError(

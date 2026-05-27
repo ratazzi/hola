@@ -58,7 +58,8 @@ fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: Tls
     const response = client.get(url, null) catch |err| {
         std.debug.print("\nError: Failed to fetch JSON from URL: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("  {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("  {s}\n", .{http.redactPassword(url, detail, &detail_buf)});
         }
         std.debug.print("URL: {s}\n", .{display_url});
         return error.FetchFailed;
@@ -120,7 +121,8 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         const response = client.get(script_path_or_url, null) catch |err| {
             std.debug.print("\nError: Failed to download provision script: {}\n", .{err});
             if (http.getLastError()) |detail| {
-                std.debug.print("  {s}\n", .{detail});
+                var detail_buf: [1024]u8 = undefined;
+                std.debug.print("  {s}\n", .{http.redactPassword(script_path_or_url, detail, &detail_buf)});
             }
             std.debug.print("URL: {s}\n", .{display_url});
             std.debug.print("\nPossible reasons:\n", .{});

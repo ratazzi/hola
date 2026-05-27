@@ -646,7 +646,8 @@ pub const Resource = struct {
         if (code != 0) {
             const err = c.git_error_last();
             if (err != null) {
-                const err_msg = std.mem.span(err.*.message);
+                var msg_buf: [1024]u8 = undefined;
+                const err_msg = http.redactPassword(self.repository, std.mem.span(err.*.message), &msg_buf);
                 logger.err("[git] fetch failed: {s} (code: {})", .{ err_msg, code });
             } else {
                 logger.err("[git] fetch failed (code: {})", .{code});
