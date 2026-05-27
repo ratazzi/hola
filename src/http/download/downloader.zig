@@ -3,6 +3,29 @@ const http_client = @import("../client.zig");
 const types = @import("../types.zig");
 const Task = @import("task.zig").Task;
 const logger = @import("../../logger.zig");
+const utils = @import("../utils.zig");
+
+const LAST_DOWNLOAD_ERROR_BUF_SIZE = 1024;
+threadlocal var last_download_error_buf: [LAST_DOWNLOAD_ERROR_BUF_SIZE]u8 = undefined;
+threadlocal var last_download_error_len: usize = 0;
+
+pub fn clearLastDownloadError() void {
+    last_download_error_len = 0;
+}
+
+pub fn getLastDownloadError() ?[]const u8 {
+    if (last_download_error_len == 0) return null;
+    return last_download_error_buf[0..last_download_error_len];
+}
+
+fn recordLastDownloadError(comptime fmt: []const u8, args: anytype) void {
+    const written = std.fmt.bufPrint(&last_download_error_buf, fmt, args) catch blk: {
+        const fallback = "download failed (message truncated)";
+        @memcpy(last_download_error_buf[0..fallback.len], fallback);
+        break :blk last_download_error_buf[0..fallback.len];
+    };
+    last_download_error_len = written.len;
+}
 
 /// Options for single file download
 pub const Options = struct {
@@ -70,6 +93,8 @@ pub fn downloadFileWithClient(
     dest_path: []const u8,
     opts: Options,
 ) !Result {
+    clearLastDownloadError();
+
     // Build request
     var req = types.Request.init(.GET, url);
     defer req.deinit();
@@ -150,7 +175,22 @@ pub fn downloadFileWithClient(
     };
 
     // Stream to file and get response status and headers
-    var stream_result = try client.stream(req, streamToFile, &ctx, opts.progress_callback, opts.progress_context);
+    var stream_result = client.stream(req, streamToFile, &ctx, opts.progress_callback, opts.progress_context) catch |err| {
+        var url_buf: [512]u8 = undefined;
+        const display_url = utils.maskUrlPassword(url, &url_buf);
+        if (http_client.getLastCurlError()) |curl_detail| {
+            recordLastDownloadError(
+                "download {s} failed: {s}: {s}",
+                .{ display_url, @errorName(err), curl_detail },
+            );
+        } else {
+            recordLastDownloadError(
+                "download {s} failed: {s}",
+                .{ display_url, @errorName(err) },
+            );
+        }
+        return err;
+    };
     var cleanup_headers = true;
     defer if (cleanup_headers) {
         var it = stream_result.headers.iterator();
@@ -198,6 +238,9 @@ pub fn downloadFileWithClient(
     if (is_http and (stream_result.status < 200 or stream_result.status >= 300)) {
         // Log error with status code
         logger.err("Download failed with HTTP status {d} for URL: {s}", .{ stream_result.status, url });
+        var url_buf: [512]u8 = undefined;
+        const display_url = utils.maskUrlPassword(url, &url_buf);
+        recordLastDownloadError("download {s} returned HTTP status {d}", .{ display_url, stream_result.status });
         // Error or unexpected status code
         // Temp file will be cleaned up by defer automatically
         // For resume mode, explicitly delete the corrupted file
@@ -261,9 +304,13 @@ pub fn downloadTask(
         task.temp_path,
         opts,
     ) catch |err| {
-        const err_msg = try std.fmt.allocPrint(allocator, "Download failed: {}", .{err});
-        defer allocator.free(err_msg);
-        try task.setError(allocator, err_msg);
+        const err_msg_owned = if (getLastDownloadError()) |detail|
+            allocator.dupe(u8, detail) catch null
+        else
+            std.fmt.allocPrint(allocator, "Download failed: {s}", .{@errorName(err)}) catch null;
+        defer if (err_msg_owned) |msg| allocator.free(msg);
+        const err_msg = err_msg_owned orelse "Download failed";
+        task.setError(allocator, err_msg) catch {};
         return err;
     };
 
@@ -326,6 +373,10 @@ pub fn verifyChecksum(_: std.mem.Allocator, file_path: []const u8, expected: []c
     // Compare
     if (!std.mem.eql(u8, &hex, expected)) {
         logger.err("Checksum mismatch: expected {s}, got {s}", .{ expected, hex });
+        recordLastDownloadError(
+            "checksum mismatch for {s}: expected SHA256 {s}, got {s}",
+            .{ file_path, expected, &hex },
+        );
         return error.ChecksumMismatch;
     }
 }

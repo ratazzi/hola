@@ -1,5 +1,32 @@
 const std = @import("std");
 
+/// Mask the password in a URL's `user:password@` userinfo for safe display or
+/// logging. Writes `scheme://user:***@rest` into `buf` (no allocation) and
+/// returns that slice. When the URL has no userinfo password, the original URL
+/// is copied into `buf` unchanged. Falls back to a truncated copy if `buf` is
+/// too small. `buf` should be at least as large as the URL to avoid truncation.
+pub fn maskUrlPassword(url: []const u8, buf: []u8) []const u8 {
+    const scheme_pos = std.mem.indexOf(u8, url, "://") orelse return copyUrl(url, buf);
+    const auth_start = scheme_pos + 3;
+    const path_start = std.mem.indexOfScalarPos(u8, url, auth_start, '/') orelse url.len;
+    const at_rel = std.mem.indexOfScalar(u8, url[auth_start..path_start], '@') orelse return copyUrl(url, buf);
+    const at_pos = auth_start + at_rel;
+    const colon_rel = std.mem.indexOfScalar(u8, url[auth_start..at_pos], ':') orelse return copyUrl(url, buf);
+    const password_start = auth_start + colon_rel + 1;
+
+    return std.fmt.bufPrint(
+        buf,
+        "{s}***{s}",
+        .{ url[0..password_start], url[at_pos..] },
+    ) catch copyUrl(url, buf);
+}
+
+fn copyUrl(value: []const u8, buf: []u8) []const u8 {
+    const n = @min(value.len, buf.len);
+    @memcpy(buf[0..n], value[0..n]);
+    return buf[0..n];
+}
+
 /// Parse HTTP headers from JSON string
 /// Returns a HashMap that caller must deinit
 pub fn parseHeadersFromJson(allocator: std.mem.Allocator, json_str: []const u8) !std.StringHashMap([]const u8) {

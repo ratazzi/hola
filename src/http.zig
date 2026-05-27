@@ -34,6 +34,7 @@ pub const formatSizeBuf = utils.formatSizeBuf;
 pub const formatSizeRange = utils.formatSizeRange;
 pub const slugifyPath = utils.slugifyPath;
 pub const calculateSha256 = utils.calculateSha256;
+pub const maskUrlPassword = utils.maskUrlPassword;
 
 // Re-export download module
 pub const download = struct {
