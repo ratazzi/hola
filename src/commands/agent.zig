@@ -312,7 +312,8 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     };
     defer allocator.free(body);
 
-    std.debug.print("[agent] callback POST {s}\n", .{callback_url});
+    var callback_url_buf: [512]u8 = undefined;
+    std.debug.print("[agent] callback POST {s}\n", .{http.maskUrlPassword(callback_url, &callback_url_buf)});
 
     // Use mTLS if callback host matches endpoint host
     const use_tls_auth = originMatches(callback_url, endpoint);
@@ -339,7 +340,8 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] callback POST failed: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("[agent]   {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("[agent]   {s}\n", .{http.redactPassword(callback_url, detail, &detail_buf)});
         }
         return;
     };
@@ -517,7 +519,8 @@ fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []con
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] poll failed: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("[agent]   {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("[agent]   {s}\n", .{http.redactPassword(endpoint, detail, &detail_buf)});
         }
         return;
     };
