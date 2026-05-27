@@ -1,5 +1,6 @@
 const std = @import("std");
 const logger = @import("logger.zig");
+const url_utils = @import("http/utils.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -78,7 +79,14 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
     var repo_ptr: ?*c.git_repository = null;
     const code = c.git_clone(&repo_ptr, url_c.ptr, destination_c.ptr, &clone_opts);
     if (code != 0) {
-        logLibGit2Error(code);
+        const err_ptr = c.git_error_last();
+        if (err_ptr != null and err_ptr.*.message != null) {
+            const msg = std.mem.span(@as([*:0]const u8, @ptrCast(err_ptr.*.message)));
+            var msg_buf: [1024]u8 = undefined;
+            logger.err("libgit2 clone ({d}): {s}", .{ code, url_utils.redactPassword(url, msg, &msg_buf) });
+        } else {
+            logger.err("libgit2 clone failed ({d})", .{code});
+        }
         return Error.CloneFailed;
     }
 
@@ -86,7 +94,8 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
         defer c.git_repository_free(repo);
     }
 
-    logger.info("Cloned {s} -> {s}", .{ url, destination });
+    var url_buf: [512]u8 = undefined;
+    logger.info("Cloned {s} -> {s}", .{ url_utils.maskUrlPassword(url, &url_buf), destination });
 }
 
 fn check(code: c_int, err: Error) Error!void {

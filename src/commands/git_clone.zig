@@ -1,6 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const git = @import("../git.zig");
+const http = @import("../http.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for git-clone
@@ -47,7 +48,8 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     std.debug.print("[clone] -> {s}\n", .{destination});
     try client.clone(allocator, url, destination, options);
     if (options.show_progress) std.debug.print("\n", .{});
-    std.debug.print("[done] {s} -> {s}\n", .{ url, destination });
+    var url_buf: [512]u8 = undefined;
+    std.debug.print("[done] {s} -> {s}\n", .{ http.maskUrlPassword(url, &url_buf), destination });
 }
 
 fn printHelp(reason: ?[]const u8) !void {
