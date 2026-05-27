@@ -1,6 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const git = @import("../git.zig");
+const http = @import("../http.zig");
 const apply_module = @import("../apply.zig");
 const logger = @import("../logger.zig");
 const dotfiles_paths = @import("../dotfiles_paths.zig");
@@ -29,7 +30,8 @@ fn cloneRepository(
     is_github: bool,
     display_name: []const u8,
 ) !void {
-    std.debug.print("[clone] {s} -> {s}\n", .{ url, dest });
+    var url_buf: [512]u8 = undefined;
+    std.debug.print("[clone] {s} -> {s}\n", .{ http.maskUrlPassword(url, &url_buf), dest });
 
     var client = try git.Client.init();
     defer client.deinit();
@@ -41,7 +43,8 @@ fn cloneRepository(
 
     client.clone(allocator, url, dest, clone_options) catch |err| {
         std.debug.print("\n\x1b[31mError: Failed to clone repository\x1b[0m\n", .{});
-        std.debug.print("Repository: {s}\n", .{url});
+        var repo_buf: [512]u8 = undefined;
+        std.debug.print("Repository: {s}\n", .{http.maskUrlPassword(url, &repo_buf)});
         std.debug.print("Destination: {s}\n", .{dest});
         std.debug.print("\nPossible reasons:\n", .{});
         std.debug.print("  • Repository does not exist or is private\n", .{});
@@ -163,7 +166,8 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         if (!dry_run) {
             try cloneRepository(allocator, repo_url, clone_dest, res.args.branch, false, "repository");
         } else {
-            std.debug.print("[dry-run] Would clone {s} to {s}\n", .{ repo_url, clone_dest });
+            var url_buf: [512]u8 = undefined;
+            std.debug.print("[dry-run] Would clone {s} to {s}\n", .{ http.maskUrlPassword(repo_url, &url_buf), clone_dest });
         }
     }
 

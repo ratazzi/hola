@@ -1227,6 +1227,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
                     const msg = try std.fmt.allocPrint(allocator, "Download failed for {s}: {s}", .{ resource_id, err_msg });
                     defer allocator.free(msg);
+                    base.recordProvisionErrorDetailSlice(msg);
                     try display.showInfo(msg);
                     return error.DownloadFailed;
                 }

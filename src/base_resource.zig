@@ -4,13 +4,11 @@ pub const notification = @import("notification.zig");
 const builtin = @import("builtin");
 
 // --- Provision error detail context ----------------------------------------
-// Whenever a piece of user Ruby raises during provisioning (a guard block,
-// the top-level DSL script, or the body of `ruby_block`), we capture a
-// friendly summary (e.g. "only_if block raised: Errno::ENOENT: No such
-// file or directory ...") into a thread-local buffer. The top-level apply
-// loop and the agent callback can then show it to the user instead of the
-// raw Zig error name "MRubyException".
-const PROVISION_ERROR_DETAIL_BUF_SIZE = 256;
+// Whenever a resource can provide more context than the raw Zig error name,
+// capture that friendly summary into a thread-local buffer. The top-level
+// apply loop and the agent callback can then show details like the raised Ruby
+// exception, failed URL, HTTP status, or checksum mismatch.
+const PROVISION_ERROR_DETAIL_BUF_SIZE = 1024;
 threadlocal var provision_error_detail_buf: [PROVISION_ERROR_DETAIL_BUF_SIZE]u8 = undefined;
 threadlocal var provision_error_detail_len: usize = 0;
 
@@ -23,6 +21,21 @@ pub fn getProvisionErrorDetail() ?[]const u8 {
     return provision_error_detail_buf[0..provision_error_detail_len];
 }
 
+pub fn recordProvisionErrorDetailSlice(detail: []const u8) void {
+    const n = @min(detail.len, provision_error_detail_buf.len);
+    @memcpy(provision_error_detail_buf[0..n], detail[0..n]);
+    provision_error_detail_len = n;
+}
+
+pub fn recordProvisionErrorDetail(comptime fmt: []const u8, args: anytype) void {
+    const written = std.fmt.bufPrint(&provision_error_detail_buf, fmt, args) catch blk: {
+        const fallback = "provision error (message truncated)";
+        @memcpy(provision_error_detail_buf[0..fallback.len], fallback);
+        break :blk provision_error_detail_buf[0..fallback.len];
+    };
+    provision_error_detail_len = written.len;
+}
+
 /// Capture a friendly summary of an mruby exception into the thread-local
 /// error detail buffer. If `prefix` is non-null the buffer stores
 /// "{prefix}: {ClassName}: {message}"; otherwise just "{ClassName}: {message}".
@@ -32,21 +45,13 @@ pub fn recordProvisionException(mrb: *mruby.mrb_state, exc: mruby.mrb_value, pre
     const summary = std.mem.sliceTo(&summary_buf, 0);
 
     const written = if (prefix) |p|
-        std.fmt.bufPrint(
-            &provision_error_detail_buf,
-            "{s}: {s}",
-            .{ p, summary },
-        ) catch blk: {
+        std.fmt.bufPrint(&provision_error_detail_buf, "{s}: {s}", .{ p, summary }) catch blk: {
             const fallback = "provision error (message truncated)";
             @memcpy(provision_error_detail_buf[0..fallback.len], fallback);
             break :blk provision_error_detail_buf[0..fallback.len];
         }
     else
-        std.fmt.bufPrint(
-            &provision_error_detail_buf,
-            "{s}",
-            .{summary},
-        ) catch blk: {
+        std.fmt.bufPrint(&provision_error_detail_buf, "{s}", .{summary}) catch blk: {
             const fallback = "provision error (message truncated)";
             @memcpy(provision_error_detail_buf[0..fallback.len], fallback);
             break :blk provision_error_detail_buf[0..fallback.len];

@@ -1,5 +1,104 @@
 const std = @import("std");
 
+/// Mask the password in a URL's `user:password@` userinfo for safe display or
+/// logging. Writes `scheme://user:***@rest` into `buf` (no allocation) and
+/// returns that slice. When the URL has no userinfo password, the original URL
+/// is copied into `buf` unchanged. If `buf` is too small the masked form is
+/// truncated — the raw password is never emitted.
+pub fn maskUrlPassword(url: []const u8, buf: []u8) []const u8 {
+    const ui = findUserinfoPassword(url) orelse return copyUrl(url, buf);
+    // Build "<scheme>://<user>:***<@host/path...>" piece by piece. We never fall
+    // back to copying the raw URL, which would leak the password when buf is
+    // too small (truncating the masked form keeps the password out).
+    var n: usize = 0;
+    n += copyChunk(buf, n, url[0..ui.password_start]);
+    n += copyChunk(buf, n, "***");
+    n += copyChunk(buf, n, url[ui.at_pos..]);
+    return buf[0..n];
+}
+
+/// Copy `text` into `buf`, replacing every occurrence of the password carried in
+/// `url`'s `user:password@` userinfo with `***`. Use this to scrub credentials a
+/// library error message may have echoed back. Returns `text` unchanged when
+/// `url` carries no password.
+pub fn redactPassword(url: []const u8, text: []const u8, buf: []u8) []const u8 {
+    const ui = findUserinfoPassword(url) orelse return text;
+    const password = url[ui.password_start..ui.at_pos];
+    if (password.len == 0) return text;
+
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len and n < buf.len) {
+        if (std.mem.startsWith(u8, text[i..], password)) {
+            n += copyChunk(buf, n, "***");
+            i += password.len;
+        } else {
+            n += copyChunk(buf, n, text[i .. i + 1]);
+            i += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+const UserinfoPassword = struct { password_start: usize, at_pos: usize };
+
+fn findUserinfoPassword(url: []const u8) ?UserinfoPassword {
+    const scheme_pos = std.mem.indexOf(u8, url, "://") orelse return null;
+    const auth_start = scheme_pos + 3;
+    const path_start = std.mem.indexOfScalarPos(u8, url, auth_start, '/') orelse url.len;
+    const at_rel = std.mem.indexOfScalar(u8, url[auth_start..path_start], '@') orelse return null;
+    const at_pos = auth_start + at_rel;
+    const colon_rel = std.mem.indexOfScalar(u8, url[auth_start..at_pos], ':') orelse return null;
+    return .{ .password_start = auth_start + colon_rel + 1, .at_pos = at_pos };
+}
+
+/// Copy `src` into `buf` at `offset`, truncating to fit. Returns bytes written.
+fn copyChunk(buf: []u8, offset: usize, src: []const u8) usize {
+    if (offset >= buf.len) return 0;
+    const n = @min(src.len, buf.len - offset);
+    @memcpy(buf[offset..][0..n], src[0..n]);
+    return n;
+}
+
+fn copyUrl(value: []const u8, buf: []u8) []const u8 {
+    const n = @min(value.len, buf.len);
+    @memcpy(buf[0..n], value[0..n]);
+    return buf[0..n];
+}
+
+test "maskUrlPassword masks password with ample buffer" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "https://user:***@example.com/path",
+        maskUrlPassword("https://user:secret@example.com/path", &buf),
+    );
+}
+
+test "maskUrlPassword leaves a URL without userinfo unchanged" {
+    var buf: [128]u8 = undefined;
+    const url = "https://example.com/path?token=abc";
+    try std.testing.expectEqualStrings(url, maskUrlPassword(url, &buf));
+}
+
+test "maskUrlPassword never leaks the password when buffer is too small" {
+    var buf: [24]u8 = undefined;
+    const out = maskUrlPassword("https://user:supersecretpassword@example.com/very/long/path", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, out, "supersecretpassword") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "***") != null);
+    try std.testing.expect(std.mem.startsWith(u8, out, "https://user:***"));
+}
+
+test "redactPassword scrubs the url password echoed in arbitrary text" {
+    var buf: [128]u8 = undefined;
+    const out = redactPassword(
+        "https://user:tok3n@host/repo.git",
+        "failed to connect to https://user:tok3n@host/repo.git",
+        &buf,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out, "tok3n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "***") != null);
+}
+
 /// Parse HTTP headers from JSON string
 /// Returns a HashMap that caller must deinit
 pub fn parseHeadersFromJson(allocator: std.mem.Allocator, json_str: []const u8) !std.StringHashMap([]const u8) {

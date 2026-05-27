@@ -29,19 +29,6 @@ const parsers = .{
 
 /// Return a display-safe URL with password masked as "***".
 /// If the URL has no password or parsing fails, returns the original string.
-fn maskUrlPassword(allocator: std.mem.Allocator, url: []const u8) []const u8 {
-    const uri = std.Uri.parse(url) catch return url;
-    if (uri.password == null) return url;
-    const user_part = if (uri.user) |u| u.percent_encoded else "";
-    const host_part = if (uri.host) |h| h.percent_encoded else "";
-    return std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
-        uri.scheme,
-        user_part,
-        host_part,
-        uri.path.percent_encoded,
-    }) catch url;
-}
-
 const TlsClientAuth = struct {
     cert: ?[]const u8 = null,
     key: ?[]const u8 = null,
@@ -194,8 +181,8 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     };
     defer if (secrets_json) |s| allocator.free(s);
 
-    const display_url = maskUrlPassword(allocator, url);
-    defer if (display_url.ptr != url.ptr) allocator.free(display_url);
+    var url_buf: [512]u8 = undefined;
+    const display_url = http.maskUrlPassword(url, &url_buf);
     std.debug.print("[agent] task={s} action={s} provisioning: {s}\n", .{ task_id, action_name, display_url });
 
     // Only pass mTLS credentials if script URL matches agent endpoint origin
@@ -325,7 +312,8 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     };
     defer allocator.free(body);
 
-    std.debug.print("[agent] callback POST {s}\n", .{callback_url});
+    var callback_url_buf: [512]u8 = undefined;
+    std.debug.print("[agent] callback POST {s}\n", .{http.maskUrlPassword(callback_url, &callback_url_buf)});
 
     // Use mTLS if callback host matches endpoint host
     const use_tls_auth = originMatches(callback_url, endpoint);
@@ -352,7 +340,8 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] callback POST failed: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("[agent]   {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("[agent]   {s}\n", .{http.redactPassword(callback_url, detail, &detail_buf)});
         }
         return;
     };
@@ -375,8 +364,8 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
     };
     defer if (ws_endpoint.ptr != endpoint.ptr) allocator.free(ws_endpoint);
 
-    const display_endpoint = maskUrlPassword(allocator, ws_endpoint);
-    defer if (display_endpoint.ptr != ws_endpoint.ptr) allocator.free(display_endpoint);
+    var endpoint_buf: [512]u8 = undefined;
+    const display_endpoint = http.maskUrlPassword(ws_endpoint, &endpoint_buf);
     std.debug.print("[agent] node={s}, connecting to {s}\n", .{ node_name, display_endpoint });
 
     var backoff_ms: u64 = INITIAL_BACKOFF_MS;
@@ -494,8 +483,8 @@ fn handleWsMessage(allocator: std.mem.Allocator, msg: []const u8, default_callba
 // -- Watch (polling) mode --
 
 fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, interval_s: u32, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
-    const display_endpoint = maskUrlPassword(allocator, endpoint);
-    defer if (display_endpoint.ptr != endpoint.ptr) allocator.free(display_endpoint);
+    var endpoint_buf: [512]u8 = undefined;
+    const display_endpoint = http.maskUrlPassword(endpoint, &endpoint_buf);
     std.debug.print("[agent] watch mode, node={s}, polling {s} every {d}s\n", .{ node_name, display_endpoint, interval_s });
 
     while (true) {
@@ -530,7 +519,8 @@ fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []con
     var resp = client.request(req) catch |err| {
         std.debug.print("[agent] poll failed: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("[agent]   {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("[agent]   {s}\n", .{http.redactPassword(endpoint, detail, &detail_buf)});
         }
         return;
     };

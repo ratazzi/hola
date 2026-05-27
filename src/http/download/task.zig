@@ -78,15 +78,19 @@ pub const Task = struct {
     }
 
     pub fn setError(self: *Task, allocator: std.mem.Allocator, err_msg: []const u8) !void {
-        // Free old error if exists
-        if (self.error_message.load(.acquire)) |old_msg| {
-            allocator.free(std.mem.span(old_msg));
-        }
+        // Allocate the new message first. On OOM still mark .failed so the task
+        // never stays stuck in .downloading (callers may swallow the error).
+        const msg_z = allocator.dupeZ(u8, err_msg) catch |err| {
+            self.status.store(.failed, .release);
+            return err;
+        };
 
-        // Allocate new error message
-        const msg_z = try allocator.dupeZ(u8, err_msg);
+        // Publish the message before flipping status to .failed, so a reader
+        // that observes .failed always sees the message (release/acquire pairs).
+        const old = self.error_message.load(.acquire);
         self.error_message.store(msg_z.ptr, .release);
         self.status.store(.failed, .release);
+        if (old) |old_msg| allocator.free(std.mem.span(old_msg));
     }
 
     pub fn getError(self: *const Task, allocator: std.mem.Allocator) ?[]const u8 {

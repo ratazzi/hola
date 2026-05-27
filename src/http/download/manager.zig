@@ -4,6 +4,7 @@ const config_mod = @import("../config.zig");
 const Task = @import("task.zig").Task;
 const downloader = @import("downloader.zig");
 const logger = @import("../../logger.zig");
+const utils = @import("../utils.zig");
 
 // Thread-local storage for current Manager (for use in remote_file resource)
 threadlocal var current_manager: ?*Manager = null;
@@ -269,12 +270,18 @@ fn processTask(mgr: *Manager, task_index: usize) void {
         task.temp_path,
         opts,
     ) catch |err| {
-        const err_msg = std.fmt.allocPrint(
-            mgr.allocator,
-            "Download failed: {} - {s}",
-            .{ err, task.url },
-        ) catch "Unknown error";
-        defer if (err != error.OutOfMemory) mgr.allocator.free(err_msg);
+        const err_msg_owned = if (downloader.getLastDownloadError()) |detail|
+            mgr.allocator.dupe(u8, detail) catch null
+        else blk: {
+            var url_buf: [512]u8 = undefined;
+            break :blk std.fmt.allocPrint(
+                mgr.allocator,
+                "Download failed: {s} - {s}",
+                .{ @errorName(err), utils.maskUrlPassword(task.url, &url_buf) },
+            ) catch null;
+        };
+        defer if (err_msg_owned) |msg| mgr.allocator.free(msg);
+        const err_msg = err_msg_owned orelse "Unknown error";
 
         logger.err("Task {d} download failed: {s}", .{ task_index, err_msg });
         task.setError(mgr.allocator, err_msg) catch {};
@@ -290,12 +297,16 @@ fn processTask(mgr: *Manager, task_index: usize) void {
     // Verify checksum if provided
     if (task.checksum) |expected_checksum| {
         downloader.verifyChecksum(mgr.allocator, task.temp_path, expected_checksum) catch |err| {
-            const err_msg = std.fmt.allocPrint(
-                mgr.allocator,
-                "Checksum verification failed: {}",
-                .{err},
-            ) catch "Checksum mismatch";
-            defer if (err != error.OutOfMemory) mgr.allocator.free(err_msg);
+            const err_msg_owned = if (downloader.getLastDownloadError()) |detail|
+                mgr.allocator.dupe(u8, detail) catch null
+            else
+                std.fmt.allocPrint(
+                    mgr.allocator,
+                    "Checksum verification failed: {s}",
+                    .{@errorName(err)},
+                ) catch null;
+            defer if (err_msg_owned) |msg| mgr.allocator.free(msg);
+            const err_msg = err_msg_owned orelse "Checksum mismatch";
 
             logger.err("Task {d} checksum failed: {s}", .{ task_index, err_msg });
             task.setError(mgr.allocator, err_msg) catch {};

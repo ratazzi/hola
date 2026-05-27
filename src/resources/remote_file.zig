@@ -14,6 +14,26 @@ const DownloadOutcome = struct {
     last_modified: ?[]const u8 = null,
 };
 
+const RemoteFileErrorDetail = struct {
+    buffer: [1024]u8 = undefined,
+    len: usize = 0,
+
+    fn clear(self: *RemoteFileErrorDetail) void {
+        self.len = 0;
+    }
+
+    fn set(self: *RemoteFileErrorDetail, detail: []const u8) void {
+        const n = @min(detail.len, self.buffer.len);
+        @memcpy(self.buffer[0..n], detail[0..n]);
+        self.len = n;
+    }
+
+    fn get(self: *const RemoteFileErrorDetail) ?[]const u8 {
+        if (self.len == 0) return null;
+        return self.buffer[0..self.len];
+    }
+};
+
 /// Remote file resource data structure
 pub const Resource = struct {
     // Resource-specific properties
@@ -218,33 +238,51 @@ pub const Resource = struct {
                 allocator: std.mem.Allocator,
                 previous_etag: ?[]const u8,
                 previous_last_modified: ?[]const u8,
+                error_detail: *RemoteFileErrorDetail,
             };
+            var error_detail = RemoteFileErrorDetail{};
             const download_ctx = DownloadContext{
                 .resource = self,
                 .allocator = allocator,
                 .previous_etag = previous_etag,
                 .previous_last_modified = previous_last_modified,
+                .error_detail = &error_detail,
             };
             const downloadAsync = struct {
                 fn run(ctx: DownloadContext) !DownloadOutcome {
-                    const outcome = try ctx.resource.downloadDirect(ctx.allocator, ctx.previous_etag, ctx.previous_last_modified);
-                    return outcome;
+                    return ctx.resource.downloadDirect(ctx.allocator, ctx.previous_etag, ctx.previous_last_modified) catch |err| {
+                        ctx.resource.copyRemoteFileFailure(ctx.error_detail, "download", err);
+                        return err;
+                    };
                 }
             }.run;
 
-            var outcome = try AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, download_ctx, downloadAsync);
+            var outcome = AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, download_ctx, downloadAsync) catch |err| {
+                self.recordRemoteFileFailure("download", err, error_detail.get());
+                return err;
+            };
 
             // If server reported not modified but we have no local file, fall back to unconditional download
             if (!outcome.downloaded and !local_exists) {
                 logger.debug("Server returned not_modified but local file doesn't exist, retrying without conditions", .{});
+                error_detail.clear();
                 const retry_ctx = DownloadContext{
                     .resource = self,
                     .allocator = allocator,
                     .previous_etag = null,
                     .previous_last_modified = null,
+                    .error_detail = &error_detail,
                 };
-                const retry = try AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, retry_ctx, downloadAsync);
+                const retry = AsyncExecutor.executeWithContext(DownloadContext, DownloadOutcome, retry_ctx, downloadAsync) catch |err| {
+                    self.recordRemoteFileFailure("download retry", err, error_detail.get());
+                    return err;
+                };
                 if (!retry.downloaded) {
+                    var source_buf: [512]u8 = undefined;
+                    base.recordProvisionErrorDetail(
+                        "remote_file[{s}] conditional download returned not modified, but destination does not exist: {s}",
+                        .{ self.path, http.maskUrlPassword(self.source, &source_buf) },
+                    );
                     return error.HttpError;
                 }
                 outcome = retry;
@@ -266,6 +304,7 @@ pub const Resource = struct {
                 const actual_checksum = try http.calculateSha256(allocator, self.path);
                 defer allocator.free(actual_checksum);
                 if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
+                    self.recordChecksumMismatch(expected_checksum, actual_checksum);
                     return error.ChecksumMismatch;
                 }
             }
@@ -430,6 +469,7 @@ pub const Resource = struct {
             defer allocator.free(actual_checksum);
             if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
                 std.fs.cwd().deleteFile(temp_path) catch {};
+                self.recordChecksumMismatch(expected_checksum, actual_checksum);
                 return error.ChecksumMismatch;
             }
         }
@@ -546,7 +586,71 @@ pub const Resource = struct {
             else => return err,
         };
     }
+
+    fn copyRemoteFileFailure(self: Resource, detail: *RemoteFileErrorDetail, operation: []const u8, err: anyerror) void {
+        var buf: [1024]u8 = undefined;
+        const message = self.formatRemoteFileFailure(&buf, operation, err);
+        detail.set(message);
+    }
+
+    fn recordRemoteFileFailure(self: Resource, operation: []const u8, err: anyerror, detail: ?[]const u8) void {
+        if (detail) |message| {
+            base.recordProvisionErrorDetailSlice(message);
+            return;
+        }
+
+        var buf: [1024]u8 = undefined;
+        const message = self.formatRemoteFileFailure(&buf, operation, err);
+        base.recordProvisionErrorDetailSlice(message);
+    }
+
+    fn formatRemoteFileFailure(self: Resource, buf: []u8, operation: []const u8, err: anyerror) []const u8 {
+        if (base.getProvisionErrorDetail()) |detail| {
+            const n = @min(detail.len, buf.len);
+            @memcpy(buf[0..n], detail[0..n]);
+            return buf[0..n];
+        }
+
+        if (http.download.downloader.getLastDownloadError()) |detail| {
+            return std.fmt.bufPrint(
+                buf,
+                "remote_file[{s}] {s} failed: {s}",
+                .{ self.path, operation, detail },
+            ) catch fallbackRemoteFileFailure(buf, self.path, operation, err);
+        }
+
+        if (http.getLastError()) |detail| {
+            var detail_buf: [1024]u8 = undefined;
+            return std.fmt.bufPrint(
+                buf,
+                "remote_file[{s}] {s} failed: {s}: {s}",
+                .{ self.path, operation, @errorName(err), http.redactPassword(self.source, detail, &detail_buf) },
+            ) catch fallbackRemoteFileFailure(buf, self.path, operation, err);
+        }
+
+        return fallbackRemoteFileFailure(buf, self.path, operation, err);
+    }
+
+    fn recordChecksumMismatch(self: Resource, expected: []const u8, actual: []const u8) void {
+        base.recordProvisionErrorDetail(
+            "remote_file[{s}] checksum mismatch: expected SHA256 {s}, got {s}",
+            .{ self.path, expected, actual },
+        );
+    }
 };
+
+fn fallbackRemoteFileFailure(buf: []u8, path: []const u8, operation: []const u8, err: anyerror) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "remote_file[{s}] {s} failed: {s}",
+        .{ path, operation, @errorName(err) },
+    ) catch blk: {
+        const fallback = "remote_file failed (message truncated)";
+        const n = @min(fallback.len, buf.len);
+        @memcpy(buf[0..n], fallback[0..n]);
+        break :blk buf[0..n];
+    };
+}
 
 /// Ruby prelude for remote_file resource
 pub const ruby_prelude = @embedFile("remote_file_resource.rb");

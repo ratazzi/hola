@@ -35,22 +35,13 @@ const TlsClientAuth = struct {
 /// Fetch JSON content from a URL, using optional mTLS credentials.
 /// Returns the response body as an owned slice that the caller must free.
 fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: TlsClientAuth) ![]const u8 {
-    const uri = std.Uri.parse(url) catch |err| {
+    _ = std.Uri.parse(url) catch |err| {
         std.debug.print("Error: Invalid URL: {}\n", .{err});
         return error.FetchFailed;
     };
 
-    const display_url = if (uri.password != null) display_blk: {
-        const user_part = if (uri.user) |u| u.percent_encoded else "";
-        const host_part = if (uri.host) |h| h.percent_encoded else "";
-        break :display_blk std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
-            uri.scheme,
-            user_part,
-            host_part,
-            uri.path.percent_encoded,
-        }) catch return error.FetchFailed;
-    } else url;
-    defer if (uri.password != null) allocator.free(display_url);
+    var url_buf: [512]u8 = undefined;
+    const display_url = http.maskUrlPassword(url, &url_buf);
 
     std.debug.print("[fetch] Fetching JSON from {s}\n", .{display_url});
 
@@ -67,7 +58,8 @@ fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: Tls
     const response = client.get(url, null) catch |err| {
         std.debug.print("\nError: Failed to fetch JSON from URL: {}\n", .{err});
         if (http.getLastError()) |detail| {
-            std.debug.print("  {s}\n", .{detail});
+            var detail_buf: [1024]u8 = undefined;
+            std.debug.print("  {s}\n", .{http.redactPassword(url, detail, &detail_buf)});
         }
         std.debug.print("URL: {s}\n", .{display_url});
         return error.FetchFailed;
@@ -96,22 +88,13 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
     };
 
     const script_path = if (is_url) blk: {
-        const uri = std.Uri.parse(script_path_or_url) catch |err| {
+        _ = std.Uri.parse(script_path_or_url) catch |err| {
             std.debug.print("Error: Invalid URL: {}\n", .{err});
             return error.InvalidUrl;
         };
 
-        const display_url = if (uri.password != null) display_blk: {
-            const user_part = if (uri.user) |u| u.percent_encoded else "";
-            const host_part = if (uri.host) |h| h.percent_encoded else "";
-            break :display_blk try std.fmt.allocPrint(allocator, "{s}://{s}:***@{s}{s}", .{
-                uri.scheme,
-                user_part,
-                host_part,
-                uri.path.percent_encoded,
-            });
-        } else script_path_or_url;
-        defer if (uri.password != null) allocator.free(display_url);
+        var url_buf: [512]u8 = undefined;
+        const display_url = http.maskUrlPassword(script_path_or_url, &url_buf);
 
         std.debug.print("[fetch] Downloading provision script from {s}\n", .{display_url});
 
@@ -138,7 +121,8 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         const response = client.get(script_path_or_url, null) catch |err| {
             std.debug.print("\nError: Failed to download provision script: {}\n", .{err});
             if (http.getLastError()) |detail| {
-                std.debug.print("  {s}\n", .{detail});
+                var detail_buf: [1024]u8 = undefined;
+                std.debug.print("  {s}\n", .{http.redactPassword(script_path_or_url, detail, &detail_buf)});
             }
             std.debug.print("URL: {s}\n", .{display_url});
             std.debug.print("\nPossible reasons:\n", .{});
