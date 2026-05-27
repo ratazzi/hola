@@ -421,18 +421,54 @@ pub const Resource = struct {
     }
 
     /// Context for async clone operation
+    /// Carries a libgit2 failure reason from a background worker thread back to
+    /// the caller. Thread-local error buffers don't cross threads, mirroring
+    /// remote_file's RemoteFileErrorDetail.
+    const GitErrorDetail = struct {
+        buffer: [1024]u8 = undefined,
+        len: usize = 0,
+
+        fn set(self: *GitErrorDetail, detail: []const u8) void {
+            const n = @min(detail.len, self.buffer.len);
+            @memcpy(self.buffer[0..n], detail[0..n]);
+            self.len = n;
+        }
+
+        fn get(self: *const GitErrorDetail) ?[]const u8 {
+            if (self.len == 0) return null;
+            return self.buffer[0..self.len];
+        }
+    };
+
+    /// Capture libgit2's current error (git_error_last) into `detail`, prefixed
+    /// with the operation and repository, so the caller can surface the real
+    /// reason instead of a bare Zig error name. No-op when libgit2 recorded no
+    /// error (e.g. a non-libgit2 failure such as OOM). Safe to use from an
+    /// errdefer on a freshly spawned worker thread, where git_error_last starts
+    /// null and is only set by an actual libgit2 failure.
+    fn captureGitError(detail: *GitErrorDetail, operation: []const u8, repository: []const u8) void {
+        const err = c.git_error_last();
+        if (err == null or err.*.message == null) return;
+        const msg = std.mem.span(err.*.message);
+        var buf: [1024]u8 = undefined;
+        detail.set(std.fmt.bufPrint(&buf, "{s} of {s} failed: {s}", .{ operation, repository, msg }) catch msg);
+    }
+
     const CloneContext = struct {
         resource: Resource,
         allocator: std.mem.Allocator,
+        error_detail: *GitErrorDetail,
     };
 
     /// Async wrapper for clone operation (runs in background thread)
     fn cloneRepositoryAsync(ctx: CloneContext) !void {
-        return cloneRepositoryImpl(ctx.resource, ctx.allocator);
+        return cloneRepositoryImpl(ctx.resource, ctx.allocator, ctx.error_detail);
     }
 
     /// Actual clone implementation
-    fn cloneRepositoryImpl(self: Resource, allocator: std.mem.Allocator) !void {
+    fn cloneRepositoryImpl(self: Resource, allocator: std.mem.Allocator, error_detail: *GitErrorDetail) !void {
+        errdefer captureGitError(error_detail, "clone", self.repository);
+
         // Initialize libgit2 in this thread
         var git = try git_client.Client.init();
         defer git.deinit();
@@ -480,8 +516,7 @@ pub const Resource = struct {
         if (code != 0) {
             const err = c.git_error_last();
             if (err != null) {
-                const err_msg = std.mem.span(err.*.message);
-                logger.err("[git] clone failed for {s}: {s}", .{ self.repository, err_msg });
+                logger.err("[git] clone failed for {s}: {s}", .{ self.repository, std.mem.span(err.*.message) });
             } else {
                 logger.err("[git] clone failed for {s} (error code: {})", .{ self.repository, code });
             }
@@ -500,11 +535,16 @@ pub const Resource = struct {
 
     /// Clone repository with async execution (doesn't block spinner)
     fn cloneRepository(self: Resource, allocator: std.mem.Allocator) !void {
+        var error_detail = GitErrorDetail{};
         const ctx = CloneContext{
             .resource = self,
             .allocator = allocator,
+            .error_detail = &error_detail,
         };
-        return AsyncExecutor.executeWithContext(CloneContext, void, ctx, cloneRepositoryAsync);
+        AsyncExecutor.executeWithContext(CloneContext, void, ctx, cloneRepositoryAsync) catch |err| {
+            if (error_detail.get()) |msg| base.recordProvisionErrorDetailSlice(msg);
+            return err;
+        };
     }
 
     /// Context for async fetch and update operation
@@ -512,15 +552,18 @@ pub const Resource = struct {
         resource: Resource,
         allocator: std.mem.Allocator,
         repo: *c.git_repository,
+        error_detail: *GitErrorDetail,
     };
 
     /// Async wrapper for fetch operation (runs in background thread)
     fn fetchAndUpdateAsync(ctx: FetchContext) !bool {
-        return fetchAndUpdateImpl(ctx.resource, ctx.allocator, ctx.repo);
+        return fetchAndUpdateImpl(ctx.resource, ctx.allocator, ctx.repo, ctx.error_detail);
     }
 
     /// Actual fetch and update implementation
-    fn fetchAndUpdateImpl(self: Resource, allocator: std.mem.Allocator, repo: *c.git_repository) !bool {
+    fn fetchAndUpdateImpl(self: Resource, allocator: std.mem.Allocator, repo: *c.git_repository, error_detail: *GitErrorDetail) !bool {
+        errdefer captureGitError(error_detail, "fetch", self.repository);
+
         // Initialize libgit2 in this thread
         var git = try git_client.Client.init();
         defer git.deinit();
@@ -808,12 +851,17 @@ pub const Resource = struct {
             const repo_nonnull = repo orelse return error.OpenRepoFailed;
             defer c.git_repository_free(repo_nonnull);
 
+            var fetch_error_detail = GitErrorDetail{};
             const fetch_ctx = FetchContext{
                 .resource = self,
                 .allocator = allocator,
                 .repo = repo_nonnull,
+                .error_detail = &fetch_error_detail,
             };
-            was_updated = try AsyncExecutor.executeWithContext(FetchContext, bool, fetch_ctx, fetchAndUpdateAsync);
+            was_updated = AsyncExecutor.executeWithContext(FetchContext, bool, fetch_ctx, fetchAndUpdateAsync) catch |err| {
+                if (fetch_error_detail.get()) |msg| base.recordProvisionErrorDetailSlice(msg);
+                return err;
+            };
         }
 
         // Update submodules if enabled
