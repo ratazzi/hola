@@ -4,6 +4,7 @@ const config_mod = @import("../config.zig");
 const Task = @import("task.zig").Task;
 const downloader = @import("downloader.zig");
 const logger = @import("../../logger.zig");
+const utils = @import("../utils.zig");
 
 // Thread-local storage for current Manager (for use in remote_file resource)
 threadlocal var current_manager: ?*Manager = null;
@@ -271,12 +272,14 @@ fn processTask(mgr: *Manager, task_index: usize) void {
     ) catch |err| {
         const err_msg_owned = if (downloader.getLastDownloadError()) |detail|
             mgr.allocator.dupe(u8, detail) catch null
-        else
-            std.fmt.allocPrint(
+        else blk: {
+            var url_buf: [512]u8 = undefined;
+            break :blk std.fmt.allocPrint(
                 mgr.allocator,
                 "Download failed: {s} - {s}",
-                .{ @errorName(err), task.url },
+                .{ @errorName(err), utils.maskUrlPassword(task.url, &url_buf) },
             ) catch null;
+        };
         defer if (err_msg_owned) |msg| mgr.allocator.free(msg);
         const err_msg = err_msg_owned orelse "Unknown error";
 

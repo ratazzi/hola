@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
 const git_client = @import("../git.zig");
+const http = @import("../http.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 
 const c = @cImport({
@@ -264,7 +265,8 @@ pub const Resource = struct {
         if (ctx) |c_ctx| {
             const retry_count = c_ctx.retries.fetchAdd(1, .monotonic);
             if (retry_count >= 3) {
-                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{url_str});
+                var url_buf: [512]u8 = undefined;
+                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{http.maskUrlPassword(url_str, &url_buf)});
                 return c.GIT_EAUTH;
             }
         }
@@ -450,8 +452,17 @@ pub const Resource = struct {
         const err = c.git_error_last();
         if (err == null or err.*.message == null) return;
         const msg = std.mem.span(err.*.message);
+
+        // Redact credentials before this detail reaches the user / agent
+        // callback: the repository URL may be `https://user:token@host/repo`,
+        // and libgit2's message can echo the same credentialed URL back.
+        var repo_buf: [1024]u8 = undefined;
+        const safe_repo = http.maskUrlPassword(repository, &repo_buf);
+        var msg_buf: [1024]u8 = undefined;
+        const safe_msg = http.redactPassword(repository, msg, &msg_buf);
+
         var buf: [1024]u8 = undefined;
-        detail.set(std.fmt.bufPrint(&buf, "{s} of {s} failed: {s}", .{ operation, repository, msg }) catch msg);
+        detail.set(std.fmt.bufPrint(&buf, "{s} of {s} failed: {s}", .{ operation, safe_repo, safe_msg }) catch safe_msg);
     }
 
     const CloneContext = struct {
@@ -514,11 +525,14 @@ pub const Resource = struct {
         restoreEffectiveUser(user_ctx);
 
         if (code != 0) {
+            var repo_buf: [512]u8 = undefined;
+            const safe_repo = http.maskUrlPassword(self.repository, &repo_buf);
             const err = c.git_error_last();
             if (err != null) {
-                logger.err("[git] clone failed for {s}: {s}", .{ self.repository, std.mem.span(err.*.message) });
+                var msg_buf: [1024]u8 = undefined;
+                logger.err("[git] clone failed for {s}: {s}", .{ safe_repo, http.redactPassword(self.repository, std.mem.span(err.*.message), &msg_buf) });
             } else {
-                logger.err("[git] clone failed for {s} (error code: {})", .{ self.repository, code });
+                logger.err("[git] clone failed for {s} (error code: {})", .{ safe_repo, code });
             }
             return error.GitCloneFailed;
         }
@@ -595,11 +609,14 @@ pub const Resource = struct {
                     if (set_code != 0) {
                         const err = c.git_error_last();
                         if (err != null) {
-                            logger.err("[git] failed to update remote URL: {s}", .{std.mem.span(err.*.message)});
+                            var msg_buf: [1024]u8 = undefined;
+                            logger.err("[git] failed to update remote URL: {s}", .{http.redactPassword(self.repository, std.mem.span(err.*.message), &msg_buf)});
                         }
                         return error.RemoteSetUrlFailed;
                     }
-                    logger.info("[git] updated remote '{s}' URL: {s} -> {s}", .{ self.remote, current_url, self.repository });
+                    var old_url_buf: [512]u8 = undefined;
+                    var new_url_buf: [512]u8 = undefined;
+                    logger.info("[git] updated remote '{s}' URL: {s} -> {s}", .{ self.remote, http.maskUrlPassword(current_url, &old_url_buf), http.maskUrlPassword(self.repository, &new_url_buf) });
                     // Re-lookup remote to pick up the new URL
                     c.git_remote_free(r);
                     remote = null;

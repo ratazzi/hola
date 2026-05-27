@@ -236,10 +236,10 @@ pub fn downloadFileWithClient(
     // Note: Non-HTTP protocols (SFTP, S3) return status=0 on success
     const is_http = stream_result.status > 0;
     if (is_http and (stream_result.status < 200 or stream_result.status >= 300)) {
-        // Log error with status code
-        logger.err("Download failed with HTTP status {d} for URL: {s}", .{ stream_result.status, url });
         var url_buf: [512]u8 = undefined;
         const display_url = utils.maskUrlPassword(url, &url_buf);
+        // Log error with status code
+        logger.err("Download failed with HTTP status {d} for URL: {s}", .{ stream_result.status, display_url });
         recordLastDownloadError("download {s} returned HTTP status {d}", .{ display_url, stream_result.status });
         // Error or unexpected status code
         // Temp file will be cleaned up by defer automatically

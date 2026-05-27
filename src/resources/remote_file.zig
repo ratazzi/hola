@@ -278,9 +278,10 @@ pub const Resource = struct {
                     return err;
                 };
                 if (!retry.downloaded) {
+                    var source_buf: [512]u8 = undefined;
                     base.recordProvisionErrorDetail(
                         "remote_file[{s}] conditional download returned not modified, but destination does not exist: {s}",
-                        .{ self.path, self.source },
+                        .{ self.path, http.maskUrlPassword(self.source, &source_buf) },
                     );
                     return error.HttpError;
                 }
