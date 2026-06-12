@@ -411,6 +411,18 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     defer allocator.free(url_z);
     _ = curl.curl_easy_setopt(handle, .CURLOPT_URL, url_z.ptr);
 
+    // Bound the connection/handshake phase so a stalled connect can't hang forever.
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_CONNECTTIMEOUT, @as(c_long, 15));
+
+    // TCP keepalive: without it, a silently dead connection (NAT timeout,
+    // network change, peer power loss) leaves curl_easy_perform blocked on
+    // recv forever and the reconnect loop never triggers. With these probes
+    // the kernel detects the dead peer within a few minutes and perform
+    // returns an error, triggering reconnect.
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPALIVE, @as(c_long, 1));
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPIDLE, @as(c_long, 60));
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPINTVL, @as(c_long, 15));
+
     // mTLS client certificate
     if (tls_auth.cert) |cert| {
         const cert_z = try allocator.dupeZ(u8, cert);
