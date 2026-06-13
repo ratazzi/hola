@@ -57,6 +57,8 @@ fn originMatches(url_a: []const u8, url_b: []const u8) bool {
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const MAX_BACKOFF_MS: u64 = 30_000;
 const DEFAULT_WATCH_INTERVAL: u32 = 10;
+const AGENT_CALLBACK_TIMEOUT_S: u32 = 60;
+const AGENT_POLL_TIMEOUT_S: u32 = 60;
 
 // -- Shared task handling --
 
@@ -318,6 +320,7 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
     // Use mTLS if callback host matches endpoint host
     const use_tls_auth = originMatches(callback_url, endpoint);
     const cfg = http.Config{
+        .max_timeout_s = AGENT_CALLBACK_TIMEOUT_S,
         .client_cert = if (use_tls_auth) tls_auth.cert else null,
         .client_key = if (use_tls_auth) tls_auth.key else null,
         .retry = .{ .max_attempts = 3, .initial_backoff_ms = 1000 },
@@ -507,6 +510,7 @@ fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: [
 
 fn pollOnce(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
     const cfg = http.Config{
+        .max_timeout_s = AGENT_POLL_TIMEOUT_S,
         .client_cert = tls_auth.cert,
         .client_key = tls_auth.key,
     };
