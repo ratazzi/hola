@@ -11,10 +11,10 @@ pub const Config = struct {
     timeout_ms: u32 = 30000,
 
     /// Maximum total timeout in seconds for the entire request
-    /// Set to 0 to disable total timeout (default, relies on low_speed_limit protection)
-    /// Primary timeout mechanism is low_speed_limit + low_speed_time
-    /// Only set this if you need a hard deadline regardless of download speed
-    max_timeout_s: u32 = 0,
+    /// Set to 0 to disable total timeout.
+    /// This is a hard deadline regardless of transfer speed; low_speed_limit
+    /// still handles stalled transfers earlier.
+    max_timeout_s: u32 = 1800,
 
     /// Low speed limit in bytes/second (abort if speed drops below this)
     /// Set to 0 to disable low speed detection
