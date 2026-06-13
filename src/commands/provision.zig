@@ -32,6 +32,8 @@ const TlsClientAuth = struct {
     key: ?[]const u8 = null,
 };
 
+const PROVISION_FETCH_TIMEOUT_S: u32 = 300;
+
 /// Fetch JSON content from a URL, using optional mTLS credentials.
 /// Returns the response body as an owned slice that the caller must free.
 fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: TlsClientAuth) ![]const u8 {
@@ -46,6 +48,7 @@ fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: Tls
     std.debug.print("[fetch] Fetching JSON from {s}\n", .{display_url});
 
     const cfg = http.Config{
+        .max_timeout_s = PROVISION_FETCH_TIMEOUT_S,
         .client_cert = tls_auth.cert,
         .client_key = tls_auth.key,
     };
@@ -109,6 +112,7 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         temp_file_path = temp_file;
 
         const cfg = http.Config{
+            .max_timeout_s = PROVISION_FETCH_TIMEOUT_S,
             .client_cert = tls_auth.cert,
             .client_key = tls_auth.key,
         };
