@@ -531,8 +531,8 @@ fn getEc2InfoIMDSv2(allocator: std.mem.Allocator) !?Ec2Info {
         .timeout_ms = 2000,
     };
 
-    const token_response = try client.request(token_request);
-    defer allocator.free(token_response.body);
+    var token_response = try client.request(token_request);
+    defer token_response.deinit();
 
     logger.debug("EC2: Token response status={d}, body_len={d}", .{ token_response.status, token_response.body.len });
 
@@ -563,8 +563,8 @@ fn getEc2InfoIMDSv2(allocator: std.mem.Allocator) !?Ec2Info {
         .timeout_ms = 2000,
     };
 
-    const doc_response = try client.request(doc_request);
-    defer allocator.free(doc_response.body);
+    var doc_response = try client.request(doc_request);
+    defer doc_response.deinit();
 
     logger.debug("EC2: Identity document response status={d}, body_len={d}", .{ doc_response.status, doc_response.body.len });
 
@@ -607,8 +607,8 @@ fn getEc2InfoIMDSv1(allocator: std.mem.Allocator) !?Ec2Info {
         .timeout_ms = 2000,
     };
 
-    const doc_response = try client.request(doc_request);
-    defer allocator.free(doc_response.body);
+    var doc_response = try client.request(doc_request);
+    defer doc_response.deinit();
 
     if (doc_response.status != 200) {
         return error.DocumentRequestFailed;
