@@ -818,14 +818,20 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     // invocation on this thread can't leak into this run.
     base.clearProvisionErrorDetail();
 
+    // Initialize the mruby interpreter before the runner so it outlives the
+    // resources. Resource teardown (CommonProps.deinit) calls
+    // mrb_gc_unregister on the mrb state for only_if/not_if guard blocks, so
+    // the state must still be alive when runner.deinit() runs. Defers execute
+    // LIFO: registering mrb.deinit() first makes runner.deinit() (and resource
+    // teardown) run before the mruby state is closed.
+    var mrb = try mruby.State.init();
+    defer mrb.deinit();
+
     var runner = ProvisionRunner.init(allocator);
     defer runner.deinit();
 
     current_runner = &runner;
     defer current_runner = null;
-
-    var mrb = try mruby.State.init();
-    defer mrb.deinit();
 
     // Register Zig functions in mruby
     const mrb_ptr = mrb.mrb orelse return error.MRubyNotInitialized;
