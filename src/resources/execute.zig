@@ -5,6 +5,15 @@ const ansi = @import("../ansi_constants.zig");
 const logger = @import("../logger.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 
+const DEFAULT_TIMEOUT_S: u32 = 3600;
+const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+const READ_BUFFER_SIZE: usize = 16 * 1024;
+const POLL_INTERVAL_MS: i64 = 50;
+const TERM_GRACE_MS: i64 = 2000;
+const PIPE_CLOSE_GRACE_MS: i64 = 5000;
+const POST_EXIT_PIPE_GRACE_MS: i64 = 1000;
+const REAP_GRACE_MS: i64 = 2000;
+
 /// Execute resource data structure
 pub const Resource = struct {
     // Resource-specific properties
@@ -16,6 +25,7 @@ pub const Resource = struct {
     environment: ?[]const u8, // Environment variables (future)
     live_stream: bool, // Whether to output command result to stdout
     creates: ?[]const u8, // Path to a file - skip execution if it exists
+    timeout_s: u32, // Hard timeout in seconds; 0 disables
     action: Action,
 
     // Common properties (guards, notifications, etc.)
@@ -112,6 +122,7 @@ pub const Resource = struct {
         term: std.process.Child.Term,
         stdout: []u8,
         stderr: []u8,
+        timed_out: bool,
         allocator: std.mem.Allocator,
 
         pub fn deinit(self: *const ExecuteResult) void {
@@ -126,7 +137,292 @@ pub const Resource = struct {
         user: ?[]const u8,
         group: ?[]const u8,
         environment: ?[]const u8,
+        timeout_s: u32,
     };
+
+    fn termFromStatus(status: u32) std.process.Child.Term {
+        return if (std.posix.W.IFEXITED(status))
+            .{ .Exited = std.posix.W.EXITSTATUS(status) }
+        else if (std.posix.W.IFSIGNALED(status))
+            .{ .Signal = std.posix.W.TERMSIG(status) }
+        else if (std.posix.W.IFSTOPPED(status))
+            .{ .Stopped = std.posix.W.STOPSIG(status) }
+        else
+            .{ .Unknown = status };
+    }
+
+    fn pollChildTerm(pid: std.posix.pid_t) ?std.process.Child.Term {
+        const result = std.posix.waitpid(pid, std.posix.W.NOHANG);
+        if (result.pid == 0) return null;
+        return termFromStatus(result.status);
+    }
+
+    fn closePipe(pipe: *?std.fs.File) void {
+        if (pipe.*) |*file| {
+            file.close();
+            pipe.* = null;
+        }
+    }
+
+    fn closeChildPipes(child: *std.process.Child) void {
+        closePipe(&child.stdin);
+        closePipe(&child.stdout);
+        closePipe(&child.stderr);
+    }
+
+    fn signalProcessGroup(pid: std.posix.pid_t, sig: u8) void {
+        std.posix.kill(-pid, sig) catch |err| {
+            if (err != error.ProcessNotFound) {
+                logger.warn("[execute] failed to signal process group {d}: {}", .{ pid, err });
+            }
+        };
+    }
+
+    /// Best-effort reap after SIGKILL so we don't leak a zombie. Polls for a
+    /// short grace period but never blocks indefinitely: a process stuck in
+    /// uninterruptible sleep must not hang the caller.
+    fn reapAfterKill(pid: std.posix.pid_t) void {
+        const deadline = std.time.milliTimestamp() + REAP_GRACE_MS;
+        while (std.time.milliTimestamp() < deadline) {
+            if (pollChildTerm(pid) != null) return;
+            std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+        }
+        logger.warn("[execute] child {d} not reaped after SIGKILL; possible zombie", .{pid});
+    }
+
+    /// Cleanup helper for error paths: SIGKILL the group and reap, but only if
+    /// the child has not already been reaped. Reaping an already-reaped pid
+    /// would hit ECHILD, which std.posix.waitpid treats as unreachable (panic).
+    fn killAndReap(pid: std.posix.pid_t, child_running: *bool) void {
+        if (!child_running.*) return;
+        signalProcessGroup(pid, std.posix.SIG.KILL);
+        reapAfterKill(pid);
+        child_running.* = false;
+    }
+
+    fn appendOutputBounded(
+        allocator: std.mem.Allocator,
+        output: *std.ArrayList(u8),
+        bytes: []const u8,
+    ) !void {
+        if (output.items.len + bytes.len > MAX_OUTPUT_BYTES) return error.CommandOutputTooLarge;
+        try output.appendSlice(allocator, bytes);
+    }
+
+    fn drainPipe(
+        allocator: std.mem.Allocator,
+        file: std.fs.File,
+        output: *std.ArrayList(u8),
+    ) !bool {
+        var buf: [READ_BUFFER_SIZE]u8 = undefined;
+        const n = try file.read(&buf);
+        if (n == 0) return false;
+        try appendOutputBounded(allocator, output, buf[0..n]);
+        return true;
+    }
+
+    fn drainReadyPipe(
+        allocator: std.mem.Allocator,
+        pipe: *?std.fs.File,
+        output: *std.ArrayList(u8),
+        is_open: *bool,
+    ) !void {
+        if (!is_open.*) return;
+        const file = pipe.* orelse {
+            is_open.* = false;
+            return;
+        };
+
+        const still_open = try drainPipe(allocator, file, output);
+        if (!still_open) {
+            closePipe(pipe);
+            is_open.* = false;
+        }
+    }
+
+    fn buildPollTimeoutMs(
+        now: i64,
+        deadline_ms: ?i64,
+        kill_deadline_ms: ?i64,
+        close_deadline_ms: ?i64,
+        post_exit_pipe_deadline_ms: ?i64,
+    ) i32 {
+        var timeout = POLL_INTERVAL_MS;
+        if (deadline_ms) |deadline| timeout = @min(timeout, deadline - now);
+        if (kill_deadline_ms) |deadline| timeout = @min(timeout, deadline - now);
+        if (close_deadline_ms) |deadline| timeout = @min(timeout, deadline - now);
+        if (post_exit_pipe_deadline_ms) |deadline| timeout = @min(timeout, deadline - now);
+        return @intCast(@max(timeout, 0));
+    }
+
+    fn collectOutputAndWait(
+        child: *std.process.Child,
+        allocator: std.mem.Allocator,
+        timeout_s: u32,
+    ) !ExecuteResult {
+        var stdout = std.ArrayList(u8).empty;
+        defer stdout.deinit(allocator);
+        var stderr = std.ArrayList(u8).empty;
+        defer stderr.deinit(allocator);
+
+        try child.spawn();
+        // On a pre-exec failure (bad cwd, setpgid, etc.) the forked child
+        // reports the error and _exit()s. Close our pipe ends and reap it so
+        // the error path doesn't leak fds or leave a zombie.
+        child.waitForSpawn() catch |err| {
+            closeChildPipes(child);
+            reapAfterKill(child.id);
+            return err;
+        };
+
+        var stdout_open = child.stdout != null;
+        var stderr_open = child.stderr != null;
+        var child_running = true;
+        var term: ?std.process.Child.Term = null;
+        var timed_out = false;
+        var sent_kill = false;
+        var post_exit_pipe_deadline_ms: ?i64 = null;
+
+        const pid = child.id;
+        const deadline_ms: ?i64 = if (timeout_s == 0)
+            null
+        else
+            std.time.milliTimestamp() + @as(i64, timeout_s) * std.time.ms_per_s;
+        var kill_deadline_ms: ?i64 = null;
+        var close_deadline_ms: ?i64 = null;
+
+        while (child_running or stdout_open or stderr_open) {
+            const now = std.time.milliTimestamp();
+
+            // Reap the child FIRST so the timeout decision below sees accurate
+            // liveness in this same iteration. Otherwise a command that exits
+            // right as the deadline elapses could be flagged as timed out (and
+            // have its process group signaled) before we notice it already left.
+            if (child_running) {
+                if (pollChildTerm(pid)) |child_term| {
+                    term = child_term;
+                    child_running = false;
+                    if (stdout_open or stderr_open) {
+                        post_exit_pipe_deadline_ms = now + POST_EXIT_PIPE_GRACE_MS;
+                    }
+                }
+            }
+
+            // Drive the timeout/kill state machine only while the child is alive.
+            if (child_running and !timed_out) {
+                if (deadline_ms) |deadline| {
+                    if (now >= deadline) {
+                        timed_out = true;
+                        kill_deadline_ms = now + TERM_GRACE_MS;
+                        close_deadline_ms = now + PIPE_CLOSE_GRACE_MS;
+                        signalProcessGroup(pid, std.posix.SIG.TERM);
+                    }
+                }
+            } else if (child_running and !sent_kill) {
+                if (kill_deadline_ms) |deadline| {
+                    if (now >= deadline) {
+                        sent_kill = true;
+                        kill_deadline_ms = null; // done; keep it out of the poll-timeout calc
+                        signalProcessGroup(pid, std.posix.SIG.KILL);
+                    }
+                }
+            }
+
+            if (timed_out) {
+                if (close_deadline_ms) |deadline| {
+                    if (now >= deadline) {
+                        closeChildPipes(child);
+                        stdout_open = false;
+                        stderr_open = false;
+                        if (child_running) {
+                            // SIGKILL was already sent; reap to avoid a zombie.
+                            reapAfterKill(pid);
+                            child_running = false;
+                        }
+                        break;
+                    }
+                }
+            } else if (!child_running) {
+                // Child exited but a grandchild may still hold the pipes open.
+                // Drain briefly, then give up so we never block forever.
+                if (post_exit_pipe_deadline_ms) |deadline| {
+                    if (now >= deadline) {
+                        closeChildPipes(child);
+                        stdout_open = false;
+                        stderr_open = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!stdout_open and !stderr_open) {
+                if (child_running) std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+                continue;
+            }
+
+            const events: i16 = std.posix.POLL.IN;
+            var fds = [_]std.posix.pollfd{
+                .{
+                    .fd = if (stdout_open) child.stdout.?.handle else -1,
+                    .events = events,
+                    .revents = 0,
+                },
+                .{
+                    .fd = if (stderr_open) child.stderr.?.handle else -1,
+                    .events = events,
+                    .revents = 0,
+                },
+            };
+
+            // Once timed out, the main deadline is in the past; the close_deadline
+            // drives the poll cadence from here, so don't let the expired main
+            // deadline pin the poll timeout at 0 and spin the CPU.
+            const poll_timeout_ms = buildPollTimeoutMs(now, if (timed_out) null else deadline_ms, kill_deadline_ms, close_deadline_ms, post_exit_pipe_deadline_ms);
+            const ready = std.posix.poll(&fds, poll_timeout_ms) catch |err| {
+                killAndReap(pid, &child_running);
+                closeChildPipes(child);
+                return err;
+            };
+            if (ready == 0) continue;
+
+            if (stdout_open and fds[0].revents != 0) {
+                drainReadyPipe(allocator, &child.stdout, &stdout, &stdout_open) catch |err| {
+                    killAndReap(pid, &child_running);
+                    closeChildPipes(child);
+                    return err;
+                };
+            }
+            if (stderr_open and fds[1].revents != 0) {
+                drainReadyPipe(allocator, &child.stderr, &stderr, &stderr_open) catch |err| {
+                    killAndReap(pid, &child_running);
+                    closeChildPipes(child);
+                    return err;
+                };
+            }
+        }
+
+        // Safety net: every loop-exit path above already reaps the child, so
+        // child_running should be false here. Reap defensively without ever
+        // blocking indefinitely in case a future change leaves it running.
+        if (child_running) {
+            if (pollChildTerm(pid)) |child_term| {
+                term = child_term;
+            } else {
+                reapAfterKill(pid);
+            }
+        }
+
+        closeChildPipes(child);
+
+        const result_allocator = std.heap.page_allocator;
+        return ExecuteResult{
+            .term = term orelse .{ .Unknown = 0 },
+            .stdout = try result_allocator.dupe(u8, stdout.items),
+            .stderr = try result_allocator.dupe(u8, stderr.items),
+            .timed_out = timed_out,
+            .allocator = result_allocator,
+        };
+    }
 
     fn executeCommand(ctx: ExecuteContext) !ExecuteResult {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -220,24 +516,12 @@ pub const Resource = struct {
         }
 
         // Capture output
+        child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
+        child.pgid = 0;
 
-        try child.spawn();
-
-        // Blocking wait in worker thread (main thread polls our status)
-        const stdout = try child.stdout.?.readToEndAlloc(temp_allocator, std.math.maxInt(usize));
-        const stderr = try child.stderr.?.readToEndAlloc(temp_allocator, std.math.maxInt(usize));
-        const term = try child.wait();
-
-        // Allocate result using page allocator (will be freed by caller)
-        const result_allocator = std.heap.page_allocator;
-        return ExecuteResult{
-            .term = term,
-            .stdout = try result_allocator.dupe(u8, stdout),
-            .stderr = try result_allocator.dupe(u8, stderr),
-            .allocator = result_allocator,
-        };
+        return try collectOutputAndWait(&child, temp_allocator, ctx.timeout_s);
     }
 
     fn applyRun(self: Resource) !?[]const u8 {
@@ -252,6 +536,7 @@ pub const Resource = struct {
             .user = self.user,
             .group = self.group,
             .environment = self.environment,
+            .timeout_s = self.timeout_s,
         };
 
         const result = try AsyncExecutor.executeWithContext(
@@ -277,7 +562,10 @@ pub const Resource = struct {
             break :blk if (code == 0) logger.Level.info else logger.Level.err;
         } else logger.Level.info;
 
-        const exit_msg = if (exit_code) |code| blk: {
+        const exit_msg = if (result.timed_out) blk: {
+            const msg = try std.fmt.allocPrint(allocator, " (timeout: {d}s)", .{self.timeout_s});
+            break :blk msg;
+        } else if (exit_code) |code| blk: {
             const msg = try std.fmt.allocPrint(allocator, " (exit: {d})", .{code});
             break :blk msg;
         } else try allocator.dupe(u8, "");
@@ -310,6 +598,11 @@ pub const Resource = struct {
                 showCommandOutput(stderr);
                 std.debug.print("{s}", .{ansi.ANSI.RESET});
             }
+        }
+
+        if (result.timed_out) {
+            logger.err("[execute] command timed out after {d}s", .{self.timeout_s});
+            return error.CommandTimedOut;
         }
 
         // Check exit status
@@ -349,7 +642,7 @@ pub const Resource = struct {
 pub const ruby_prelude = @embedFile("execute_resource.rb");
 
 /// Zig callback: called from Ruby to add an execute resource
-/// Format: add_execute(name, command, cwd, user, group, environment_array, live_stream, creates, action, only_if_block, not_if_block, ignore_failure, notifications_array, subscriptions_array)
+/// Format: add_execute(name, command, cwd, user, group, environment_array, live_stream, creates, action, timeout_s, only_if_block, not_if_block, ignore_failure, notifications_array, subscriptions_array)
 pub fn zigAddResource(
     mrb: *mruby.mrb_state,
     self: mruby.mrb_value,
@@ -367,14 +660,15 @@ pub fn zigAddResource(
     var live_stream_val: mruby.mrb_value = undefined;
     var creates_val: mruby.mrb_value = undefined;
     var action_val: mruby.mrb_value = undefined;
+    var timeout_val: mruby.mrb_int = DEFAULT_TIMEOUT_S;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Get 5 strings + 1 array + 1 bool + 2 strings + 3 optional (2 blocks + 1 bool + 2 arrays)
-    _ = mruby.mrb_get_args(mrb, "SSSSSAoSS|oooAA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &environment_val, &live_stream_val, &creates_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // Get 5 strings + 1 array + 1 bool + 2 strings + timeout + common optional args.
+    _ = mruby.mrb_get_args(mrb, "SSSSSAoSSi|oooAA", &name_val, &command_val, &cwd_val, &user_val, &group_val, &environment_val, &live_stream_val, &creates_val, &action_val, &timeout_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     const name_cstr = mruby.mrb_str_to_cstr(mrb, name_val);
     const command_cstr = mruby.mrb_str_to_cstr(mrb, command_val);
@@ -418,6 +712,10 @@ pub fn zigAddResource(
         .nothing
     else
         .run;
+    const timeout_s: u32 = if (timeout_val <= 0)
+        0
+    else
+        @intCast(@min(timeout_val, @as(mruby.mrb_int, std.math.maxInt(u32))));
 
     // Parse environment array [[key, value], ...]
     var environment: ?[]const u8 = null;
@@ -466,6 +764,7 @@ pub fn zigAddResource(
         .environment = environment,
         .live_stream = live_stream,
         .creates = creates,
+        .timeout_s = timeout_s,
         .action = action,
         .common = common,
     }) catch return mruby.mrb_nil_value();

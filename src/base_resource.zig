@@ -3,6 +3,14 @@ const mruby = @import("mruby.zig");
 pub const notification = @import("notification.zig");
 const builtin = @import("builtin");
 
+// Guards (only_if/not_if) run arbitrary shell commands; a stuck one (e.g.
+// `only_if "sleep 99999"`) must not hang provisioning forever. Bound them with
+// a hard timeout that escalates SIGTERM -> SIGKILL on the process group.
+const GUARD_TIMEOUT_S: u32 = 300;
+const GUARD_POLL_INTERVAL_MS: i64 = 50;
+const GUARD_TERM_GRACE_MS: i64 = 2000;
+const GUARD_REAP_GRACE_MS: i64 = 2000;
+
 // --- Provision error detail context ----------------------------------------
 // Whenever a resource can provide more context than the raw Zig error name,
 // capture that friendly summary into a thread-local buffer. The top-level
@@ -192,8 +200,10 @@ pub const CommonProps = struct {
         const temp_allocator = arena.allocator();
 
         var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", command }, temp_allocator);
+        child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
+        child.pgid = 0; // own process group, so a timeout can signal the whole tree
 
         // Set user and/or group if specified (same logic as execute resource)
         if (user != null or group != null) {
@@ -240,12 +250,84 @@ pub const CommonProps = struct {
             }
         }
 
-        const term = try child.spawnAndWait();
+        try child.spawn();
+        // A pre-exec failure makes the forked child _exit(); reap it so the
+        // error path doesn't leave a zombie. stdio is .Ignore, so there are no
+        // parent-held pipes to close.
+        child.waitForSpawn() catch |err| {
+            reapGuardChild(child.id);
+            return err;
+        };
+
+        const term = waitGuardWithTimeout(child.id);
 
         return switch (term) {
             .Exited => |code| code == 0,
-            else => false,
+            else => false, // signalled / timed out / unknown => treat as non-zero
         };
+    }
+
+    fn termFromStatus(status: u32) std.process.Child.Term {
+        return if (std.posix.W.IFEXITED(status))
+            .{ .Exited = std.posix.W.EXITSTATUS(status) }
+        else if (std.posix.W.IFSIGNALED(status))
+            .{ .Signal = std.posix.W.TERMSIG(status) }
+        else if (std.posix.W.IFSTOPPED(status))
+            .{ .Stopped = std.posix.W.STOPSIG(status) }
+        else
+            .{ .Unknown = status };
+    }
+
+    /// Best-effort non-blocking reap for an already-dead child.
+    fn reapGuardChild(pid: std.posix.pid_t) void {
+        const deadline = std.time.milliTimestamp() + GUARD_REAP_GRACE_MS;
+        while (std.time.milliTimestamp() < deadline) {
+            const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
+            if (res.pid != 0) return;
+            std.Thread.sleep(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms);
+        }
+    }
+
+    /// Wait for a guard child with a hard timeout. Guards ignore their stdio so
+    /// there are no pipes to drain: poll for exit, and if the deadline passes
+    /// escalate SIGTERM -> SIGKILL on the process group, then reap. Never blocks
+    /// indefinitely — if the child is unresponsive even to SIGKILL we abandon it.
+    fn waitGuardWithTimeout(pid: std.posix.pid_t) std.process.Child.Term {
+        const logger = @import("logger.zig");
+        const deadline = std.time.milliTimestamp() + @as(i64, GUARD_TIMEOUT_S) * std.time.ms_per_s;
+        var timed_out = false;
+        var kill_deadline_ms: ?i64 = null;
+        var give_up_deadline_ms: ?i64 = null;
+
+        while (true) {
+            const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
+            if (res.pid != 0) return termFromStatus(res.status);
+
+            const now = std.time.milliTimestamp();
+            if (!timed_out) {
+                if (now >= deadline) {
+                    timed_out = true;
+                    logger.warn("guard: command timed out after {d}s; terminating", .{GUARD_TIMEOUT_S});
+                    std.posix.kill(-pid, std.posix.SIG.TERM) catch {};
+                    kill_deadline_ms = now + GUARD_TERM_GRACE_MS;
+                    give_up_deadline_ms = now + GUARD_TERM_GRACE_MS + GUARD_REAP_GRACE_MS;
+                }
+            } else {
+                if (kill_deadline_ms) |kd| {
+                    if (now >= kd) {
+                        kill_deadline_ms = null;
+                        std.posix.kill(-pid, std.posix.SIG.KILL) catch {};
+                    }
+                }
+                if (give_up_deadline_ms) |gd| {
+                    if (now >= gd) {
+                        logger.warn("guard: child {d} unresponsive after SIGKILL; abandoning", .{pid});
+                        return .{ .Unknown = 0 };
+                    }
+                }
+            }
+            std.Thread.sleep(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms);
+        }
     }
 
     /// Register blocks with GC to prevent collection

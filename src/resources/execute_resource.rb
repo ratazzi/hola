@@ -12,6 +12,7 @@ class ExecuteResource
     @live_stream = false  # Default: don't output to stdout
     @creates = ""  # Path to file - skip execution if it exists
     @action = "run"
+    @timeout = 3600  # Seconds; 0 disables the hard timeout
     @only_if_proc = nil
     @not_if_proc = nil
     @ignore_failure = false
@@ -30,7 +31,7 @@ class ExecuteResource
     # Convert environment hash to array of [key, value] pairs
     environment_arg = @environment.map { |k, v| [k.to_s, v.to_s] }
 
-    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, environment_arg, @live_stream, @creates, @action, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    ZigBackend.add_execute(@name, @command, @cwd, @user, @group, environment_arg, @live_stream, @creates, @action, @timeout, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
   end
 
   def command(value)

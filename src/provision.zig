@@ -726,7 +726,7 @@ const ResourceBinding = struct {
 fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass) void {
     const bindings = [_]ResourceBinding{
         .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
-        .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5) },
+        .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(12) | mruby.MRB_ARGS_OPT(15) },
         .{ .name = "add_template", .handler = zig_add_template_resource, .args_spec = mruby.MRB_ARGS_REQ(7) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_macos_dock", .handler = zig_add_macos_dock_resource, .args_spec = mruby.MRB_ARGS_REQ(1) | mruby.MRB_ARGS_OPT(10), .platform = .macos },
