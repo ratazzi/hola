@@ -56,6 +56,16 @@ fn originMatches(url_a: []const u8, url_b: []const u8) bool {
 
 const INITIAL_BACKOFF_MS: u64 = 1000;
 const MAX_BACKOFF_MS: u64 = 30_000;
+/// Application-level heartbeat: send "ping" this often; the hub's Durable
+/// Object auto-responds "pong" (setWebSocketAutoResponse), proving the full
+/// agent -> edge -> DO path is alive, not just the TCP hop to the proxy.
+const WS_PING_INTERVAL_MS: i64 = 30_000;
+/// If nothing (pong, task, control frame) arrives for this long, the stream
+/// is considered dead and we reconnect.
+const WS_IDLE_TIMEOUT_MS: i64 = 90_000;
+const WS_POLL_TIMEOUT_MS: i32 = 1_000;
+const WS_RECV_CHUNK_SIZE: usize = 4096;
+const WS_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_WATCH_INTERVAL: u32 = 10;
 const AGENT_CALLBACK_TIMEOUT_S: u32 = 60;
 const AGENT_POLL_TIMEOUT_S: u32 = 60;
@@ -385,26 +395,6 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
     }
 }
 
-const WsContext = struct {
-    allocator: std.mem.Allocator,
-    default_callback: ?[]const u8,
-    endpoint: []const u8,
-    tls_auth: TlsClientAuth,
-    first_frame: bool = true,
-};
-
-fn wsWriteCallback(ptr: [*]const u8, size: usize, nmemb: usize, userdata: *anyopaque) callconv(.c) usize {
-    const ctx: *WsContext = @ptrCast(@alignCast(userdata));
-    const total = size * nmemb;
-    if (total == 0) return 0;
-    if (ctx.first_frame) {
-        std.debug.print("[agent] WebSocket connected, receiving frames\n", .{});
-        ctx.first_frame = false;
-    }
-    handleWsMessage(ctx.allocator, ptr[0..total], ctx.default_callback, ctx.endpoint, ctx.tls_auth);
-    return total;
-}
-
 fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) !void {
     const curl = @import("../curl.zig");
     const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
@@ -417,11 +407,11 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     // Bound the connection/handshake phase so a stalled connect can't hang forever.
     _ = curl.curl_easy_setopt(handle, .CURLOPT_CONNECTTIMEOUT, @as(c_long, 15));
 
-    // TCP keepalive: without it, a silently dead connection (NAT timeout,
-    // network change, peer power loss) leaves curl_easy_perform blocked on
-    // recv forever and the reconnect loop never triggers. With these probes
-    // the kernel detects the dead peer within a few minutes and perform
-    // returns an error, triggering reconnect.
+    // TCP keepalive detects a dead network path (NAT timeout, network change,
+    // peer power loss) within a few minutes. It cannot detect a logically dead
+    // stream behind a live intermediary (e.g. a CDN edge that keeps answering
+    // probes after the upstream is gone) — that's what the application-level
+    // ping/idle-timeout in the receive loop below is for.
     _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPALIVE, @as(c_long, 1));
     _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPIDLE, @as(c_long, 60));
     _ = curl.curl_easy_setopt(handle, .CURLOPT_TCP_KEEPINTVL, @as(c_long, 15));
@@ -454,17 +444,99 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     }
     defer if (headers) |h| curl.curl_slist_free_all(h);
 
-    // Write callback receives WebSocket text frame payloads
-    var ctx = WsContext{ .allocator = allocator, .default_callback = default_callback, .endpoint = endpoint, .tls_auth = tls_auth };
-    _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEFUNCTION, @as(curl.WriteCallback, @ptrCast(&wsWriteCallback)));
-    _ = curl.curl_easy_setopt(handle, .CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(&ctx)));
+    // Connect-only WebSocket mode: perform() completes the handshake and
+    // returns; we then drive the connection with curl_ws_recv/curl_ws_send.
+    // The previous write-callback mode blocked inside perform() forever, so
+    // it could neither send heartbeats nor notice a stream that went silent.
+    _ = curl.curl_easy_setopt(handle, .CURLOPT_CONNECT_ONLY, @as(c_long, 2));
 
-    // Perform WebSocket connection (blocks until closed)
     const rc = curl.curl_easy_perform(handle);
     if (rc != .CURLE_OK) {
         const err_msg = curl.curl_easy_strerror(rc);
         std.debug.print("[agent] WebSocket error: {s}\n", .{std.mem.span(err_msg)});
         return error.ConnectionFailed;
+    }
+
+    var sockfd: curl.curl_socket_t = curl.CURL_SOCKET_BAD;
+    if (curl.curl_easy_getinfo(handle, .CURLINFO_ACTIVESOCKET, &sockfd) != .CURLE_OK or sockfd == curl.CURL_SOCKET_BAD) {
+        std.debug.print("[agent] failed to get WebSocket socket\n", .{});
+        return error.ConnectionFailed;
+    }
+
+    std.debug.print("[agent] WebSocket connected, receiving frames\n", .{});
+
+    // Reassembly buffer: a message may span multiple recv chunks and frames.
+    var msg_buf = std.ArrayList(u8).empty;
+    defer msg_buf.deinit(allocator);
+
+    var last_rx: i64 = std.time.milliTimestamp();
+    var last_ping: i64 = last_rx;
+
+    while (true) {
+        // Drain everything curl has buffered before waiting in poll: with TLS,
+        // decrypted data can sit in curl's buffers while the socket itself is
+        // not readable.
+        drain: while (true) {
+            var chunk: [WS_RECV_CHUNK_SIZE]u8 = undefined;
+            var nread: usize = 0;
+            var meta: ?*const curl.curl_ws_frame = null;
+            const recv_rc = curl.curl_ws_recv(handle, &chunk, chunk.len, &nread, &meta);
+            if (recv_rc == .CURLE_AGAIN) break :drain;
+            if (recv_rc != .CURLE_OK) {
+                std.debug.print("[agent] WebSocket recv error: {s}\n", .{std.mem.span(curl.curl_easy_strerror(recv_rc))});
+                return error.ConnectionFailed;
+            }
+            last_rx = std.time.milliTimestamp();
+
+            const m = meta orelse continue :drain;
+            const flags: c_uint = @bitCast(m.flags);
+            if (flags & curl.CURLWS_CLOSE != 0) return; // clean close, caller reconnects
+            if (flags & curl.CURLWS_PING != 0) {
+                var sent: usize = 0;
+                _ = curl.curl_ws_send(handle, &chunk, nread, &sent, 0, curl.CURLWS_PONG);
+                continue :drain;
+            }
+            if (flags & curl.CURLWS_PONG != 0) continue :drain;
+
+            if (msg_buf.items.len + nread > WS_MAX_MESSAGE_SIZE) {
+                std.debug.print("[agent] WebSocket message exceeds {d} bytes, reconnecting\n", .{WS_MAX_MESSAGE_SIZE});
+                return error.ConnectionFailed;
+            }
+            try msg_buf.appendSlice(allocator, chunk[0..nread]);
+
+            // Message complete: frame fully consumed and no continuation follows.
+            if (m.bytesleft == 0 and (flags & curl.CURLWS_CONT) == 0) {
+                if (!std.mem.eql(u8, msg_buf.items, "pong")) {
+                    handleWsMessage(allocator, msg_buf.items, default_callback, endpoint, tls_auth);
+                }
+                msg_buf.clearRetainingCapacity();
+                // A task can run for minutes inside handleWsMessage; don't
+                // count that time as idle or we'd tear down a live connection.
+                last_rx = std.time.milliTimestamp();
+                last_ping = last_rx;
+            }
+        }
+
+        const now = std.time.milliTimestamp();
+        if (now - last_rx > WS_IDLE_TIMEOUT_MS) {
+            std.debug.print("[agent] no data for {d}s, assuming dead connection\n", .{@divTrunc(now - last_rx, 1000)});
+            return error.ConnectionFailed;
+        }
+        if (now - last_ping >= WS_PING_INTERVAL_MS) {
+            var sent: usize = 0;
+            const send_rc = curl.curl_ws_send(handle, "ping", 4, &sent, 0, curl.CURLWS_TEXT);
+            if (send_rc != .CURLE_OK and send_rc != .CURLE_AGAIN) {
+                std.debug.print("[agent] WebSocket ping failed: {s}\n", .{std.mem.span(curl.curl_easy_strerror(send_rc))});
+                return error.ConnectionFailed;
+            }
+            last_ping = now;
+        }
+
+        var pfds = [_]std.posix.pollfd{.{ .fd = sockfd, .events = std.posix.POLL.IN, .revents = 0 }};
+        _ = std.posix.poll(&pfds, WS_POLL_TIMEOUT_MS) catch |err| {
+            std.debug.print("[agent] poll failed: {}\n", .{err});
+            return error.ConnectionFailed;
+        };
     }
 }
 
