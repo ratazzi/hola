@@ -4,6 +4,7 @@ const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 pub const FileMapping = struct {
     pattern: []const u8, // glob pattern, e.g. "*/s5cmd"
@@ -84,7 +85,7 @@ pub const Resource = struct {
         defer output_buf.deinit(alloc);
 
         // extracted_paths: tracks files created by this run (for targeted attrs)
-        var extracted_paths: std.ArrayListUnmanaged([]const u8) = .{};
+        var extracted_paths: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
             for (extracted_paths.items) |p| alloc.free(p);
             extracted_paths.deinit(alloc);
@@ -104,7 +105,7 @@ pub const Resource = struct {
                 defer alloc.free(full);
                 // Skip symlinks — applyFileAttributes follows links and would modify the target
                 var buf: [std.fs.max_path_bytes]u8 = undefined;
-                if (std.fs.readLinkAbsolute(full, &buf)) |_| continue else |_| {}
+                if (std.Io.Dir.readLinkAbsolute(global_io.io(), full, &buf)) |_| continue else |_| {}
                 base.applyFileAttributes(full, self.attrs) catch |err| {
                     logger.warn("[extract] failed to apply attributes to {s}: {}", .{ full, err });
                 };
@@ -130,22 +131,23 @@ pub const Resource = struct {
     /// then copy to destination. This avoids including pre-existing files
     /// in the extracted_paths / marker.
     fn extractAll(self: Resource, archive_type: ArchiveType, output_buf: *std.ArrayList(u8), extracted_paths: *std.ArrayListUnmanaged([]const u8)) !void {
+        const io = global_io.io();
         const alloc = std.heap.c_allocator;
 
         // Extract to temp dir first to get clean file list
-        const tmp_dir_path = std.fmt.allocPrint(alloc, "/tmp/hola-extract-all-{d}", .{std.time.nanoTimestamp()}) catch return error.OutOfMemory;
+        const tmp_dir_path = std.fmt.allocPrint(alloc, "/tmp/hola-extract-all-{d}", .{std.Io.Timestamp.now(io, .real).toNanoseconds()}) catch return error.OutOfMemory;
         defer alloc.free(tmp_dir_path);
         try makeDirRecursive(tmp_dir_path);
-        defer std.fs.deleteTreeAbsolute(tmp_dir_path) catch {};
+        defer std.Io.Dir.cwd().deleteTree(io, tmp_dir_path) catch {};
 
-        const file = std.fs.openFileAbsolute(self.path, .{}) catch |err| {
+        const file = std.Io.Dir.openFileAbsolute(io, self.path, .{}) catch |err| {
             logger.err("[extract] failed to open archive {s}: {}", .{ self.path, err });
             return err;
         };
-        defer file.close();
+        defer file.close(io);
 
-        var tmp_dir = try std.fs.openDirAbsolute(tmp_dir_path, .{});
-        defer tmp_dir.close();
+        var tmp_dir = try std.Io.Dir.openDirAbsolute(io, tmp_dir_path, .{});
+        defer tmp_dir.close(io);
 
         try pipeArchiveToFileSystem(file, archive_type, tmp_dir, .{
             .strip_components = self.strip_components,
@@ -178,27 +180,28 @@ pub const Resource = struct {
     ///   Empty directories are not preserved.
     /// - files_only: only extract files/symlinks that match a pattern
     fn extractWithMappings(self: Resource, archive_type: ArchiveType, output_buf: *std.ArrayList(u8), extracted_paths: *std.ArrayListUnmanaged([]const u8)) !void {
+        const io = global_io.io();
         const alloc = std.heap.c_allocator;
 
         // Create temp directory
-        const tmp_dir_path = std.fmt.allocPrint(alloc, "/tmp/hola-extract-{d}", .{std.time.nanoTimestamp()}) catch return error.OutOfMemory;
+        const tmp_dir_path = std.fmt.allocPrint(alloc, "/tmp/hola-extract-{d}", .{std.Io.Timestamp.now(io, .real).toNanoseconds()}) catch return error.OutOfMemory;
         defer alloc.free(tmp_dir_path);
 
-        std.fs.makeDirAbsolute(tmp_dir_path) catch |err| switch (err) {
+        std.Io.Dir.cwd().createDir(io, tmp_dir_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        defer std.fs.deleteTreeAbsolute(tmp_dir_path) catch {};
+        defer std.Io.Dir.cwd().deleteTree(io, tmp_dir_path) catch {};
 
         // Extract all to temp dir (raw, no strip)
-        const file = std.fs.openFileAbsolute(self.path, .{}) catch |err| {
+        const file = std.Io.Dir.openFileAbsolute(io, self.path, .{}) catch |err| {
             logger.err("[extract] failed to open archive {s}: {}", .{ self.path, err });
             return err;
         };
-        defer file.close();
+        defer file.close(io);
 
-        var tmp_dir = try std.fs.openDirAbsolute(tmp_dir_path, .{});
-        defer tmp_dir.close();
+        var tmp_dir = try std.Io.Dir.openDirAbsolute(io, tmp_dir_path, .{});
+        defer tmp_dir.close(io);
 
         try pipeArchiveToFileSystem(file, archive_type, tmp_dir, .{}, alloc);
 
@@ -287,7 +290,9 @@ pub const Resource = struct {
 };
 
 /// Decompress and pipe tar archive to filesystem
-fn pipeArchiveToFileSystem(file: std.fs.File, archive_type: ArchiveType, dir: std.fs.Dir, pipe_opts: std.tar.PipeOptions, allocator: std.mem.Allocator) !void {
+fn pipeArchiveToFileSystem(file: std.Io.File, archive_type: ArchiveType, dir: std.Io.Dir, pipe_opts: std.tar.PipeOptions, allocator: std.mem.Allocator) !void {
+    const io = global_io.io();
+
     // Use diagnostics to collect non-fatal errors (e.g. stripped directory entries)
     // instead of failing the whole extraction
     var diagnostics: std.tar.Diagnostics = .{ .allocator = allocator };
@@ -301,24 +306,27 @@ fn pipeArchiveToFileSystem(file: std.fs.File, archive_type: ArchiveType, dir: st
     };
 
     var file_read_buf: [4096]u8 = undefined;
-    var file_reader = std.fs.File.Reader.init(file, &file_read_buf);
+    var file_reader = file.reader(io, &file_read_buf);
 
     switch (archive_type) {
         .tar_gz => {
             var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
             var decompress = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &decompress_buf);
-            try std.tar.pipeToFileSystem(dir, &decompress.reader, opts);
+            try std.tar.extract(io, dir, &decompress.reader, opts);
         },
         .tar_xz => {
-            const old_reader = file_reader.interface.adaptToOldInterface();
-            var xz_decomp = try std.compress.xz.decompress(allocator, old_reader);
+            // Decompress takes ownership of the buffer and resizes it via the
+            // allocator; free it ourselves only if init fails before taking it.
+            const xz_buf = try allocator.alloc(u8, 4096);
+            var xz_decomp = std.compress.xz.Decompress.init(&file_reader.interface, allocator, xz_buf) catch |err| {
+                allocator.free(xz_buf);
+                return err;
+            };
             defer xz_decomp.deinit();
-            var xz_reader_buf: [4096]u8 = undefined;
-            var adapter = xz_decomp.reader().adaptToNewApi(&xz_reader_buf);
-            try std.tar.pipeToFileSystem(dir, &adapter.new_interface, opts);
+            try std.tar.extract(io, dir, &xz_decomp.reader, opts);
         },
         .tar => {
-            try std.tar.pipeToFileSystem(dir, &file_reader.interface, opts);
+            try std.tar.extract(io, dir, &file_reader.interface, opts);
         },
         .unknown => unreachable,
     }
@@ -341,22 +349,24 @@ fn pipeArchiveToFileSystem(file: std.fs.File, archive_type: ArchiveType, dir: st
 /// Check if a path exists without following symlinks.
 /// Returns true for regular files, directories, and symlinks (even dangling ones).
 fn pathExistsNoFollow(path: []const u8) bool {
+    const io = global_io.io();
     // First try readLinkAbsolute — succeeds for any symlink (dangling or not)
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.fs.readLinkAbsolute(path, &buf)) |_| return true else |_| {}
+    if (std.Io.Dir.readLinkAbsolute(io, path, &buf)) |_| return true else |_| {}
     // Not a symlink — check as regular file/dir
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
     return true;
 }
 
 fn makeDirRecursive(path: []const u8) !void {
-    std.fs.makeDirAbsolute(path) catch |err| switch (err) {
+    const io = global_io.io();
+    std.Io.Dir.cwd().createDir(io, path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => return,
         error.FileNotFound => {
             // Parent doesn't exist — recurse
             if (std.fs.path.dirname(path)) |parent| {
                 try makeDirRecursive(parent);
-                std.fs.makeDirAbsolute(path) catch |e| switch (e) {
+                std.Io.Dir.cwd().createDir(io, path, .default_dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => return e,
                 };
@@ -375,14 +385,16 @@ fn ensureParentDirRecursive(path: []const u8) !void {
 }
 
 fn copyFile(src: []const u8, dst: []const u8) !void {
+    const io = global_io.io();
     try ensureParentDirRecursive(dst);
 
     // Try to read as symlink first
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.fs.readLinkAbsolute(src, &target_buf)) |target| {
+    if (std.Io.Dir.readLinkAbsolute(io, src, &target_buf)) |target_len| {
+        const target = target_buf[0..target_len];
         // Source is a symlink — recreate at destination
-        std.fs.deleteFileAbsolute(dst) catch {};
-        std.posix.symlinkat(target, std.posix.AT.FDCWD, dst) catch |err| {
+        std.Io.Dir.deleteFileAbsolute(io, dst) catch {};
+        std.Io.Dir.cwd().symLink(io, target, dst, .{}) catch |err| {
             logger.warn("[extract] symlink creation failed {s}: {}", .{ dst, err });
             return err;
         };
@@ -393,24 +405,25 @@ fn copyFile(src: []const u8, dst: []const u8) !void {
 }
 
 fn copyRegularFile(src: []const u8, dst: []const u8) !void {
-    const in_file = try std.fs.openFileAbsolute(src, .{});
-    defer in_file.close();
+    const io = global_io.io();
+    const in_file = try std.Io.Dir.openFileAbsolute(io, src, .{});
+    defer in_file.close(io);
 
     try ensureParentDirRecursive(dst);
 
-    const out_file = try std.fs.createFileAbsolute(dst, .{ .truncate = true });
-    defer out_file.close();
+    const out_file = try std.Io.Dir.createFileAbsolute(io, dst, .{ .truncate = true });
+    defer out_file.close(io);
 
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = try in_file.read(&buf);
-        if (n == 0) break;
-        try out_file.writeAll(buf[0..n]);
-    }
+    var read_buf: [8192]u8 = undefined;
+    var in_reader = in_file.reader(io, &read_buf);
+    var write_buf: [8192]u8 = undefined;
+    var out_writer = out_file.writer(io, &write_buf);
+    _ = try in_reader.interface.streamRemaining(&out_writer.interface);
+    try out_writer.interface.flush();
 
     // Preserve source file mode (especially executable bit)
-    const stat = try in_file.stat();
-    out_file.chmod(stat.mode) catch {};
+    const stat = try in_file.stat(io);
+    out_file.setPermissions(io, stat.permissions) catch {};
 }
 
 /// Strip N leading path components from a relative path.
@@ -430,23 +443,24 @@ fn stripComponents(path: []const u8, count: u32) []const u8 {
 
 /// Walk a directory recursively and return all file relative paths
 fn walkDirRecursive(allocator: std.mem.Allocator, root: []const u8) !std.ArrayListUnmanaged([]const u8) {
-    var results: std.ArrayListUnmanaged([]const u8) = .{};
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
     try walkDirRecursiveInner(allocator, root, "", &results);
     return results;
 }
 
 fn walkDirRecursiveInner(allocator: std.mem.Allocator, root: []const u8, prefix: []const u8, results: *std.ArrayListUnmanaged([]const u8)) !void {
+    const io = global_io.io();
     const full_path = if (prefix.len > 0)
         try std.fs.path.join(allocator, &.{ root, prefix })
     else
         try allocator.dupe(u8, root);
     defer allocator.free(full_path);
 
-    var dir = std.fs.openDirAbsolute(full_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, full_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const relative = if (prefix.len > 0)
             try std.fs.path.join(allocator, &.{ prefix, entry.name })
         else
@@ -469,19 +483,21 @@ const MARKER_NAME = ".hola-extracted";
 
 /// Build a fingerprint line: "path\tsize\tmtime_ns"
 fn buildFingerprint(alloc: std.mem.Allocator, archive_path: []const u8) ?[]const u8 {
-    const archive_file = std.fs.openFileAbsolute(archive_path, .{}) catch return null;
-    defer archive_file.close();
-    const stat = archive_file.stat() catch return null;
-    return std.fmt.allocPrint(alloc, "{s}\t{d}\t{d}", .{ archive_path, stat.size, stat.mtime }) catch null;
+    const io = global_io.io();
+    const archive_file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return null;
+    defer archive_file.close(io);
+    const stat = archive_file.stat(io) catch return null;
+    return std.fmt.allocPrint(alloc, "{s}\t{d}\t{d}", .{ archive_path, stat.size, stat.mtime.toNanoseconds() }) catch null;
 }
 
 /// Check marker: fingerprint must match AND all recorded files must still exist.
 /// Marker format: first line = fingerprint, remaining lines = extracted file paths (relative to destination).
 fn checkMarker(destination: []const u8, archive_path: []const u8) bool {
+    const io = global_io.io();
     const alloc = std.heap.c_allocator;
     const marker_path = std.fs.path.join(alloc, &.{ destination, MARKER_NAME }) catch return false;
     defer alloc.free(marker_path);
-    const content = std.fs.cwd().readFileAlloc(alloc, marker_path, 1024 * 1024) catch return false;
+    const content = std.Io.Dir.cwd().readFileAlloc(io, marker_path, alloc, .limited(1024 * 1024)) catch return false;
     defer alloc.free(content);
 
     // First line is fingerprint
@@ -505,19 +521,24 @@ fn checkMarker(destination: []const u8, archive_path: []const u8) bool {
 
 /// Write marker: fingerprint + file list.
 fn writeMarker(destination: []const u8, archive_path: []const u8, files: []const []const u8) void {
+    const io = global_io.io();
     const alloc = std.heap.c_allocator;
     const marker_path = std.fs.path.join(alloc, &.{ destination, MARKER_NAME }) catch return;
     defer alloc.free(marker_path);
     const fingerprint = buildFingerprint(alloc, archive_path) orelse return;
     defer alloc.free(fingerprint);
-    const file = std.fs.createFileAbsolute(marker_path, .{ .truncate = true }) catch return;
-    defer file.close();
-    file.writeAll(fingerprint) catch {};
-    file.writeAll("\n") catch {};
+    const file = std.Io.Dir.createFileAbsolute(io, marker_path, .{ .truncate = true }) catch return;
+    defer file.close(io);
+    var marker_buf: [4096]u8 = undefined;
+    var marker_writer = file.writer(io, &marker_buf);
+    const w = &marker_writer.interface;
+    w.writeAll(fingerprint) catch {};
+    w.writeAll("\n") catch {};
     for (files) |rel| {
-        file.writeAll(rel) catch {};
-        file.writeAll("\n") catch {};
+        w.writeAll(rel) catch {};
+        w.writeAll("\n") catch {};
     }
+    w.flush() catch {};
 }
 
 pub fn detectArchiveType(path: []const u8) ArchiveType {

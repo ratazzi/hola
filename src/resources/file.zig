@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const git = @import("../git.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// File resource data structure
 pub const Resource = struct {
@@ -84,6 +85,7 @@ pub const Resource = struct {
     const CreateResult = struct { was_updated: bool, output: ?[]const u8 };
 
     fn applyCreate(self: Resource) !CreateResult {
+        const io = global_io.io();
         try base.ensureParentDir(self.path);
         const is_abs = std.fs.path.isAbsolute(self.path);
 
@@ -94,12 +96,12 @@ pub const Resource = struct {
         // Check if file exists and content matches
         const file_exists = blk: {
             if (is_abs) {
-                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -114,16 +116,18 @@ pub const Resource = struct {
         if (file_exists) {
             // Read existing file and compare content
             const existing_file = if (is_abs)
-                try std.fs.openFileAbsolute(self.path, .{})
+                try std.Io.Dir.openFileAbsolute(io, self.path, .{})
             else
-                try std.fs.cwd().openFile(self.path, .{});
-            defer existing_file.close();
+                try std.Io.Dir.cwd().openFile(io, self.path, .{});
+            defer existing_file.close(io);
 
-            existing_content = try existing_file.readToEndAlloc(std.heap.c_allocator, std.math.maxInt(usize));
+            var read_buf: [4096]u8 = undefined;
+            var existing_reader = existing_file.reader(io, &read_buf);
+            existing_content = try existing_reader.interface.allocRemaining(std.heap.c_allocator, .unlimited);
 
             if (self.attrs.mode) |_| {
-                const stat = try existing_file.stat();
-                current_mode = @intCast(stat.mode & 0o777);
+                const stat = try existing_file.stat(io);
+                current_mode = @intCast(stat.permissions.toMode() & 0o777);
             }
 
             if (std.mem.eql(u8, existing_content.?, self.content)) {
@@ -172,7 +176,7 @@ pub const Resource = struct {
         }
 
         const dir_path = std.fs.path.dirname(self.path);
-        const timestamp = std.time.nanoTimestamp();
+        const timestamp = std.Io.Timestamp.now(io, .real).toNanoseconds();
         const pid = std.c.getpid();
         const temp_name = try std.fmt.allocPrint(allocator, ".hola-tmp-{d}-{d}", .{ timestamp, pid });
         const temp_path = if (dir_path) |d|
@@ -181,30 +185,33 @@ pub const Resource = struct {
             temp_name;
 
         var temp_file = if (is_abs)
-            try std.fs.createFileAbsolute(temp_path, .{ .truncate = true, .exclusive = true })
+            try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true, .exclusive = true })
         else
-            try std.fs.cwd().createFile(temp_path, .{ .truncate = true, .exclusive = true });
+            try std.Io.Dir.cwd().createFile(io, temp_path, .{ .truncate = true, .exclusive = true });
 
         var temp_cleanup = true;
         var temp_file_closed = false;
         defer if (temp_cleanup) {
-            if (!temp_file_closed) temp_file.close();
+            if (!temp_file_closed) temp_file.close(io);
             if (is_abs) {
-                std.fs.deleteFileAbsolute(temp_path) catch {};
+                std.Io.Dir.deleteFileAbsolute(io, temp_path) catch {};
             } else {
-                std.fs.cwd().deleteFile(temp_path) catch {};
+                std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
             }
         };
 
-        try temp_file.writeAll(self.content);
-        try temp_file.sync();
-        temp_file.close();
+        var write_buf: [4096]u8 = undefined;
+        var temp_writer = temp_file.writer(io, &write_buf);
+        try temp_writer.interface.writeAll(self.content);
+        try temp_writer.interface.flush();
+        try temp_file.sync(io);
+        temp_file.close(io);
         temp_file_closed = true;
 
         if (is_abs) {
-            try std.fs.renameAbsolute(temp_path, self.path);
+            try std.Io.Dir.renameAbsolute(temp_path, self.path, io);
         } else {
-            try std.fs.cwd().rename(temp_path, self.path);
+            try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), self.path, io);
         }
 
         // Temp file has been moved; avoid double cleanup
@@ -223,6 +230,7 @@ pub const Resource = struct {
     /// file is created; otherwise its bytes are left untouched. The `content`
     /// property is intentionally ignored for touch.
     fn applyTouch(self: Resource) !bool {
+        const io = global_io.io();
         try base.ensureParentDir(self.path);
         const is_abs = std.fs.path.isAbsolute(self.path);
 
@@ -232,12 +240,12 @@ pub const Resource = struct {
         // utimensat (checks inode ownership, not write permission).
         const exists = blk: {
             if (is_abs) {
-                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -247,10 +255,10 @@ pub const Resource = struct {
 
         if (!exists) {
             const new_file = if (is_abs)
-                try std.fs.createFileAbsolute(self.path, .{})
+                try std.Io.Dir.createFileAbsolute(io, self.path, .{})
             else
-                try std.fs.cwd().createFile(self.path, .{});
-            new_file.close();
+                try std.Io.Dir.cwd().createFile(io, self.path, .{});
+            new_file.close(io);
         }
 
         // Path-based utimensat with times=null sets both atime and mtime
@@ -276,14 +284,15 @@ pub const Resource = struct {
     }
 
     fn applyDelete(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         if (is_abs) {
-            std.fs.deleteFileAbsolute(self.path) catch |err| switch (err) {
+            std.Io.Dir.deleteFileAbsolute(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => return err,
             };
         } else {
-            std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
+            std.Io.Dir.cwd().deleteFile(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => return err,
             };

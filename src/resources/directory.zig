@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// Directory resource data structure
 pub const Resource = struct {
@@ -68,17 +69,18 @@ pub const Resource = struct {
     }
 
     fn applyCreate(self: Resource) !bool {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
 
         // Check if directory already exists
         const dir_exists = blk: {
             if (is_abs) {
-                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -93,13 +95,13 @@ pub const Resource = struct {
             // Check and update mode
             if (self.attrs.mode) |m| {
                 var dir = if (is_abs)
-                    try std.fs.openDirAbsolute(self.path, .{})
+                    try std.Io.Dir.openDirAbsolute(io, self.path, .{})
                 else
-                    try std.fs.cwd().openDir(self.path, .{});
-                defer dir.close();
+                    try std.Io.Dir.cwd().openDir(io, self.path, .{});
+                defer dir.close(io);
 
-                const stat = try dir.stat();
-                const current_mode = stat.mode & 0o777;
+                const stat = try dir.stat(io);
+                const current_mode = stat.permissions.toMode() & 0o777;
                 if (current_mode != m) {
                     // Update mode using path-based chmod instead of fd-based fchmod
                     // This avoids BADF errors on some systems where dir.fd might not be valid
@@ -125,9 +127,9 @@ pub const Resource = struct {
         } else {
             try base.ensureParentDir(self.path);
             if (is_abs) {
-                try std.fs.makeDirAbsolute(self.path);
+                try std.Io.Dir.createDirAbsolute(io, self.path, .default_dir);
             } else {
-                try std.fs.cwd().makeDir(self.path);
+                try std.Io.Dir.cwd().createDir(io, self.path, .default_dir);
             }
         }
 
@@ -149,17 +151,18 @@ pub const Resource = struct {
     }
 
     fn applyDelete(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
 
         // Check if directory exists
         const dir_exists = blk: {
             if (is_abs) {
-                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -175,7 +178,7 @@ pub const Resource = struct {
         defer if (resolved) |buf| std.heap.c_allocator.free(buf);
 
         const abs_path = if (is_abs) self.path else blk: {
-            const buf = try std.fs.cwd().realpathAlloc(std.heap.c_allocator, self.path);
+            const buf = try std.Io.Dir.cwd().realPathFileAlloc(io, self.path, std.heap.c_allocator);
             resolved = buf;
             break :blk buf;
         };
@@ -183,7 +186,7 @@ pub const Resource = struct {
         if (self.recursive) {
             try deleteDirRecursiveAbsolute(abs_path);
         } else {
-            std.fs.deleteDirAbsolute(abs_path) catch |err| switch (err) {
+            std.Io.Dir.deleteDirAbsolute(io, abs_path) catch |err| switch (err) {
                 error.DirNotEmpty => return error.DirNotEmpty,
                 else => return err,
             };
@@ -191,18 +194,19 @@ pub const Resource = struct {
     }
 
     fn deleteDirRecursiveAbsolute(path: []const u8) !void {
-        var dir = try std.fs.openDirAbsolute(path, .{ .iterate = true });
-        defer dir.close();
+        const io = global_io.io();
+        var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
+        defer dir.close(io);
         var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(io)) |entry| {
             const child_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}", .{ path, entry.name });
             defer std.heap.page_allocator.free(child_path);
             switch (entry.kind) {
                 .directory => try deleteDirRecursiveAbsolute(child_path),
-                else => try std.fs.deleteFileAbsolute(child_path),
+                else => try std.Io.Dir.deleteFileAbsolute(io, child_path),
             }
         }
-        try std.fs.deleteDirAbsolute(path);
+        try std.Io.Dir.deleteDirAbsolute(io, path);
     }
 };
 

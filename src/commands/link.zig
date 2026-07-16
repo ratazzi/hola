@@ -4,6 +4,7 @@ const dotfiles = @import("../dotfiles.zig");
 const toml = @import("toml");
 const logger = @import("../logger.zig");
 const dotfiles_paths = @import("../dotfiles_paths.zig");
+const global_io = @import("../global_io.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help                 Show help for link
@@ -18,13 +19,13 @@ const parsers = .{
     .home_dir = clap.parsers.string,
 };
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(global_io.io(), std.Io.File.stderr(), err);
         return;
     };
     defer res.deinit();
@@ -43,7 +44,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
         }
     }
 
-    const actual_home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const actual_home = try global_io.getEnvOwned(allocator, "HOME");
     defer allocator.free(actual_home);
 
     if (res.args.dotfiles) |dotfiles_path| {
@@ -77,15 +78,16 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 }
 
 fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []const u8 {
+    const io = global_io.io();
     const project_config_paths = [_][]const u8{ ".hola.toml", "hola.toml" };
-    var config_file: ?std.fs.File = null;
+    var config_file: ?std.Io.File = null;
     var config_path: []const u8 = undefined;
 
     for (project_config_paths) |config_name| {
         const path = try std.fs.path.join(allocator, &.{ root, config_name });
         defer allocator.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -100,7 +102,7 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
         const xdg_config_path = try xdg.getConfigFile();
         defer allocator.free(xdg_config_path);
 
-        if (std.fs.openFileAbsolute(xdg_config_path, .{})) |f| {
+        if (std.Io.Dir.openFileAbsolute(io, xdg_config_path, .{})) |f| {
             config_file = f;
             config_path = try allocator.dupe(u8, xdg_config_path);
         } else |err| switch (err) {
@@ -110,10 +112,12 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
     }
 
     const file = config_file orelse return null;
-    defer file.close();
+    defer file.close(io);
     defer allocator.free(config_path);
 
-    const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(content);
 
     const Config = struct {
@@ -145,12 +149,13 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
 }
 
 fn printHelp(reason: ?[]const u8) !void {
-    const out = std.fs.File.stdout();
+    const io = global_io.io();
+    const out = std.Io.File.stdout();
     if (reason) |msg| {
-        try out.writeAll(msg);
-        try out.writeAll("\n\n");
+        try out.writeStreamingAll(io, msg);
+        try out.writeStreamingAll(io, "\n\n");
     }
-    try out.writeAll(
+    try out.writeStreamingAll(io,
         \\link
         \\  hola link [--dotfiles <path>] [--home <path>] [--dry-run]
         \\

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zeit = @import("zeit");
+const global_io = @import("global_io.zig");
 
 /// Log levels (similar to std.log)
 pub const Level = enum {
@@ -37,7 +38,7 @@ pub const Level = enum {
 /// Logger for recording external command outputs and operations
 pub const Logger = struct {
     allocator: std.mem.Allocator,
-    log_file: ?std.fs.File = null,
+    log_file: ?std.Io.File = null,
     log_dir: []const u8,
     log_path: ?[]const u8 = null, // Full path to current log file
     enabled: bool = true,
@@ -47,11 +48,12 @@ pub const Logger = struct {
 
     /// Initialize logger with log directory
     pub fn init(allocator: std.mem.Allocator, log_dir: []const u8) !Self {
+        const io = global_io.io();
         // Create log directory recursively if it doesn't exist
-        try std.fs.cwd().makePath(log_dir);
+        try std.Io.Dir.cwd().createDirPath(io, log_dir);
 
         // Read log level from environment variable HOLA_LOG_LEVEL
-        const log_level = if (std.process.getEnvVarOwned(allocator, "HOLA_LOG_LEVEL")) |level_str| blk: {
+        const log_level = if (global_io.getEnvOwned(allocator, "HOLA_LOG_LEVEL")) |level_str| blk: {
             defer allocator.free(level_str);
             break :blk Level.fromString(level_str) orelse .debug;
         } else |_| .debug;
@@ -66,7 +68,7 @@ pub const Logger = struct {
 
     pub fn deinit(self: *Self) void {
         if (self.log_file) |file| {
-            file.close();
+            file.close(global_io.io());
         }
         if (self.log_path) |path| {
             self.allocator.free(path);
@@ -78,17 +80,19 @@ pub const Logger = struct {
     pub fn openLogFile(self: *Self) !void {
         if (!self.enabled) return;
 
+        const io = global_io.io();
+
         // Get current date in YYYYMMDD format (local timezone)
-        const tz = zeit.local(self.allocator, null) catch zeit.utc;
+        const tz = zeit.local(self.allocator, io, .{}) catch zeit.utc;
         defer if (!std.meta.eql(tz, zeit.utc)) tz.deinit();
-        const now = try zeit.instant(.{});
+        const now = zeit.instant(.{ .now = io }, &zeit.utc);
         const now_local = now.in(&tz);
         const dt = now_local.time();
 
         var date_buf: [9]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&date_buf);
-        dt.strftime(fbs.writer(), "%Y%m%d") catch return error.DateFormatFailed;
-        const date_str = fbs.getWritten();
+        var date_writer = std.Io.Writer.fixed(&date_buf);
+        dt.strftime(&date_writer, "%Y%m%d") catch return error.DateFormatFailed;
+        const date_str = date_writer.buffered();
 
         var log_filename_buf: [128]u8 = undefined;
         const log_filename = try std.fmt.bufPrint(&log_filename_buf, "hola-{s}.log", .{date_str});
@@ -97,16 +101,17 @@ pub const Logger = struct {
         self.log_path = log_path; // Store for later retrieval
 
         // Open file in append mode (create if doesn't exist)
-        self.log_file = try std.fs.createFileAbsolute(log_path, .{ .truncate = false });
-        try self.log_file.?.seekFromEnd(0);
+        self.log_file = try std.Io.Dir.createFileAbsolute(io, log_path, .{ .truncate = false });
 
         // Write session header with timestamp
         var header_buf: [256]u8 = undefined;
-        var header_fbs = std.io.fixedBufferStream(&header_buf);
-        header_fbs.writer().writeAll("\n=== Session started at ") catch {};
-        dt.strftime(header_fbs.writer(), "%Y-%m-%d %H:%M:%S %Z") catch {};
-        header_fbs.writer().writeAll(" ===\n\n") catch {};
-        try self.log_file.?.writeAll(header_fbs.getWritten());
+        var header_writer = std.Io.Writer.fixed(&header_buf);
+        header_writer.writeAll("\n=== Session started at ") catch {};
+        dt.strftime(&header_writer, "%Y-%m-%d %H:%M:%S %Z") catch {};
+        header_writer.writeAll(" ===\n\n") catch {};
+        const header_bytes = header_writer.buffered();
+        const end_pos = try self.log_file.?.length(io);
+        try self.log_file.?.writePositionalAll(io, header_bytes, end_pos);
     }
 
     /// Get the current log file path
@@ -118,7 +123,9 @@ pub const Logger = struct {
     pub fn write(self: *Self, data: []const u8) !void {
         if (!self.enabled) return;
         if (self.log_file) |file| {
-            try file.writeAll(data);
+            const io = global_io.io();
+            const end_pos = try file.length(io);
+            try file.writePositionalAll(io, data, end_pos);
         }
     }
 
@@ -136,7 +143,7 @@ pub const Logger = struct {
         if (!level.shouldLog(self.level)) return;
 
         // Get current timestamp with microsecond precision
-        const timestamp_ns = std.time.nanoTimestamp();
+        const timestamp_ns: i128 = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
         const timestamp_us = @divFloor(timestamp_ns, 1000); // Convert to microseconds
         const timestamp_s = @divFloor(timestamp_us, 1_000_000); // Convert to seconds
         const microseconds: i64 = @intCast(@mod(timestamp_us, 1_000_000));

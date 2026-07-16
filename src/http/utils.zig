@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("../global_io.zig");
 
 /// Mask the password in a URL's `user:password@` userinfo for safe display or
 /// logging. Writes `scheme://user:***@rest` into `buf` (no allocation) and
@@ -203,14 +204,18 @@ pub fn slugifyPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 /// Calculate SHA256 checksum of a file
 /// Returns hex-encoded string
 pub fn calculateSha256(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
+    const io = global_io.io();
+    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+    defer file.close(io);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
 
     while (true) {
-        const n = try file.read(&buf);
+        const n = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         if (n == 0) break;
         hasher.update(buf[0..n]);
     }

@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const http = @import("../http.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// APT repository resource data structure
 /// Manages APT repositories on Debian/Ubuntu systems
@@ -81,7 +82,8 @@ pub const Resource = struct {
     }
 
     fn applyAdd(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        const io = global_io.io();
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -92,7 +94,7 @@ pub const Resource = struct {
         // Step 1: Download GPG key if specified
         if (self.key_url) |key_url| {
             // Create keyrings directory if it doesn't exist
-            std.fs.cwd().makePath("/etc/apt/keyrings") catch |err| {
+            std.Io.Dir.cwd().createDirPath(io, "/etc/apt/keyrings") catch |err| {
                 logger.warn("Failed to create /etc/apt/keyrings: {}", .{err});
             };
 
@@ -101,7 +103,7 @@ pub const Resource = struct {
                 actual_key_path = try allocator.dupe(u8, explicit_path);
 
                 const key_exists = blk: {
-                    std.fs.accessAbsolute(explicit_path, .{}) catch |err| switch (err) {
+                    std.Io.Dir.accessAbsolute(io, explicit_path, .{}) catch |err| switch (err) {
                         error.FileNotFound => break :blk false,
                         else => return err,
                     };
@@ -126,7 +128,7 @@ pub const Resource = struct {
                 defer allocator.free(asc_path);
 
                 const gpg_exists = blk: {
-                    std.fs.accessAbsolute(gpg_path, .{}) catch |err| switch (err) {
+                    std.Io.Dir.accessAbsolute(io, gpg_path, .{}) catch |err| switch (err) {
                         error.FileNotFound => break :blk false,
                         else => return err,
                     };
@@ -134,7 +136,7 @@ pub const Resource = struct {
                 };
 
                 const asc_exists = blk: {
-                    std.fs.accessAbsolute(asc_path, .{}) catch |err| switch (err) {
+                    std.Io.Dir.accessAbsolute(io, asc_path, .{}) catch |err| switch (err) {
                         error.FileNotFound => break :blk false,
                         else => return err,
                     };
@@ -159,10 +161,10 @@ pub const Resource = struct {
 
                     // Read first few bytes to detect format
                     const is_binary = blk: {
-                        const file = std.fs.openFileAbsolute(temp_path, .{}) catch break :blk true;
-                        defer file.close();
+                        const file = std.Io.Dir.openFileAbsolute(io, temp_path, .{}) catch break :blk true;
+                        defer file.close(io);
                         var buf: [64]u8 = undefined;
-                        const n = file.read(&buf) catch break :blk true;
+                        const n = std.posix.read(file.handle, &buf) catch break :blk true;
                         if (n == 0) break :blk true;
                         // ASCII armored keys start with "-----BEGIN PGP"
                         break :blk !std.mem.startsWith(u8, buf[0..n], "-----BEGIN PGP");
@@ -172,7 +174,7 @@ pub const Resource = struct {
                     actual_key_path = try allocator.dupe(u8, final_path);
 
                     // Rename temp file to final path
-                    try std.fs.renameAbsolute(temp_path, final_path);
+                    try std.Io.Dir.renameAbsolute(temp_path, final_path, io);
                     logger.info("Saved GPG key to {s}", .{final_path});
                     updated = true;
                 }
@@ -268,13 +270,14 @@ pub const Resource = struct {
         const new_content = line_buf.items;
 
         const needs_update = blk: {
-            const file = std.fs.openFileAbsolute(sources_list_path, .{}) catch |err| switch (err) {
+            const file = std.Io.Dir.openFileAbsolute(io, sources_list_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk true,
                 else => return err,
             };
-            defer file.close();
+            defer file.close(io);
 
-            const existing_content = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch break :blk true;
+            var file_reader = file.reader(io, &.{});
+            const existing_content = file_reader.interface.allocRemaining(allocator, .unlimited) catch break :blk true;
             defer allocator.free(existing_content);
 
             break :blk !std.mem.eql(u8, existing_content, new_content);
@@ -282,9 +285,11 @@ pub const Resource = struct {
 
         if (needs_update) {
             logger.info("Writing repository configuration to {s}", .{sources_list_path});
-            const file = try std.fs.createFileAbsolute(sources_list_path, .{});
-            defer file.close();
-            try file.writeAll(new_content);
+            const file = try std.Io.Dir.createFileAbsolute(io, sources_list_path, .{});
+            defer file.close(io);
+            var file_writer = file.writer(io, &.{});
+            try file_writer.interface.writeAll(new_content);
+            try file_writer.interface.flush();
             updated = true;
         }
 
@@ -298,7 +303,8 @@ pub const Resource = struct {
     }
 
     fn applyRemove(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        const io = global_io.io();
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -308,7 +314,7 @@ pub const Resource = struct {
         const sources_list_path = try std.fmt.allocPrint(allocator, "/etc/apt/sources.list.d/{s}.list", .{self.name});
         defer allocator.free(sources_list_path);
 
-        std.fs.deleteFileAbsolute(sources_list_path) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(io, sources_list_path) catch |err| switch (err) {
             error.FileNotFound => {}, // Already removed
             else => return err,
         };
@@ -316,7 +322,7 @@ pub const Resource = struct {
 
         // Remove key if it was managed by us
         if (self.key_path) |key_path| {
-            std.fs.deleteFileAbsolute(key_path) catch |err| switch (err) {
+            std.Io.Dir.deleteFileAbsolute(io, key_path) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -332,13 +338,15 @@ pub const Resource = struct {
     }
 
     fn getUbuntuCodename(allocator: std.mem.Allocator) ![]const u8 {
+        const io = global_io.io();
         // Try to get codename from /etc/os-release
-        const file = std.fs.openFileAbsolute("/etc/os-release", .{}) catch {
+        const file = std.Io.Dir.openFileAbsolute(io, "/etc/os-release", .{}) catch {
             return try allocator.dupe(u8, "stable"); // Fallback for non-Debian systems
         };
-        defer file.close();
+        defer file.close(io);
 
-        const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+        var file_reader = file.reader(io, &.{});
+        const content = try file_reader.interface.allocRemaining(allocator, .unlimited);
         defer allocator.free(content);
 
         // Parse VERSION_CODENAME=xxx
@@ -361,18 +369,11 @@ pub const Resource = struct {
         };
         defer allocator.free(apt_path);
 
-        var proc = std.process.Child.init(&[_][]const u8{ apt_path, "update" }, allocator);
-        proc.stdout_behavior = .Pipe;
-        proc.stderr_behavior = .Pipe;
-
-        try proc.spawn();
-
-        const stdout = try proc.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        const stderr = try proc.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
+        const result = try std.process.run(allocator, global_io.io(), .{ .argv = &[_][]const u8{ apt_path, "update" } });
+        const stdout = result.stdout;
+        const stderr = result.stderr;
         defer allocator.free(stdout);
         defer allocator.free(stderr);
-
-        const term = try proc.wait();
 
         // Log output
         if (stdout.len > 0) {
@@ -382,8 +383,8 @@ pub const Resource = struct {
             logger.warn("apt update stderr: {s}", .{stderr});
         }
 
-        switch (term) {
-            .Exited => |code| {
+        switch (result.term) {
+            .exited => |code| {
                 if (code != 0) {
                     logger.err("apt update failed with exit code {d}", .{code});
                     return error.AptUpdateFailed;
@@ -394,14 +395,15 @@ pub const Resource = struct {
     }
 
     fn findAptExecutable(allocator: std.mem.Allocator) ![]const u8 {
+        const io = global_io.io();
         const candidates = [_][]const u8{ "/usr/bin/apt-get", "/usr/bin/apt" };
         for (candidates) |path| {
-            std.fs.accessAbsolute(path, .{}) catch continue;
+            std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
             return try allocator.dupe(u8, path);
         }
 
         // Search PATH
-        const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return error.AptNotFound;
+        const path_env = global_io.getEnvOwned(allocator, "PATH") catch return error.AptNotFound;
         defer allocator.free(path_env);
 
         var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -410,7 +412,7 @@ pub const Resource = struct {
             for ([_][]const u8{ "apt-get", "apt" }) |name| {
                 const full_path = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
                 defer allocator.free(full_path);
-                if (std.fs.accessAbsolute(full_path, .{})) |_| {
+                if (std.Io.Dir.accessAbsolute(io, full_path, .{})) |_| {
                     return allocator.dupe(u8, full_path) catch return error.AptNotFound;
                 } else |_| {}
             }

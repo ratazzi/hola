@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
 const builtin = @import("builtin");
+const global_io = @import("../global_io.zig");
 
 /// User resource data structure
 pub const Resource = struct {
@@ -88,8 +89,7 @@ pub const Resource = struct {
         const allocator = arena.allocator();
 
         const args = [_][]const u8{ "id", "-u", username };
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
+        const result = std.process.run(allocator, global_io.io(), .{
             .argv = &args,
         }) catch |err| {
             logger.debug("id command failed for user '{s}': {}", .{ username, err });
@@ -99,7 +99,7 @@ pub const Resource = struct {
         defer allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| return code == 0,
+            .exited => |code| return code == 0,
             else => return false,
         }
     }
@@ -114,69 +114,68 @@ pub const Resource = struct {
         // Simpler approach: build command string directly
         var buf = try std.ArrayList(u8).initCapacity(allocator, 256);
         errdefer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
 
-        try writer.writeAll(cmd);
+        try buf.appendSlice(allocator, cmd);
 
         if (std.mem.eql(u8, cmd, "useradd")) {
             if (self.uid) |uid| {
-                try writer.print(" -u {d}", .{uid});
+                try buf.print(allocator, " -u {d}", .{uid});
             }
             if (self.gid) |gid| {
-                try writer.print(" -g {d}", .{gid});
+                try buf.print(allocator, " -g {d}", .{gid});
             }
             if (self.comment) |comment| {
-                try writer.print(" -c '{s}'", .{comment});
+                try buf.print(allocator, " -c '{s}'", .{comment});
             }
             if (self.home) |home| {
-                try writer.print(" -d '{s}'", .{home});
+                try buf.print(allocator, " -d '{s}'", .{home});
             }
             if (self.shell) |shell| {
-                try writer.print(" -s '{s}'", .{shell});
+                try buf.print(allocator, " -s '{s}'", .{shell});
             }
             if (self.password) |password| {
-                try writer.print(" -p '{s}'", .{password});
+                try buf.print(allocator, " -p '{s}'", .{password});
             }
             if (self.system) {
-                try writer.writeAll(" -r");
+                try buf.appendSlice(allocator, " -r");
             }
             if (self.manage_home) {
-                try writer.writeAll(" -m");
+                try buf.appendSlice(allocator, " -m");
             } else {
-                try writer.writeAll(" -M");
+                try buf.appendSlice(allocator, " -M");
             }
             if (self.non_unique) {
-                try writer.writeAll(" -o");
+                try buf.appendSlice(allocator, " -o");
             }
         } else if (std.mem.eql(u8, cmd, "usermod")) {
             if (self.uid) |uid| {
-                try writer.print(" -u {d}", .{uid});
+                try buf.print(allocator, " -u {d}", .{uid});
             }
             if (self.gid) |gid| {
-                try writer.print(" -g {d}", .{gid});
+                try buf.print(allocator, " -g {d}", .{gid});
             }
             if (self.comment) |comment| {
-                try writer.print(" -c '{s}'", .{comment});
+                try buf.print(allocator, " -c '{s}'", .{comment});
             }
             if (self.home) |home| {
-                try writer.print(" -d '{s}'", .{home});
+                try buf.print(allocator, " -d '{s}'", .{home});
             }
             if (self.shell) |shell| {
-                try writer.print(" -s '{s}'", .{shell});
+                try buf.print(allocator, " -s '{s}'", .{shell});
             }
             if (self.password) |password| {
-                try writer.print(" -p '{s}'", .{password});
+                try buf.print(allocator, " -p '{s}'", .{password});
             }
             if (self.non_unique) {
-                try writer.writeAll(" -o");
+                try buf.appendSlice(allocator, " -o");
             }
         } else if (std.mem.eql(u8, cmd, "userdel")) {
             if (self.manage_home) {
-                try writer.writeAll(" -r");
+                try buf.appendSlice(allocator, " -r");
             }
         }
 
-        try writer.print(" {s}", .{self.username});
+        try buf.print(allocator, " {s}", .{self.username});
         return try buf.toOwnedSlice(allocator);
     }
 
@@ -184,8 +183,7 @@ pub const Resource = struct {
         logger.debug("Executing: {s}", .{cmd});
 
         const args = [_][]const u8{ "/bin/sh", "-c", cmd };
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
+        const result = try std.process.run(allocator, global_io.io(), .{
             .argv = &args,
         });
         defer allocator.free(result.stdout);
@@ -199,7 +197,7 @@ pub const Resource = struct {
         }
 
         switch (result.term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) {
                     logger.err("Command exited with code {d}: {s}", .{ code, cmd });
                     // Print error details

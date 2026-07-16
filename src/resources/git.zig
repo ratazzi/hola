@@ -5,6 +5,7 @@ const logger = @import("../logger.zig");
 const git_client = @import("../git.zig");
 const http = @import("../http.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
+const global_io = @import("../global_io.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -110,7 +111,7 @@ pub const Resource = struct {
     fn isGitRepo(path: []const u8) bool {
         var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const git_dir = std.fmt.bufPrint(&git_dir_buf, "{s}/.git", .{path}) catch return false;
-        std.fs.accessAbsolute(git_dir, .{}) catch return false;
+        std.Io.Dir.accessAbsolute(global_io.io(), git_dir, .{}) catch return false;
         return true;
     }
 
@@ -127,11 +128,12 @@ pub const Resource = struct {
         try base.setFileOwnerAndGroup(dir_path, user, group);
 
         // Then recursively set ownership on all contents
-        var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
-        defer dir.close();
+        const io = global_io.io();
+        var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             const full_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, entry.name });
             defer allocator.free(full_path);
 
@@ -299,7 +301,7 @@ pub const Resource = struct {
             }
 
             // Priority 3: Fall back to default SSH key files (automatic discovery)
-            const home = std.posix.getenv("HOME") orelse "/tmp";
+            const home = global_io.getEnv("HOME") orelse "/tmp";
             const key_names = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
 
             for (key_names) |key_name| {
@@ -307,7 +309,7 @@ pub const Resource = struct {
                 const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, key_name }) catch continue;
 
                 // Check if key file exists
-                std.fs.accessAbsolute(key_path, .{}) catch continue;
+                std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
 
                 // Try this key
                 const key_path_c: [*c]const u8 = @ptrCast(key_path.ptr);
@@ -717,7 +719,7 @@ pub const Resource = struct {
                     const value = pair[eq_pos + 1 ..];
                     // Save original value
                     const key_z = try allocator.dupeZ(u8, key);
-                    const orig = std.posix.getenv(key);
+                    const orig = global_io.getEnv(key);
                     const orig_dup: ?[]const u8 = if (orig) |o| try allocator.dupe(u8, o) else null;
                     try saved.append(allocator, .{ .key = key_z, .original = orig_dup });
                     // Set new value
@@ -825,7 +827,7 @@ pub const Resource = struct {
         // and libgit2's check can fail under root-with-seteuid scenarios.
         _ = c.git_libgit2_opts(c.GIT_OPT_SET_OWNER_VALIDATION, @as(c_int, 0));
 
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -843,7 +845,7 @@ pub const Resource = struct {
 
         // Check if destination exists and is a git repo
         const dest_exists = blk: {
-            std.fs.accessAbsolute(self.destination, .{}) catch |err| switch (err) {
+            std.Io.Dir.accessAbsolute(global_io.io(), self.destination, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
@@ -929,7 +931,7 @@ pub const Resource = struct {
     fn applyCheckout(self: Resource) !bool {
         // Similar to sync but don't update if already exists
         const dest_exists = blk: {
-            std.fs.accessAbsolute(self.destination, .{}) catch |err| switch (err) {
+            std.Io.Dir.accessAbsolute(global_io.io(), self.destination, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
@@ -942,7 +944,7 @@ pub const Resource = struct {
         }
 
         // Clone the repository
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -978,7 +980,7 @@ pub const Resource = struct {
             var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
             const git_dir = try std.fmt.bufPrint(&git_dir_buf, "{s}/.git", .{self.destination});
 
-            std.fs.deleteTreeAbsolute(git_dir) catch |err| {
+            std.Io.Dir.cwd().deleteTree(global_io.io(), git_dir) catch |err| {
                 logger.warn("[git] failed to remove .git directory: {}", .{err});
             };
         }

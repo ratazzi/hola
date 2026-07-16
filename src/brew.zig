@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const global_io = @import("global_io.zig");
 
 // Only compile on macOS
 comptime {
@@ -28,14 +29,15 @@ pub fn findBrew(allocator: std.mem.Allocator) Error![]const u8 {
         "/home/linuxbrew/.linuxbrew/bin/brew",
     };
 
+    const io = global_io.io();
     for (locations) |path| {
-        const file = std.fs.openFileAbsolute(path, .{}) catch continue;
-        file.close();
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch continue;
+        file.close(io);
         return try allocator.dupe(u8, path);
     }
 
     // Search PATH environment variable
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return Error.BrewNotFound;
+    const path_env = global_io.getEnvOwned(allocator, "PATH") catch return Error.BrewNotFound;
     defer allocator.free(path_env);
 
     var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -44,7 +46,7 @@ pub fn findBrew(allocator: std.mem.Allocator) Error![]const u8 {
         const full_path = std.fs.path.join(allocator, &.{ dir, "brew" }) catch continue;
         defer allocator.free(full_path);
 
-        if (std.fs.accessAbsolute(full_path, .{})) |_| {
+        if (std.Io.Dir.accessAbsolute(io, full_path, .{})) |_| {
             return allocator.dupe(u8, full_path) catch return Error.BrewNotFound;
         } else |_| {}
     }

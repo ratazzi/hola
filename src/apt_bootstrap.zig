@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const global_io = @import("global_io.zig");
 const modern_display = @import("modern_provision_display.zig");
 const logger = @import("logger.zig");
 const command_runner = @import("command_runner.zig");
@@ -27,7 +28,8 @@ pub fn installPackages(
     const apt_list_path = try std.fs.path.join(allocator, &.{ config_root, "packages.apt.txt" });
     defer allocator.free(apt_list_path);
 
-    const file = std.fs.openFileAbsolute(apt_list_path, .{}) catch |err| switch (err) {
+    const io = global_io.io();
+    const file = std.Io.Dir.openFileAbsolute(io, apt_list_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             const msg = try std.fmt.allocPrint(allocator, "No packages.apt.txt found in {s}, skipping apt install", .{config_root});
             defer allocator.free(msg);
@@ -36,9 +38,11 @@ pub fn installPackages(
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(content);
 
     var packages = std.ArrayList([]const u8).empty;

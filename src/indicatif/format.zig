@@ -34,10 +34,10 @@ pub const HumanBytes = struct {
     }
 
     pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        var list: std.ArrayList(u8) = .{};
-        defer list.deinit(allocator);
-        try self.format(list.writer(allocator));
-        return try list.toOwnedSlice(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        try self.format(&aw.writer);
+        return try aw.toOwnedSlice();
     }
 };
 
@@ -93,10 +93,10 @@ pub const HumanDuration = struct {
     }
 
     pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        var list: std.ArrayList(u8) = .{};
-        defer list.deinit(allocator);
-        try self.format(list.writer(allocator));
-        return try list.toOwnedSlice(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        try self.format(&aw.writer);
+        return try aw.toOwnedSlice();
     }
 };
 
@@ -126,10 +126,10 @@ pub const HumanCount = struct {
     }
 
     pub fn toString(self: Self, allocator: std.mem.Allocator) ![]const u8 {
-        var list: std.ArrayList(u8) = .{};
-        defer list.deinit(allocator);
-        try self.format(list.writer(allocator));
-        return try list.toOwnedSlice(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        try self.format(&aw.writer);
+        return try aw.toOwnedSlice();
     }
 };
 

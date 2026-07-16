@@ -6,6 +6,7 @@ const logger = @import("../logger.zig");
 const json_helpers = @import("../json.zig");
 const xdg_mod = @import("../xdg.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
+const global_io = @import("../global_io.zig");
 
 /// Download outcome for downloadDirect
 const DownloadOutcome = struct {
@@ -164,16 +165,17 @@ pub const Resource = struct {
     }
 
     fn applyCreate(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        const io = global_io.io();
+        var gpa: std.heap.DebugAllocator(.{}) = .{};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
         if (std.fs.path.dirname(self.path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(io, dir);
         }
 
         const local_exists = blk: {
-            std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+            std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
@@ -220,7 +222,7 @@ pub const Resource = struct {
             }
 
             // Move from temp to final location
-            try std.fs.cwd().rename(temp_path, self.path);
+            try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), self.path, io);
 
             // Apply file attributes (mode, owner, group)
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
@@ -326,6 +328,7 @@ pub const Resource = struct {
 
     /// Find a pre-downloaded file by matching the slugified final path
     fn findPreDownloadedFile(final_path: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+        const io = global_io.io();
         // Get the download temp directory
         const xdg_instance = xdg_mod.XDG.init(allocator);
         const temp_dir = try xdg_instance.getDownloadsDir();
@@ -339,7 +342,7 @@ pub const Resource = struct {
         const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ temp_dir, path_slug });
 
         // Check if file exists
-        std.fs.cwd().access(file_path, .{}) catch |err| switch (err) {
+        std.Io.Dir.cwd().access(io, file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 allocator.free(file_path);
                 return error.FileNotFound;
@@ -354,28 +357,30 @@ pub const Resource = struct {
     }
 
     fn applyCreateIfMissing(self: Resource) !bool {
+        const io = global_io.io();
         // Check if file exists
-        const file = std.fs.cwd().openFile(self.path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().openFile(io, self.path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 const was_updated = try applyCreate(self);
                 return was_updated;
             },
             else => return err,
         };
-        defer file.close();
+        defer file.close(io);
         // File exists, do nothing
         return false; // File was up to date
     }
 
     fn applyDelete(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         if (is_abs) {
-            std.fs.deleteFileAbsolute(self.path) catch |err| switch (err) {
+            std.Io.Dir.deleteFileAbsolute(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return, // Already deleted, that's fine
                 else => return err,
             };
         } else {
-            std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
+            std.Io.Dir.cwd().deleteFile(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return, // Already deleted, that's fine
                 else => return err,
             };
@@ -383,29 +388,30 @@ pub const Resource = struct {
     }
 
     fn applyTouch(self: Resource) !void {
+        const io = global_io.io();
         if (std.fs.path.dirname(self.path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(io, dir);
         }
 
         const is_abs = std.fs.path.isAbsolute(self.path);
         const file = if (is_abs)
-            try std.fs.createFileAbsolute(self.path, .{ .truncate = false })
+            try std.Io.Dir.createFileAbsolute(io, self.path, .{ .truncate = false })
         else
-            try std.fs.cwd().createFile(self.path, .{ .truncate = false });
-        defer file.close();
+            try std.Io.Dir.cwd().createFile(io, self.path, .{ .truncate = false });
+        defer file.close(io);
 
         // Update modification time to current time
-        const current_time = std.time.timestamp();
-        try file.updateTimes(current_time, current_time);
+        try file.setTimestampsNow(io);
     }
 
     fn needsDownload(self: Resource) !bool {
+        const io = global_io.io();
         // Check if local file exists
-        const local_file = std.fs.cwd().openFile(self.path, .{}) catch |err| switch (err) {
+        const local_file = std.Io.Dir.cwd().openFile(io, self.path, .{}) catch |err| switch (err) {
             error.FileNotFound => return true, // File doesn't exist, need to download
             else => return err,
         };
-        defer local_file.close();
+        defer local_file.close(io);
 
         // TODO: Add more sophisticated comparison (size, modification time, etag)
         // For now, always download if file exists
@@ -413,6 +419,7 @@ pub const Resource = struct {
     }
 
     fn downloadDirect(self: Resource, allocator: std.mem.Allocator, previous_etag: ?[]const u8, previous_last_modified: ?[]const u8) !DownloadOutcome {
+        const io = global_io.io();
         const temp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{self.path});
         defer allocator.free(temp_path);
 
@@ -459,7 +466,7 @@ pub const Resource = struct {
 
         if (download_result.status == .not_modified) {
             // Cleanup temp path if created (ignore missing)
-            std.fs.cwd().deleteFile(temp_path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
             return DownloadOutcome{ .downloaded = false, .etag = null };
         }
 
@@ -468,7 +475,7 @@ pub const Resource = struct {
             const actual_checksum = try http.calculateSha256(allocator, temp_path);
             defer allocator.free(actual_checksum);
             if (!std.mem.eql(u8, actual_checksum, expected_checksum)) {
-                std.fs.cwd().deleteFile(temp_path) catch {};
+                std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
                 self.recordChecksumMismatch(expected_checksum, actual_checksum);
                 return error.ChecksumMismatch;
             }
@@ -483,7 +490,7 @@ pub const Resource = struct {
         if (self.force_unlink) {
             self.deleteTargetIfExists() catch {};
         }
-        try std.fs.cwd().rename(temp_path, self.path);
+        try std.Io.Dir.cwd().rename(temp_path, std.Io.Dir.cwd(), self.path, io);
 
         const etag_copy: ?[]const u8 = if (download_result.etag) |etag| try allocator.dupe(u8, etag) else null;
         const lm_copy: ?[]const u8 = if (download_result.last_modified) |lm| try allocator.dupe(u8, lm) else null;
@@ -502,34 +509,28 @@ pub const Resource = struct {
     }
 
     fn loadSavedEtag(self: Resource, allocator: std.mem.Allocator) !?[]const u8 {
+        const io = global_io.io();
         const etag_path = try self.getEtagPath(allocator);
         defer allocator.free(etag_path);
 
-        const file = std.fs.cwd().openFile(etag_path, .{}) catch |err| switch (err) {
+        return std.Io.Dir.cwd().readFileAlloc(io, etag_path, allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer file.close();
-
-        const stat = try file.stat();
-        const buf = try allocator.alloc(u8, stat.size);
-        const read_len = try file.readAll(buf);
-        return buf[0..read_len];
     }
 
     fn saveEtag(self: Resource, allocator: std.mem.Allocator, etag: []const u8) !void {
         if (etag.len == 0) return;
 
+        const io = global_io.io();
         const etag_path = try self.getEtagPath(allocator);
         defer allocator.free(etag_path);
 
         if (std.fs.path.dirname(etag_path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(io, dir);
         }
 
-        const file = try std.fs.cwd().createFile(etag_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(etag);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = etag_path, .data = etag });
     }
 
     fn getLastModifiedPath(self: Resource, allocator: std.mem.Allocator) ![]const u8 {
@@ -544,42 +545,37 @@ pub const Resource = struct {
     }
 
     fn loadSavedLastModified(self: Resource, allocator: std.mem.Allocator) !?[]const u8 {
+        const io = global_io.io();
         const lm_path = try self.getLastModifiedPath(allocator);
         defer allocator.free(lm_path);
 
-        const file = std.fs.cwd().openFile(lm_path, .{}) catch |err| switch (err) {
+        return std.Io.Dir.cwd().readFileAlloc(io, lm_path, allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer file.close();
-
-        const stat = try file.stat();
-        const buf = try allocator.alloc(u8, stat.size);
-        const read_len = try file.readAll(buf);
-        return buf[0..read_len];
     }
 
     fn saveLastModified(self: Resource, allocator: std.mem.Allocator, last_modified: []const u8) !void {
         if (last_modified.len == 0) return;
 
+        const io = global_io.io();
         const lm_path = try self.getLastModifiedPath(allocator);
         defer allocator.free(lm_path);
 
         if (std.fs.path.dirname(lm_path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(io, dir);
         }
 
-        const file = try std.fs.cwd().createFile(lm_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(last_modified);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = lm_path, .data = last_modified });
     }
 
     fn deleteTargetIfExists(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         const result = if (is_abs)
-            std.fs.deleteFileAbsolute(self.path)
+            std.Io.Dir.deleteFileAbsolute(io, self.path)
         else
-            std.fs.cwd().deleteFile(self.path);
+            std.Io.Dir.cwd().deleteFile(io, self.path);
 
         result catch |err| switch (err) {
             error.FileNotFound => {},

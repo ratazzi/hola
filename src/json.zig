@@ -66,7 +66,7 @@ pub fn freeJsonValue(allocator: std.mem.Allocator, value: *std.json.Value) void 
                 allocator.free(entry.key_ptr.*);
                 freeJsonValue(allocator, entry.value_ptr);
             }
-            obj.deinit();
+            obj.deinit(allocator);
         },
         else => {},
     }
@@ -120,7 +120,7 @@ pub fn mrubyValueToJsonValue(mrb: *mruby.mrb_state, allocator: std.mem.Allocator
     } else if (zig_mrb_hash_p(val) != 0) {
         const keys = mrb_hash_keys(mrb, val);
         const len = mruby.mrb_ary_len(mrb, keys);
-        var obj = std.json.ObjectMap.init(allocator);
+        var obj = std.json.ObjectMap.empty;
 
         for (0..@intCast(len)) |i| {
             const key = mruby.mrb_ary_ref(mrb, keys, @intCast(i));
@@ -131,7 +131,7 @@ pub fn mrubyValueToJsonValue(mrb: *mruby.mrb_state, allocator: std.mem.Allocator
             const key_owned = try allocator.dupe(u8, std.mem.span(key_cstr));
 
             const json_value = try mrubyValueToJsonValue(mrb, allocator, value);
-            try obj.put(key_owned, json_value);
+            try obj.put(allocator, key_owned, json_value);
         }
         return .{ .object = obj };
     }

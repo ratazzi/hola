@@ -5,6 +5,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const regex = @import("../regex.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 pub const Resource = struct {
     name: []const u8,
@@ -68,13 +69,15 @@ pub const Resource = struct {
 };
 
 fn applyEdit(res: Resource) !bool {
-    const file = std.fs.openFileAbsolute(res.path, .{}) catch |err| {
+    const io = global_io.io();
+    const file = std.Io.Dir.openFileAbsolute(io, res.path, .{}) catch |err| {
         logger.err("Failed to open file {s}: {}", .{ res.path, err });
         return err;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = file.readToEndAlloc(res.allocator, std.math.maxInt(usize)) catch |err| {
+    var file_reader = file.reader(io, &.{});
+    const content = file_reader.interface.allocRemaining(res.allocator, .unlimited) catch |err| {
         logger.err("Failed to read file {s}: {}", .{ res.path, err });
         return err;
     };
@@ -102,7 +105,7 @@ fn applyEdit(res: Resource) !bool {
     if (res.backup) {
         const backup_path = try std.fmt.allocPrint(res.allocator, "{s}.bak", .{res.path});
         defer res.allocator.free(backup_path);
-        std.fs.copyFileAbsolute(res.path, backup_path, .{}) catch |err| {
+        std.Io.Dir.copyFileAbsolute(res.path, backup_path, io, .{}) catch |err| {
             logger.warn("Failed to create backup {s}: {}", .{ backup_path, err });
         };
     }
@@ -249,10 +252,11 @@ fn doInsertLineIfNoMatch(allocator: std.mem.Allocator, content: []const u8, patt
 }
 
 fn writeFile(res: Resource, content: []const u8) !void {
+    const io = global_io.io();
     try base.ensureParentDir(res.path);
 
     const dir_path = std.fs.path.dirname(res.path);
-    const timestamp = std.time.nanoTimestamp();
+    const timestamp = std.Io.Timestamp.now(io, .real).toNanoseconds();
     const pid = std.c.getpid();
 
     const temp_name = try std.fmt.allocPrint(res.allocator, ".hola-file-edit-{d}-{d}", .{ timestamp, pid });
@@ -264,14 +268,16 @@ fn writeFile(res: Resource, content: []const u8) !void {
         try res.allocator.dupe(u8, temp_name);
     defer res.allocator.free(temp_path);
 
-    var temp_file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true, .exclusive = true });
-    errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
+    var temp_file = try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true, .exclusive = true });
+    errdefer std.Io.Dir.deleteFileAbsolute(io, temp_path) catch {};
 
-    try temp_file.writeAll(content);
-    try temp_file.sync();
-    temp_file.close();
+    var temp_writer = temp_file.writer(io, &.{});
+    try temp_writer.interface.writeAll(content);
+    try temp_writer.interface.flush();
+    try temp_file.sync(io);
+    temp_file.close(io);
 
-    try std.fs.renameAbsolute(temp_path, res.path);
+    try std.Io.Dir.renameAbsolute(temp_path, res.path, io);
 
     base.applyFileAttributes(res.path, .{
         .mode = res.mode,

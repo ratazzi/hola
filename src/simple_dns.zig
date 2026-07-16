@@ -1,5 +1,6 @@
 const std = @import("std");
 const logger = @import("logger.zig");
+const global_io = @import("global_io.zig");
 
 /// Simple DNS query implementation for A and AAAA records
 /// This is a minimal implementation to support custom DNS servers
@@ -35,12 +36,13 @@ pub fn query(
     };
     defer allocator.free(ns_addr);
 
-    // Create UDP socket
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
-    defer std.posix.close(sock);
+    // Create UDP socket (raw libc; zig 0.16 removed std.posix socket wrappers)
+    const sock = std.c.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    if (sock < 0) return error.SocketFailed;
+    defer _ = std.c.close(sock);
 
     // Parse nameserver address
-    const ns_ip = std.net.Address.parseIp4(ns_addr, 53) catch {
+    const ns_ip = std.Io.net.IpAddress.parseIp4(ns_addr, 53) catch {
         return error.InvalidNameserver;
     };
 
@@ -49,8 +51,10 @@ pub fn query(
     const query_len = try buildDNSQuery(&query_buf, hostname, qtype);
 
     // Send query
-    const sent = try std.posix.sendto(sock, query_buf[0..query_len], 0, &ns_ip.any, ns_ip.getOsSockLen());
-    if (sent != query_len) {
+    var sa_storage: std.Io.Threaded.PosixAddress = undefined;
+    const sa_len = std.Io.Threaded.addressToPosix(&ns_ip, &sa_storage);
+    const sent = std.c.sendto(sock, &query_buf, query_len, 0, &sa_storage.any, sa_len);
+    if (sent < 0 or @as(usize, @intCast(sent)) != query_len) {
         return error.SendFailed;
     }
 
@@ -69,7 +73,9 @@ pub fn query(
         &std.mem.toBytes(timeout),
     );
 
-    const recv_len = try std.posix.recv(sock, &response_buf, 0);
+    const recv_result = std.c.recv(sock, &response_buf, response_buf.len, 0);
+    if (recv_result < 0) return error.RecvFailed;
+    const recv_len: usize = @intCast(recv_result);
 
     // Parse DNS response
     return try parseDNSResponse(allocator, response_buf[0..recv_len], qtype);
@@ -78,28 +84,47 @@ pub fn query(
 /// Resolve nameserver hostname to IP address
 fn resolveNameserver(allocator: std.mem.Allocator, nameserver: []const u8) ![]const u8 {
     // Check if it's already an IP address
-    if (std.net.Address.parseIp4(nameserver, 0)) |_| {
+    if (std.Io.net.IpAddress.parseIp4(nameserver, 0)) |_| {
         return try allocator.dupe(u8, nameserver);
     } else |_| {}
 
     // It's a hostname, resolve it using system resolver
-    const addr_list = try std.net.getAddressList(allocator, nameserver, 0);
-    defer addr_list.deinit();
+    var addrs: [max_lookup_results]std.Io.net.IpAddress = undefined;
+    const count = lookupHost(nameserver, &addrs) catch return error.NoIPv4Address;
 
-    for (addr_list.addrs) |addr| {
-        if (addr.any.family == std.posix.AF.INET) {
-            // Format IPv4 address
-            const addr_bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
-            return try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{
-                addr_bytes[0],
-                addr_bytes[1],
-                addr_bytes[2],
-                addr_bytes[3],
-            });
+    for (addrs[0..count]) |addr| {
+        if (addr == .ip4) {
+            const b = addr.ip4.bytes;
+            return try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] });
         }
     }
 
     return error.NoIPv4Address;
+}
+
+pub const max_lookup_results = 16;
+
+/// Resolve a hostname with the system resolver, writing up to `out.len`
+/// addresses. Returns the number of addresses written. Replaces the removed
+/// `std.net.getAddressList`.
+pub fn lookupHost(hostname: []const u8, out: []std.Io.net.IpAddress) !usize {
+    const io = global_io.io();
+    const host = std.Io.net.HostName.init(hostname) catch return error.UnknownHostName;
+    var queue_buf: [16]std.Io.net.HostName.LookupResult = undefined;
+    var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&queue_buf);
+    try host.lookup(io, &queue, .{ .port = 0 });
+    var n: usize = 0;
+    while (n < out.len) {
+        const res = queue.getOne(io) catch break;
+        switch (res) {
+            .address => |a| {
+                out[n] = a;
+                n += 1;
+            },
+            .canonical_name => {},
+        }
+    }
+    return n;
 }
 
 /// Build DNS query packet

@@ -25,24 +25,20 @@ pub fn zig_resolv_getaddress(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv
 
     const hostname = name_ptr[0..@intCast(name_len)];
 
+    _ = allocator;
+
     // Resolve DNS
-    const address_list = std.net.getAddressList(allocator, hostname, 0) catch {
+    var addrs: [simple_dns.max_lookup_results]std.Io.net.IpAddress = undefined;
+    const count = simple_dns.lookupHost(hostname, &addrs) catch {
         return mruby.mrb_nil_value();
     };
-    defer address_list.deinit();
 
     // Find first IPv4 address
-    for (address_list.addrs) |addr| {
-        if (addr.any.family == std.posix.AF.INET) {
-            // Format IPv4 address
-            const addr_bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
+    for (addrs[0..count]) |addr| {
+        if (addr == .ip4) {
+            const b = addr.ip4.bytes;
             var ip_buf: [16]u8 = undefined;
-            const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                addr_bytes[0],
-                addr_bytes[1],
-                addr_bytes[2],
-                addr_bytes[3],
-            }) catch {
+            const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch {
                 return mruby.mrb_nil_value();
             };
 
@@ -127,38 +123,34 @@ pub fn zig_resolv_getaddresses(mrb: *mruby.mrb_state, _: mruby.mrb_value) callco
     }
 
     // Use system resolver
-    const address_list = std.net.getAddressList(allocator, hostname, 0) catch {
+    var addrs: [simple_dns.max_lookup_results]std.Io.net.IpAddress = undefined;
+    const count = simple_dns.lookupHost(hostname, &addrs) catch {
         return mruby.mrb_nil_value();
     };
-    defer address_list.deinit();
 
     // Create result array
     const result = mruby.mrb_ary_new_capa(mrb, 8);
 
     var ip_buf: [46]u8 = undefined;
 
-    for (address_list.addrs) |addr| {
-        const ip_str = if (addr.any.family == std.posix.AF.INET) blk: {
-            // IPv4
-            const addr_bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
-            break :blk std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                addr_bytes[0],
-                addr_bytes[1],
-                addr_bytes[2],
-                addr_bytes[3],
-            }) catch continue;
-        } else if (addr.any.family == std.posix.AF.INET6) blk: {
-            // IPv6
-            const addr_bytes = &addr.in6.sa.addr;
-            var parts: [8]u16 = undefined;
-            for (0..8) |i| {
-                parts[i] = (@as(u16, addr_bytes[i * 2]) << 8) | addr_bytes[i * 2 + 1];
-            }
-            break :blk std.fmt.bufPrint(&ip_buf, "{x}:{x}:{x}:{x}:{x}:{x}:{x}:{x}", .{
-                parts[0], parts[1], parts[2], parts[3],
-                parts[4], parts[5], parts[6], parts[7],
-            }) catch continue;
-        } else continue;
+    for (addrs[0..count]) |addr| {
+        const ip_str = switch (addr) {
+            .ip4 => |ip4| blk: {
+                const b = ip4.bytes;
+                break :blk std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch continue;
+            },
+            .ip6 => |ip6| blk: {
+                const addr_bytes = &ip6.bytes;
+                var parts: [8]u16 = undefined;
+                for (0..8) |i| {
+                    parts[i] = (@as(u16, addr_bytes[i * 2]) << 8) | addr_bytes[i * 2 + 1];
+                }
+                break :blk std.fmt.bufPrint(&ip_buf, "{x}:{x}:{x}:{x}:{x}:{x}:{x}:{x}", .{
+                    parts[0], parts[1], parts[2], parts[3],
+                    parts[4], parts[5], parts[6], parts[7],
+                }) catch continue;
+            },
+        };
 
         const ip_mrb = mruby.mrb_str_new(mrb, ip_str.ptr, @intCast(ip_str.len));
         mruby.mrb_ary_push(mrb, result, ip_mrb);

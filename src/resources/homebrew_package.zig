@@ -5,6 +5,7 @@ const logger = @import("../logger.zig");
 const builtin = @import("builtin");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const common = @import("package_common.zig");
+const global_io = @import("../global_io.zig");
 
 // Only compile on macOS
 comptime {
@@ -254,43 +255,36 @@ fn isInstalled(allocator: std.mem.Allocator, name: []const u8) !bool {
     const cmd = try std.fmt.allocPrint(allocator, "brew list --versions {s} 2>/dev/null", .{name});
     defer allocator.free(cmd);
 
-    var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const result = try std.process.run(allocator, global_io.io(), .{
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    try child.spawn();
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(stdout);
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-    const exited_ok = switch (term) {
-        .Exited => |code| code == 0,
+    const exited_ok = switch (result.term) {
+        .exited => |code| code == 0,
         else => false,
     };
 
     // If command succeeded and there's output, package is installed
-    return exited_ok and stdout.len > 0;
+    return exited_ok and result.stdout.len > 0;
 }
 
 /// Execute a Homebrew command with appropriate error mapping based on action
 fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Action, packages: []const []const u8) !void {
-    var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // stdin is set to /dev/null (via std.process.run) to prevent interactive prompts
+    const result = try std.process.run(allocator, global_io.io(), .{
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
+    });
 
-    // Set stdin to /dev/null to prevent any interactive prompts
-    child.stdin_behavior = .Ignore;
-
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const stdout = result.stdout;
+    const stderr = result.stderr;
     defer allocator.free(stdout);
     defer allocator.free(stderr);
 
-    const term = try child.wait();
+    const term = result.term;
 
     // Log output (but don't display it)
     if (stdout.len > 0) {
@@ -309,7 +303,7 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
 
     // Check exit status and return appropriate error based on action
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 // Format package list for error message
                 const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
@@ -329,10 +323,10 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
                 };
             }
         },
-        .Signal => |sig| {
+        .signal => |sig| {
             const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
             defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
-            logger.err("[homebrew_package] command killed by signal {d} for package(s): {s}", .{ sig, pkg_list });
+            logger.err("[homebrew_package] command killed by signal {d} for package(s): {s}", .{ @intFromEnum(sig), pkg_list });
             return common.PackageError.CommandFailed;
         },
         else => {

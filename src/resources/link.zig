@@ -1,6 +1,7 @@
 const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
+const global_io = @import("../global_io.zig");
 
 /// Link resource data structure
 pub const Resource = struct {
@@ -70,18 +71,19 @@ pub const Resource = struct {
     }
 
     fn applyCreate(self: Resource) !bool {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
 
         // Check if link already exists
         var link_buf: [std.fs.max_path_bytes]u8 = undefined;
         const link_exists = blk: {
             if (is_abs) {
-                _ = std.fs.readLinkAbsolute(self.path, &link_buf) catch |err| switch (err) {
+                _ = std.Io.Dir.readLinkAbsolute(io, self.path, &link_buf) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                _ = std.fs.cwd().readLink(self.path, &link_buf) catch |err| switch (err) {
+                _ = std.Io.Dir.cwd().readLink(io, self.path, &link_buf) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -92,10 +94,11 @@ pub const Resource = struct {
         if (link_exists) {
             // Check if link points to correct target
             var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const current_target = if (is_abs)
-                try std.fs.readLinkAbsolute(self.path, &target_buf)
+            const target_len = if (is_abs)
+                try std.Io.Dir.readLinkAbsolute(io, self.path, &target_buf)
             else
-                try std.fs.cwd().readLink(self.path, &target_buf);
+                try std.Io.Dir.cwd().readLink(io, self.path, &target_buf);
+            const current_target = target_buf[0..target_len];
 
             // Normalize paths for comparison
             const normalized_current = try normalizePath(std.heap.page_allocator, current_target);
@@ -108,23 +111,23 @@ pub const Resource = struct {
             } else {
                 // Delete existing link and create new one
                 if (is_abs) {
-                    try std.fs.deleteFileAbsolute(self.path);
+                    try std.Io.Dir.deleteFileAbsolute(io, self.path);
                 } else {
-                    try std.fs.cwd().deleteFile(self.path);
+                    try std.Io.Dir.cwd().deleteFile(io, self.path);
                 }
             }
         }
 
         // Create parent directory if it doesn't exist
         if (std.fs.path.dirname(self.path)) |dir| {
-            try std.fs.cwd().makePath(dir);
+            try std.Io.Dir.cwd().createDirPath(io, dir);
         }
 
         // Create symbolic link
         if (is_abs) {
-            try std.fs.symLinkAbsolute(self.target, self.path, .{});
+            try std.Io.Dir.symLinkAbsolute(io, self.target, self.path, .{});
         } else {
-            try std.fs.cwd().symLink(self.target, self.path, .{});
+            try std.Io.Dir.cwd().symLink(io, self.target, self.path, .{});
         }
 
         // Set ownership if specified (use lchown for symlinks)
@@ -137,36 +140,39 @@ pub const Resource = struct {
 
     /// Set ownership for a symbolic link (does not follow the link)
     fn setLinkOwnership(link_path: []const u8, owner: ?[]const u8, group: ?[]const u8) !void {
-        const c = @cImport({
-            @cInclude("unistd.h");
-        });
+        // A uid/gid of -1 leaves that field unchanged, matching the previous
+        // behaviour of preserving the current uid/gid when only one of
+        // owner/group is specified. Uses libc fchownat because zig 0.16.0's
+        // Io.Dir.setFileOwner declares an error set narrower than its
+        // Threaded implementation returns (compile error when referenced).
+        const uid: std.posix.uid_t = if (owner) |o| try base.getUserId(o) else @bitCast(@as(i32, -1));
+        const gid: std.posix.gid_t = if (group) |g| try base.getGroupId(g) else @bitCast(@as(i32, -1));
 
-        // Get current ownership using lstat (doesn't follow symlinks)
-        const stat = try std.posix.fstatat(std.posix.AT.FDCWD, link_path, std.posix.AT.SYMLINK_NOFOLLOW);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (link_path.len >= path_buf.len) return error.ChownFailed;
+        @memcpy(path_buf[0..link_path.len], link_path);
+        path_buf[link_path.len] = 0;
 
-        const uid = if (owner) |o| try base.getUserId(o) else stat.uid;
-        const gid = if (group) |g| try base.getGroupId(g) else stat.gid;
-
-        // Use lchown to change ownership without following the link
-        const path_z = try std.posix.toPosixPath(link_path);
-        if (c.lchown(&path_z, uid, gid) != 0) {
+        // AT_SYMLINK_NOFOLLOW, i.e. lchown semantics.
+        if (std.c.fchownat(std.posix.AT.FDCWD, path_buf[0..link_path.len :0], uid, gid, std.posix.AT.SYMLINK_NOFOLLOW) != 0) {
             return error.ChownFailed;
         }
     }
 
     fn applyDelete(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
 
         // Check if link exists
         var link_buf: [std.fs.max_path_bytes]u8 = undefined;
         const link_exists = blk: {
             if (is_abs) {
-                _ = std.fs.readLinkAbsolute(self.path, &link_buf) catch |err| switch (err) {
+                _ = std.Io.Dir.readLinkAbsolute(io, self.path, &link_buf) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                _ = std.fs.cwd().readLink(self.path, &link_buf) catch |err| switch (err) {
+                _ = std.Io.Dir.cwd().readLink(io, self.path, &link_buf) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -180,19 +186,20 @@ pub const Resource = struct {
 
         // Delete link
         if (is_abs) {
-            try std.fs.deleteFileAbsolute(self.path);
+            try std.Io.Dir.deleteFileAbsolute(io, self.path);
         } else {
-            try std.fs.cwd().deleteFile(self.path);
+            try std.Io.Dir.cwd().deleteFile(io, self.path);
         }
     }
 
     fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+        const io = global_io.io();
         // Resolve relative paths and remove redundant components
         const resolved = if (std.fs.path.isAbsolute(path))
             try allocator.dupe(u8, path)
         else blk: {
             // For relative paths, resolve them relative to current working directory
-            const cwd = try std.process.getCwdAlloc(allocator);
+            const cwd = try std.process.currentPathAlloc(io, allocator);
             defer allocator.free(cwd);
             const full_path = try std.fs.path.join(allocator, &.{ cwd, path });
             break :blk full_path;

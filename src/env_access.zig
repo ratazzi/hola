@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 const mruby = @import("mruby.zig");
 const c = @cImport({
     @cInclude("stdlib.h");
@@ -29,7 +30,7 @@ pub fn zig_env_get(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby
     const key = key_ptr[0..@intCast(key_len)];
 
     // Get environment variable
-    const value = std.process.getEnvVarOwned(allocator, key) catch {
+    const value = global_io.getEnvOwned(allocator, key) catch {
         return mruby.mrb_nil_value();
     };
     defer allocator.free(value);
@@ -110,7 +111,7 @@ pub fn zig_env_has_key(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) m
     const key = key_ptr[0..@intCast(key_len)];
 
     // Check if environment variable exists
-    if (std.process.getEnvVarOwned(allocator, key)) |value| {
+    if (global_io.getEnvOwned(allocator, key)) |value| {
         allocator.free(value);
         return zig_mrb_true_value();
     } else |_| {

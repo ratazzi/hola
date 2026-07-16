@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const builtin = @import("builtin");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// Systemd unit resource data structure
 pub const Resource = struct {
@@ -88,18 +89,21 @@ pub const Resource = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
 
+        const io = global_io.io();
+
         // Determine unit file path
         const unit_path = try getUnitPath(allocator, self.name);
 
         // Check if file exists and has same content
         const file_exists = blk: {
-            const file = std.fs.openFileAbsolute(unit_path, .{}) catch |err| switch (err) {
+            const file = std.Io.Dir.openFileAbsolute(io, unit_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk false,
                 else => return err,
             };
-            defer file.close();
+            defer file.close(io);
 
-            const existing_content = try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB max
+            var file_reader = file.reader(io, &.{});
+            const existing_content = try file_reader.interface.allocRemaining(allocator, .limited(1024 * 1024)); // 1MB max
             break :blk std.mem.eql(u8, existing_content, self.content.?);
         };
 
@@ -108,10 +112,12 @@ pub const Resource = struct {
         }
 
         // Write unit file
-        const file = try std.fs.createFileAbsolute(unit_path, .{ .truncate = true });
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(io, unit_path, .{ .truncate = true });
+        defer file.close(io);
 
-        try file.writeAll(self.content.?);
+        var file_writer = file.writer(io, &.{});
+        try file_writer.interface.writeAll(self.content.?);
+        try file_writer.interface.flush();
 
         // Reload systemd daemon
         _ = try runSystemctl(allocator, &[_][]const u8{"daemon-reload"});
@@ -214,20 +220,13 @@ pub const Resource = struct {
             try argv.append(allocator, arg);
         }
 
-        var child = std.process.Child.init(argv.items, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
+        const result = try std.process.run(allocator, global_io.io(), .{ .argv = argv.items });
+        defer allocator.free(result.stderr);
+        const stdout = result.stdout;
+        const stderr = result.stderr;
 
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-        defer allocator.free(stderr);
-
-        const term = try child.wait();
-
-        switch (term) {
-            .Exited => |code| {
+        switch (result.term) {
+            .exited => |code| {
                 if (code != 0) {
                     logger.debug("[systemd_unit] systemctl {s} failed with code {d}\n", .{ args[0], code });
                     if (stderr.len > 0) {

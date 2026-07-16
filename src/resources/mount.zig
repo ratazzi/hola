@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const builtin = @import("builtin");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 pub const Resource = struct {
     mount_point: []const u8,
@@ -193,7 +194,7 @@ pub const Resource = struct {
         }
 
         // Read fstab, replace or append
-        const fstab_content = std.fs.cwd().readFileAlloc(allocator, "/etc/fstab", 1024 * 1024) catch |err| switch (err) {
+        const fstab_content = std.Io.Dir.cwd().readFileAlloc(global_io.io(), "/etc/fstab", allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => "",
             else => return err,
         };
@@ -257,7 +258,7 @@ pub const Resource = struct {
             return false;
         }
 
-        const fstab_content = std.fs.cwd().readFileAlloc(allocator, "/etc/fstab", 1024 * 1024) catch |err| switch (err) {
+        const fstab_content = std.Io.Dir.cwd().readFileAlloc(global_io.io(), "/etc/fstab", allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => return err,
         };
@@ -312,12 +313,15 @@ pub const Resource = struct {
     }
 
     fn atomicWriteFstab(content: []const u8) !void {
+        const io = global_io.io();
         const tmp_path = "/etc/fstab.hola.tmp";
-        const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(content);
+        const file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true });
+        defer file.close(io);
+        var file_writer = file.writer(io, &.{});
+        try file_writer.interface.writeAll(content);
+        try file_writer.interface.flush();
 
-        try std.fs.renameAbsolute(tmp_path, "/etc/fstab");
+        try std.Io.Dir.renameAbsolute(tmp_path, "/etc/fstab", io);
     }
 
     pub fn actionFromString(action_str: []const u8) Action {
@@ -372,7 +376,7 @@ pub fn parseFstabFields(line: []const u8) ?FstabFields {
 }
 
 fn parseFstab(allocator: std.mem.Allocator, mount_point: []const u8) !?FstabFields {
-    const content = try std.fs.cwd().readFileAlloc(allocator, "/etc/fstab", 1024 * 1024);
+    const content = try std.Io.Dir.cwd().readFileAlloc(global_io.io(), "/etc/fstab", allocator, .limited(1024 * 1024));
 
     var result: ?FstabFields = null;
     var lines_iter = std.mem.splitScalar(u8, content, '\n');
@@ -407,20 +411,13 @@ pub fn parseMountOutputLine(line: []const u8, mount_point: []const u8) bool {
 }
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const result = try std.process.run(allocator, global_io.io(), .{ .argv = argv });
+    defer allocator.free(result.stderr);
+    const stdout = result.stdout;
+    const stderr = result.stderr;
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-
-    switch (term) {
-        .Exited => |code| {
+    switch (result.term) {
+        .exited => |code| {
             if (code != 0) {
                 logger.debug("[mount] command failed with code {d}\n", .{code});
                 if (stderr.len > 0) {

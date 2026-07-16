@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const clap = @import("clap");
 const logger = @import("logger.zig");
+const global_io = @import("global_io.zig");
 const help_formatter = @import("help_formatter.zig");
 pub const build_options = @import("build_options");
 const commands = @import("commands.zig");
@@ -18,16 +19,16 @@ const main_parsers = .{
     .command = clap.parsers.string,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    global_io.set(init.io);
+    global_io.setEnviron(init.environ_map);
 
     // Initialize logger (non-critical, continue if it fails)
     logger.initGlobal(allocator, null) catch {};
     defer logger.deinitGlobal();
 
-    var iter = try std.process.ArgIterator.initWithAllocator(allocator);
+    var iter = init.minimal.args.iterate();
     defer iter.deinit();
     _ = iter.next(); // skip exe name
 
@@ -37,7 +38,7 @@ pub fn main() !void {
         .diagnostic = &diag,
         .terminating_positional = 0,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(init.io, std.Io.File.stderr(), err);
         return;
     };
     defer parsed.deinit();
@@ -60,7 +61,7 @@ pub fn main() !void {
     try printMainHelp(null);
 }
 
-fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     if (std.mem.eql(u8, command, "help")) {
         try printMainHelp(null);
         return;
@@ -251,10 +252,12 @@ test "simple test" {
 
 test "fuzz example" {
     const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
+        fn testOne(context: @This(), smith: *std.testing.Smith) anyerror!void {
             _ = context;
             // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
+            var buf: [32]u8 = undefined;
+            const len = smith.slice(&buf);
+            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", buf[0..len]));
         }
     };
     try std.testing.fuzz(Context{}, Context.testOne, .{});

@@ -1,9 +1,8 @@
 const std = @import("std");
 const plist = @import("../plist.zig");
+const global_io = @import("../global_io.zig");
 
-const c_cf = @cImport({
-    @cInclude("CoreFoundation/CoreFoundation.h");
-});
+const c_cf = @import("../cf.zig").c;
 
 /// Read a dock preference from a specific host domain (AnyHost or CurrentHost).
 fn readDockPrefFromHost(alloc: std.mem.Allocator, key: []const u8, host: c_cf.CFStringRef) !?plist.Value {
@@ -118,10 +117,10 @@ fn readDockPref(alloc: std.mem.Allocator, key: []const u8) !?plist.Value {
     return null;
 }
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     _ = iter;
 
-    const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch {
+    const home_dir = global_io.getEnvOwned(allocator, "HOME") catch {
         std.debug.print("Error: HOME environment variable not set\n", .{});
         return;
     };
@@ -277,13 +276,13 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     }
 
     try output.appendSlice(allocator, "  ]\n");
-    try std.fmt.format(output.writer(allocator), "  orientation :{s}\n", .{orientation});
-    try std.fmt.format(output.writer(allocator), "  autohide {s}\n", .{if (autohide) "true" else "false"});
-    try std.fmt.format(output.writer(allocator), "  magnification {s}\n", .{if (magnification) "true" else "false"});
-    try std.fmt.format(output.writer(allocator), "  tilesize {d}\n", .{tilesize});
-    try std.fmt.format(output.writer(allocator), "  largesize {d}\n", .{largesize});
+    try output.print(allocator, "  orientation :{s}\n", .{orientation});
+    try output.print(allocator, "  autohide {s}\n", .{if (autohide) "true" else "false"});
+    try output.print(allocator, "  magnification {s}\n", .{if (magnification) "true" else "false"});
+    try output.print(allocator, "  tilesize {d}\n", .{tilesize});
+    try output.print(allocator, "  largesize {d}\n", .{largesize});
     try output.appendSlice(allocator, "end\n");
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(output.items);
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(global_io.io(), output.items);
 }

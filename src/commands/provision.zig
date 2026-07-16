@@ -2,6 +2,7 @@ const std = @import("std");
 const clap = @import("clap");
 const provision = @import("../provision.zig");
 const http = @import("../http.zig");
+const global_io = @import("../global_io.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
@@ -84,9 +85,11 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
+    const io = global_io.io();
+
     var temp_file_path: ?[]const u8 = null;
     defer if (temp_file_path) |path| {
-        std.fs.deleteFileAbsolute(path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
         allocator.free(path);
     };
 
@@ -101,14 +104,14 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
 
         std.debug.print("[fetch] Downloading provision script from {s}\n", .{display_url});
 
-        const temp_dir = std.process.getEnvVarOwned(allocator, "TMPDIR") catch
+        const temp_dir = global_io.getEnvOwned(allocator, "TMPDIR") catch
             try allocator.dupe(u8, "/tmp");
         defer allocator.free(temp_dir);
 
         var rand_buf: [8]u8 = undefined;
-        std.crypto.random.bytes(&rand_buf);
+        io.random(&rand_buf);
         const rand_hex = std.fmt.bytesToHex(rand_buf, .lower);
-        const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}-{s}.rb", .{ temp_dir, std.time.timestamp(), &rand_hex });
+        const temp_file = try std.fmt.allocPrint(allocator, "{s}/provision-{d}-{s}.rb", .{ temp_dir, std.Io.Timestamp.now(io, .real).toSeconds(), &rand_hex });
         temp_file_path = temp_file;
 
         const cfg = http.Config{
@@ -154,9 +157,9 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
             return error.DownloadFailed;
         }
 
-        const file = try std.fs.cwd().createFile(temp_file, .{ .exclusive = true });
-        defer file.close();
-        try file.writeAll(response.body);
+        const file = try std.Io.Dir.cwd().createFile(io, temp_file, .{ .exclusive = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, response.body);
 
         std.debug.print("[fetch] Downloaded to {s}\n", .{temp_file});
         break :blk temp_file;
@@ -170,13 +173,13 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
     });
 }
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(global_io.io(), std.Io.File.stderr(), err);
         return;
     };
     defer res.deinit();
@@ -185,7 +188,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 
     const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
 
-    var use_pretty_output = std.posix.isatty(std.posix.STDOUT_FILENO);
+    var use_pretty_output = std.Io.File.stdout().isTty(global_io.io()) catch false;
     if (res.args.output) |output_mode| {
         if (std.mem.eql(u8, output_mode, "plain")) {
             use_pretty_output = false;
@@ -265,12 +268,13 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 }
 
 fn printHelp(reason: ?[]const u8) !void {
-    const out = std.fs.File.stdout();
+    const io = global_io.io();
+    const out = std.Io.File.stdout();
     if (reason) |msg| {
-        try out.writeAll(msg);
-        try out.writeAll("\n\n");
+        try out.writeStreamingAll(io, msg);
+        try out.writeStreamingAll(io, "\n\n");
     }
-    try out.writeAll(
+    try out.writeStreamingAll(io,
         \\provision
         \\  hola provision [OPTIONS] <file-or-url>
         \\

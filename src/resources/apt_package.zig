@@ -5,6 +5,7 @@ const logger = @import("../logger.zig");
 const builtin = @import("builtin");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const common = @import("package_common.zig");
+const global_io = @import("../global_io.zig");
 
 // Only compile on Linux
 comptime {
@@ -254,50 +255,50 @@ fn isInstalled(allocator: std.mem.Allocator, name: []const u8) !bool {
     const cmd = try std.fmt.allocPrint(allocator, "dpkg-query -W -f='${{Status}}' {s} 2>/dev/null | grep -q 'install ok installed'", .{name});
     defer allocator.free(cmd);
 
-    var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const result = try std.process.run(allocator, global_io.io(), .{
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    try child.spawn();
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(stdout);
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-    return switch (term) {
-        .Exited => |code| code == 0,
+    return switch (result.term) {
+        .exited => |code| code == 0,
         else => false,
     };
 }
 
 /// Execute an APT command with appropriate error mapping based on action
 fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Action, packages: []const []const u8) !void {
-    var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // Set Debian/APT-specific environment variables on top of the parent
+    // environment. When the process env map is unavailable (unit tests, before
+    // main ran), inherit the real parent env instead of spawning with only the
+    // overrides.
+    var env_map_storage: ?std.process.Environ.Map = null;
+    defer if (env_map_storage) |*map| map.deinit();
+    var environ_map: ?*const std.process.Environ.Map = null;
+    if (global_io.environMap()) |parent| {
+        var env_map = try parent.clone(allocator);
+        try env_map.put("DEBIAN_FRONTEND", "noninteractive");
+        try env_map.put("APT_LISTCHANGES_FRONTEND", "none");
+        try env_map.put("NEEDRESTART_MODE", "l"); // Avoid needrestart prompts
+        env_map_storage = env_map;
+        environ_map = &env_map_storage.?;
+    }
 
-    // Set stdin to /dev/null to prevent any interactive prompts
-    child.stdin_behavior = .Ignore;
+    // stdin is set to /dev/null (via std.process.run) to prevent interactive prompts
+    const result = try std.process.run(allocator, global_io.io(), .{
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
+        .environ_map = environ_map,
+    });
 
-    // Set Debian/APT-specific environment variables
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
-
-    try env_map.put("DEBIAN_FRONTEND", "noninteractive");
-    try env_map.put("APT_LISTCHANGES_FRONTEND", "none");
-    try env_map.put("NEEDRESTART_MODE", "l"); // Avoid needrestart prompts
-
-    child.env_map = &env_map;
-
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, std.math.maxInt(usize));
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const stdout = result.stdout;
+    const stderr = result.stderr;
     defer allocator.free(stdout);
     defer allocator.free(stderr);
 
-    const term = try child.wait();
+    const term = result.term;
 
     // Log output (but don't display it)
     if (stdout.len > 0) {
@@ -316,7 +317,7 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
 
     // Check exit status and return appropriate error based on action
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 // Format package list for error message
                 const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
@@ -336,10 +337,10 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
                 };
             }
         },
-        .Signal => |sig| {
+        .signal => |sig| {
             const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
             defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
-            logger.err("[apt_package] command killed by signal {d} for package(s): {s}", .{ sig, pkg_list });
+            logger.err("[apt_package] command killed by signal {d} for package(s): {s}", .{ @intFromEnum(sig), pkg_list });
             return common.PackageError.CommandFailed;
         },
         else => {

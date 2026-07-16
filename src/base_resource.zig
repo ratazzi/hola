@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("mruby.zig");
 pub const notification = @import("notification.zig");
 const builtin = @import("builtin");
+const global_io = @import("global_io.zig");
 
 // Guards (only_if/not_if) run arbitrary shell commands; a stuck one (e.g.
 // `only_if "sleep 99999"`) must not hang provisioning forever. Bound them with
@@ -194,18 +195,11 @@ pub const CommonProps = struct {
     /// Execute a shell command and return true if exit code is 0
     /// Optionally runs as specified user/group
     fn executeShellCommand(command: []const u8, user: ?[]const u8, group: ?[]const u8) !bool {
-        // Use ArenaAllocator for temporary allocations (matches pattern in execute.zig)
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const temp_allocator = arena.allocator();
+        const io = global_io.io();
 
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", command }, temp_allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.pgid = 0; // own process group, so a timeout can signal the whole tree
-
-        // Set user and/or group if specified (same logic as execute resource)
+        // Resolve user/group to uid/gid before spawning (same logic as execute resource)
+        var uid: ?std.posix.uid_t = null;
+        var gid: ?std.posix.gid_t = null;
         if (user != null or group != null) {
             const c = @cImport({
                 @cInclude("pwd.h");
@@ -227,8 +221,8 @@ pub const CommonProps = struct {
                     return error.UserNotFound;
                 }
 
-                child.uid = @intCast(pwd.*.pw_uid);
-                child.gid = @intCast(pwd.*.pw_gid);
+                uid = @intCast(pwd.*.pw_uid);
+                gid = @intCast(pwd.*.pw_gid);
             }
 
             // Override with group if specified
@@ -246,45 +240,51 @@ pub const CommonProps = struct {
                     return error.GroupNotFound;
                 }
 
-                child.gid = @intCast(grp.*.gr_gid);
+                gid = @intCast(grp.*.gr_gid);
             }
         }
 
-        try child.spawn();
-        // A pre-exec failure makes the forked child _exit(); reap it so the
-        // error path doesn't leave a zombie. stdio is .Ignore, so there are no
-        // parent-held pipes to close.
-        child.waitForSpawn() catch |err| {
-            reapGuardChild(child.id);
-            return err;
-        };
+        // A pre-exec failure is reported by spawn itself (which reaps the
+        // forked child); stdio is .ignore, so there are no parent-held pipes.
+        const child = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{ "/bin/sh", "-c", command },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .pgid = 0, // own process group, so a timeout can signal the whole tree
+            .uid = uid,
+            .gid = gid,
+        });
 
-        const term = waitGuardWithTimeout(child.id);
+        const child_pid = child.id orelse return error.SpawnFailed;
+        const term = waitGuardWithTimeout(child_pid);
 
         return switch (term) {
-            .Exited => |code| code == 0,
+            .exited => |code| code == 0,
             else => false, // signalled / timed out / unknown => treat as non-zero
         };
     }
 
     fn termFromStatus(status: u32) std.process.Child.Term {
         return if (std.posix.W.IFEXITED(status))
-            .{ .Exited = std.posix.W.EXITSTATUS(status) }
+            .{ .exited = std.posix.W.EXITSTATUS(status) }
         else if (std.posix.W.IFSIGNALED(status))
-            .{ .Signal = std.posix.W.TERMSIG(status) }
+            .{ .signal = std.posix.W.TERMSIG(status) }
         else if (std.posix.W.IFSTOPPED(status))
-            .{ .Stopped = std.posix.W.STOPSIG(status) }
+            .{ .stopped = std.posix.W.STOPSIG(status) }
         else
-            .{ .Unknown = status };
+            .{ .unknown = status };
     }
 
     /// Best-effort non-blocking reap for an already-dead child.
     fn reapGuardChild(pid: std.posix.pid_t) void {
-        const deadline = std.time.milliTimestamp() + GUARD_REAP_GRACE_MS;
-        while (std.time.milliTimestamp() < deadline) {
-            const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
-            if (res.pid != 0) return;
-            std.Thread.sleep(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms);
+        const io = global_io.io();
+        const deadline = std.Io.Timestamp.now(io, .real).toMilliseconds() + GUARD_REAP_GRACE_MS;
+        while (std.Io.Timestamp.now(io, .real).toMilliseconds() < deadline) {
+            var status: c_int = 0;
+            const res = std.c.waitpid(pid, &status, std.posix.W.NOHANG);
+            if (res > 0) return;
+            io.sleep(.fromNanoseconds(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms), .awake) catch {};
         }
     }
 
@@ -294,16 +294,18 @@ pub const CommonProps = struct {
     /// indefinitely — if the child is unresponsive even to SIGKILL we abandon it.
     fn waitGuardWithTimeout(pid: std.posix.pid_t) std.process.Child.Term {
         const logger = @import("logger.zig");
-        const deadline = std.time.milliTimestamp() + @as(i64, GUARD_TIMEOUT_S) * std.time.ms_per_s;
+        const io = global_io.io();
+        const deadline = std.Io.Timestamp.now(io, .real).toMilliseconds() + @as(i64, GUARD_TIMEOUT_S) * std.time.ms_per_s;
         var timed_out = false;
         var kill_deadline_ms: ?i64 = null;
         var give_up_deadline_ms: ?i64 = null;
 
         while (true) {
-            const res = std.posix.waitpid(pid, std.posix.W.NOHANG);
-            if (res.pid != 0) return termFromStatus(res.status);
+            var status: c_int = 0;
+            const res = std.c.waitpid(pid, &status, std.posix.W.NOHANG);
+            if (res > 0) return termFromStatus(@bitCast(status));
 
-            const now = std.time.milliTimestamp();
+            const now = std.Io.Timestamp.now(io, .real).toMilliseconds();
             if (!timed_out) {
                 if (now >= deadline) {
                     timed_out = true;
@@ -322,11 +324,11 @@ pub const CommonProps = struct {
                 if (give_up_deadline_ms) |gd| {
                     if (now >= gd) {
                         logger.warn("guard: child {d} unresponsive after SIGKILL; abandoning", .{pid});
-                        return .{ .Unknown = 0 };
+                        return .{ .unknown = 0 };
                     }
                 }
             }
-            std.Thread.sleep(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms);
+            io.sleep(.fromNanoseconds(GUARD_POLL_INTERVAL_MS * std.time.ns_per_ms), .awake) catch {};
         }
     }
 
@@ -531,7 +533,8 @@ pub const FileAttributes = struct {
 /// Uses AT_FDCWD to work with the current working directory
 /// Silently ignores errors to maintain backward compatibility
 pub fn setFileMode(file_path: []const u8, mode: u32) void {
-    std.posix.fchmodat(std.posix.AT.FDCWD, file_path, @as(std.posix.mode_t, @intCast(mode)), 0) catch {};
+    const path_z = std.posix.toPosixPath(file_path) catch return;
+    _ = std.c.fchmodat(std.posix.AT.FDCWD, &path_z, @as(std.posix.mode_t, @intCast(mode)), 0);
 }
 
 /// Set file owner (user) for a given file path
@@ -545,12 +548,13 @@ pub fn setFileOwner(file_path: []const u8, owner: []const u8) !void {
     // Get UID from username
     const uid = try getUserId(owner);
 
-    // Get current GID (we're not changing group) using fstatat
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
-    const gid = stat.gid;
+    // POSIX: (gid_t)-1 leaves the group unchanged - no stat needed
+    // (std.c.stat is unavailable on linux and musl's struct stat does not
+    // survive translate-c).
+    const path_z = try std.posix.toPosixPath(file_path);
+    const gid: std.posix.gid_t = @bitCast(@as(i32, -1));
 
     // Change ownership
-    const path_z = try std.posix.toPosixPath(file_path);
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
@@ -565,12 +569,11 @@ pub fn setFileGroup(file_path: []const u8, group: []const u8) !void {
     // Get GID from group name
     const gid = try getGroupId(group);
 
-    // Get current UID (we're not changing owner) using fstatat
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
-    const uid = stat.uid;
+    // POSIX: (uid_t)-1 leaves the owner unchanged - no stat needed.
+    const path_z = try std.posix.toPosixPath(file_path);
+    const uid: std.posix.uid_t = @bitCast(@as(i32, -1));
 
     // Change ownership
-    const path_z = try std.posix.toPosixPath(file_path);
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
@@ -582,12 +585,12 @@ pub fn setFileOwnerAndGroup(file_path: []const u8, owner: ?[]const u8, group: ?[
         @cInclude("unistd.h");
     });
 
-    const stat = try std.posix.fstatat(std.posix.AT.FDCWD, file_path, 0);
-
-    const uid = if (owner) |o| try getUserId(o) else stat.uid;
-    const gid = if (group) |g| try getGroupId(g) else stat.gid;
-
     const path_z = try std.posix.toPosixPath(file_path);
+
+    // POSIX: an id of -1 leaves that field unchanged - no stat needed.
+    const uid: std.posix.uid_t = if (owner) |o| try getUserId(o) else @bitCast(@as(i32, -1));
+    const gid: std.posix.gid_t = if (group) |g| try getGroupId(g) else @bitCast(@as(i32, -1));
+
     if (c.chown(&path_z, uid, gid) != 0) {
         return error.ChownFailed;
     }
@@ -641,39 +644,43 @@ pub fn getGroupId(groupname: []const u8) !std.posix.gid_t {
 /// Returns void and closes the backup file properly to prevent fd leaks
 /// If the original file doesn't exist, returns error.FileNotFound
 pub fn createBackup(allocator: std.mem.Allocator, file_path: []const u8, backup_ext: []const u8) !void {
+    const io = global_io.io();
     const backup_path = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ file_path, backup_ext });
     defer allocator.free(backup_path);
 
     // Open original file for reading
-    const original = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
+    const original = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound, // No file to backup
         else => return err,
     };
-    defer original.close();
+    defer original.close(io);
 
     // Create backup file (with parent directories if needed)
     const backup = blk: {
-        if (std.fs.cwd().createFile(backup_path, .{ .truncate = true })) |file| {
+        if (std.Io.Dir.cwd().createFile(io, backup_path, .{ .truncate = true })) |file| {
             break :blk file;
         } else |err| {
             if (err == error.FileNotFound) {
                 if (std.fs.path.dirname(backup_path)) |dir| {
-                    try std.fs.cwd().makePath(dir);
+                    try std.Io.Dir.cwd().createDirPath(io, dir);
                 }
-                break :blk try std.fs.cwd().createFile(backup_path, .{ .truncate = true });
+                break :blk try std.Io.Dir.cwd().createFile(io, backup_path, .{ .truncate = true });
             }
             return err;
         }
     };
-    defer backup.close(); // Properly close to prevent fd leak
+    defer backup.close(io); // Properly close to prevent fd leak
 
-    // Copy file contents in chunks
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const bytes_read = try original.read(&buf);
-        if (bytes_read == 0) break;
-        try backup.writeAll(buf[0..bytes_read]);
-    }
+    // Copy file contents from original to backup
+    var read_buf: [4096]u8 = undefined;
+    var original_reader = original.reader(io, &read_buf);
+    var write_buf: [4096]u8 = undefined;
+    var backup_writer = backup.writer(io, &write_buf);
+    _ = original_reader.interface.streamRemaining(&backup_writer.interface) catch |err| switch (err) {
+        error.ReadFailed => return original_reader.err.?,
+        error.WriteFailed => return backup_writer.err.?,
+    };
+    backup_writer.interface.flush() catch return backup_writer.err.?;
 }
 
 /// Ensure the parent directory for `path` exists, handling absolute and relative paths.
@@ -686,14 +693,15 @@ pub fn ensureParentDir(path: []const u8) !void {
 
 /// Ensure the provided path exists as a directory (creates parents as needed).
 pub fn ensurePath(path: []const u8) !void {
+    const io = global_io.io();
     if (std.fs.path.isAbsolute(path)) {
-        std.fs.makeDirAbsolute(path) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             error.FileNotFound => {
                 if (std.fs.path.dirname(path)) |parent| {
                     if (parent.len == 0) return err;
                     try ensurePath(parent);
-                    try std.fs.makeDirAbsolute(path);
+                    try std.Io.Dir.createDirAbsolute(io, path, .default_dir);
                 } else {
                     return err;
                 }
@@ -701,6 +709,6 @@ pub fn ensurePath(path: []const u8) !void {
             else => return err,
         };
     } else {
-        try std.fs.cwd().makePath(path);
+        try std.Io.Dir.cwd().createDirPath(io, path);
     }
 }

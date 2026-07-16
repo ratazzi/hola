@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 
 /// Send a macOS notification with title, subtitle, and body using AppleScript
 /// Uses osascript command specifically for notifications
@@ -34,11 +35,13 @@ pub fn notify(allocator: std.mem.Allocator, title: []const u8, subtitle: ?[]cons
 
     // Use osascript for notifications specifically (not because NSAppleScript doesn't work,
     // but because 'display notification' requires special permissions only osascript has)
-    var proc = std.process.Child.init(&[_][]const u8{ "osascript", "-e", script }, allocator);
-    proc.stdout_behavior = .Ignore;
-    proc.stderr_behavior = .Ignore;
-
-    _ = try proc.spawnAndWait();
+    const io = global_io.io();
+    var proc = try std.process.spawn(io, .{
+        .argv = &[_][]const u8{ "osascript", "-e", script },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = try proc.wait(io);
 }
 
 /// Send a simple notification with just title and body

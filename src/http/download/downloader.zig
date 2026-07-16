@@ -4,6 +4,7 @@ const types = @import("../types.zig");
 const Task = @import("task.zig").Task;
 const logger = @import("../../logger.zig");
 const utils = @import("../utils.zig");
+const global_io = @import("../../global_io.zig");
 
 const LAST_DOWNLOAD_ERROR_BUF_SIZE = 1024;
 threadlocal var last_download_error_buf: [LAST_DOWNLOAD_ERROR_BUF_SIZE]u8 = undefined;
@@ -68,7 +69,7 @@ pub const Result = struct {
 
 /// Context for download progress tracking
 const DownloadContext = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 };
 
 /// Simple download file wrapper (for direct use without Manager)
@@ -94,6 +95,8 @@ pub fn downloadFileWithClient(
     opts: Options,
 ) !Result {
     clearLastDownloadError();
+
+    const io = global_io.io();
 
     // Build request
     var req = types.Request.init(.GET, url);
@@ -146,27 +149,29 @@ pub fn downloadFileWithClient(
     const use_temp_file = opts.resume_from == null;
 
     const actual_dest_path = if (use_temp_file)
-        try std.fmt.allocPrint(allocator, "{s}.tmp.{d}", .{ dest_path, std.time.timestamp() })
+        try std.fmt.allocPrint(allocator, "{s}.tmp.{d}", .{ dest_path, std.Io.Timestamp.now(io, .real).toSeconds() })
     else
         dest_path;
     defer if (use_temp_file) allocator.free(actual_dest_path);
 
     // Open file for writing
-    const file = try std.fs.cwd().createFile(actual_dest_path, .{
+    const file = try std.Io.Dir.cwd().createFile(io, actual_dest_path, .{
         .truncate = opts.resume_from == null,
     });
     var file_closed = false;
     defer if (!file_closed) {
-        file.close();
+        file.close(io);
         // Clean up temp file if we used one and didn't move it
         if (use_temp_file) {
-            std.fs.cwd().deleteFile(actual_dest_path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, actual_dest_path) catch {};
         }
     };
 
     // Seek to resume position if needed
     if (opts.resume_from) |offset| {
-        try file.seekTo(offset);
+        var seek_buf: [0]u8 = .{};
+        var seeker = file.writerStreaming(io, &seek_buf);
+        try seeker.seekTo(offset);
     }
 
     // Download context
@@ -213,9 +218,9 @@ pub fn downloadFileWithClient(
         stream_result.headers.deinit();
 
         // Remove the partially written file before retrying.
-        std.fs.cwd().deleteFile(dest_path) catch {};
+        std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
         file_closed = true;
-        file.close();
+        file.close(io);
 
         var fresh_opts = opts;
         fresh_opts.resume_from = null;
@@ -246,20 +251,20 @@ pub fn downloadFileWithClient(
         // Temp file will be cleaned up by defer automatically
         // For resume mode, explicitly delete the corrupted file
         if (!use_temp_file) {
-            std.fs.cwd().deleteFile(dest_path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
         }
         return error.InvalidResponse;
     }
 
     // Close file before moving (required on Windows)
     file_closed = true;
-    file.close();
+    file.close(io);
 
     // If we used a temp file for conditional request, atomically replace the original
     if (use_temp_file) {
         // Delete old file first, then rename temp to dest
-        std.fs.cwd().deleteFile(dest_path) catch {};
-        try std.fs.cwd().rename(actual_dest_path, dest_path);
+        std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
+        try std.Io.Dir.cwd().rename(actual_dest_path, std.Io.Dir.cwd(), dest_path, io);
     }
 
     // Extract ETag and Last-Modified from response headers
@@ -320,15 +325,17 @@ pub fn downloadTask(
         try verifyChecksum(allocator, task.temp_path, expected_checksum);
     }
 
+    const io = global_io.io();
+
     // Move to final location
-    try std.fs.cwd().rename(task.temp_path, task.final_path);
+    try std.Io.Dir.cwd().rename(task.temp_path, std.Io.Dir.cwd(), task.final_path, io);
 
     // Set file mode if provided
     if (task.mode) |mode_str| {
         const mode = try std.fmt.parseInt(u16, mode_str, 8);
-        const final_file = try std.fs.cwd().openFile(task.final_path, .{});
-        defer final_file.close();
-        try final_file.chmod(mode);
+        const final_file = try std.Io.Dir.cwd().openFile(io, task.final_path, .{});
+        defer final_file.close(io);
+        try final_file.setPermissions(io, .fromMode(@intCast(mode)));
     }
 
     task.status.store(.completed, .release);
@@ -340,7 +347,7 @@ fn streamToFile(data: []const u8, context: *anyopaque) !usize {
     const ctx: *DownloadContext = @ptrCast(@alignCast(context));
 
     // Write to file
-    try ctx.file.writeAll(data);
+    try ctx.file.writeStreamingAll(global_io.io(), data);
 
     return data.len;
 }
@@ -353,14 +360,18 @@ fn taskProgressCallback(downloaded: usize, total: usize, context: *anyopaque) vo
 
 /// Verify file checksum (SHA256)
 pub fn verifyChecksum(_: std.mem.Allocator, file_path: []const u8, expected: []const u8) !void {
-    const file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
+    const io = global_io.io();
+    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+    defer file.close(io);
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [8192]u8 = undefined;
 
     while (true) {
-        const n = try file.read(&buf);
+        const n = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         if (n == 0) break;
         hasher.update(buf[0..n]);
     }

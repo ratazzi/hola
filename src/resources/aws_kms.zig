@@ -3,6 +3,7 @@ const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const kms = @import("../kms_client.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 pub const Resource = struct {
     name: []const u8,
@@ -72,7 +73,7 @@ pub const Resource = struct {
     }
 
     fn applyEncrypt(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -96,14 +97,14 @@ pub const Resource = struct {
 
         // Get credentials from env if not provided
         const access_key = self.access_key_id orelse
-            std.process.getEnvVarOwned(allocator, "AWS_ACCESS_KEY_ID") catch {
+            global_io.getEnvOwned(allocator, "AWS_ACCESS_KEY_ID") catch {
             logger.err("aws_kms: AWS_ACCESS_KEY_ID not set and no access_key_id provided", .{});
             return error.MissingCredentials;
         };
         defer if (self.access_key_id == null) allocator.free(access_key);
 
         const secret_key = self.secret_access_key orelse
-            std.process.getEnvVarOwned(allocator, "AWS_SECRET_ACCESS_KEY") catch {
+            global_io.getEnvOwned(allocator, "AWS_SECRET_ACCESS_KEY") catch {
             logger.err("aws_kms: AWS_SECRET_ACCESS_KEY not set and no secret_access_key provided", .{});
             return error.MissingCredentials;
         };
@@ -111,7 +112,7 @@ pub const Resource = struct {
 
         // Get optional session token for temporary credentials
         const session_token = self.session_token orelse
-            std.process.getEnvVarOwned(allocator, "AWS_SESSION_TOKEN") catch null;
+            global_io.getEnvOwned(allocator, "AWS_SESSION_TOKEN") catch null;
         defer if (self.session_token == null and session_token != null) allocator.free(session_token.?);
 
         // Read input data and decode based on source_encoding
@@ -183,7 +184,7 @@ pub const Resource = struct {
     }
 
     fn applyDecrypt(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -203,14 +204,14 @@ pub const Resource = struct {
 
         // Get credentials from env if not provided
         const access_key = self.access_key_id orelse
-            std.process.getEnvVarOwned(allocator, "AWS_ACCESS_KEY_ID") catch {
+            global_io.getEnvOwned(allocator, "AWS_ACCESS_KEY_ID") catch {
             logger.err("aws_kms: AWS_ACCESS_KEY_ID not set and no access_key_id provided", .{});
             return error.MissingCredentials;
         };
         defer if (self.access_key_id == null) allocator.free(access_key);
 
         const secret_key = self.secret_access_key orelse
-            std.process.getEnvVarOwned(allocator, "AWS_SECRET_ACCESS_KEY") catch {
+            global_io.getEnvOwned(allocator, "AWS_SECRET_ACCESS_KEY") catch {
             logger.err("aws_kms: AWS_SECRET_ACCESS_KEY not set and no secret_access_key provided", .{});
             return error.MissingCredentials;
         };
@@ -218,7 +219,7 @@ pub const Resource = struct {
 
         // Get optional session token for temporary credentials
         const session_token = self.session_token orelse
-            std.process.getEnvVarOwned(allocator, "AWS_SESSION_TOKEN") catch null;
+            global_io.getEnvOwned(allocator, "AWS_SESSION_TOKEN") catch null;
         defer if (self.session_token == null and session_token != null) allocator.free(session_token.?);
 
         // Read ciphertext
@@ -265,24 +266,28 @@ pub const Resource = struct {
         }
 
         // Read from file
-        const file = std.fs.openFileAbsolute(self.source, .{}) catch |err| {
+        const io = global_io.io();
+        const file = std.Io.Dir.openFileAbsolute(io, self.source, .{}) catch |err| {
             logger.err("aws_kms: failed to open source file '{s}': {}", .{ self.source, err });
             return err;
         };
-        defer file.close();
-        return try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+        defer file.close(io);
+        var file_reader = file.reader(io, &.{});
+        return try file_reader.interface.allocRemaining(allocator, .unlimited);
     }
 
     /// Check if output file exists and has the same content
     fn outputUpToDate(self: Resource, allocator: std.mem.Allocator, new_data: []const u8) !bool {
         // Try to read existing file
-        const file = std.fs.openFileAbsolute(self.path, .{}) catch {
+        const io = global_io.io();
+        const file = std.Io.Dir.openFileAbsolute(io, self.path, .{}) catch {
             // File doesn't exist, not up to date
             return false;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const existing_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch {
+        var file_reader = file.reader(io, &.{});
+        const existing_data = file_reader.interface.allocRemaining(allocator, .unlimited) catch {
             return false;
         };
         defer allocator.free(existing_data);
@@ -314,6 +319,7 @@ pub const Resource = struct {
     }
 
     fn writeOutput(self: Resource, allocator: std.mem.Allocator, data: []const u8) !void {
+        const io = global_io.io();
         // Ensure parent directory exists
         try base.ensureParentDir(self.path);
 
@@ -330,7 +336,7 @@ pub const Resource = struct {
 
         // Write to temp file first
         const dir_path = std.fs.path.dirname(self.path);
-        const timestamp = std.time.nanoTimestamp();
+        const timestamp = std.Io.Timestamp.now(io, .real).toNanoseconds();
         const pid = std.c.getpid();
 
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -343,15 +349,17 @@ pub const Resource = struct {
         else
             temp_name;
 
-        var temp_file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true, .exclusive = true });
-        errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
+        var temp_file = try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true, .exclusive = true });
+        errdefer std.Io.Dir.deleteFileAbsolute(io, temp_path) catch {};
 
-        try temp_file.writeAll(output_data);
-        try temp_file.sync();
-        temp_file.close();
+        var temp_writer = temp_file.writer(io, &.{});
+        try temp_writer.interface.writeAll(output_data);
+        try temp_writer.interface.flush();
+        try temp_file.sync(io);
+        temp_file.close(io);
 
         // Atomic rename
-        try std.fs.renameAbsolute(temp_path, self.path);
+        try std.Io.Dir.renameAbsolute(temp_path, self.path, io);
 
         // Apply file attributes
         base.applyFileAttributes(self.path, .{
