@@ -92,45 +92,50 @@ pub const Resource = struct {
         }
     }
 
-    fn buildCommand(
+    // Build an argv vector executed directly (no shell), so field values can
+    // never be interpreted as shell syntax.
+    fn buildArgv(
         self: Resource,
         comptime cmd: []const u8,
         allocator: std.mem.Allocator,
-    ) ![]const u8 {
-        var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
-        errdefer buf.deinit(allocator);
+    ) ![]const []const u8 {
+        var argv = std.ArrayList([]const u8).empty;
+        errdefer argv.deinit(allocator);
 
-        try buf.appendSlice(allocator, cmd);
+        try argv.append(allocator, cmd);
 
         if (std.mem.eql(u8, cmd, "groupadd")) {
             if (self.gid) |gid| {
-                try buf.print(allocator, " -g {d}", .{gid});
+                try argv.append(allocator, "-g");
+                try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{gid}));
             }
             if (self.system) {
-                try buf.appendSlice(allocator, " -r");
+                try argv.append(allocator, "-r");
             }
             if (self.non_unique) {
-                try buf.appendSlice(allocator, " -o");
+                try argv.append(allocator, "-o");
             }
         } else if (std.mem.eql(u8, cmd, "groupmod")) {
             if (self.gid) |gid| {
-                try buf.print(allocator, " -g {d}", .{gid});
+                try argv.append(allocator, "-g");
+                try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{gid}));
             }
             if (self.non_unique) {
-                try buf.appendSlice(allocator, " -o");
+                try argv.append(allocator, "-o");
             }
         }
 
-        try buf.print(allocator, " {s}", .{self.group_name});
-        return try buf.toOwnedSlice(allocator);
+        try argv.append(allocator, self.group_name);
+        return try argv.toOwnedSlice(allocator);
     }
 
-    fn executeCommand(cmd: []const u8, allocator: std.mem.Allocator) !bool {
+    fn executeCommand(argv: []const []const u8, allocator: std.mem.Allocator) !bool {
+        const cmd = try std.mem.join(allocator, " ", argv);
+        defer allocator.free(cmd);
         logger.debug("Executing: {s}", .{cmd});
 
-        const args = [_][]const u8{ "/bin/sh", "-c", cmd };
         const result = try std.process.run(allocator, global_io.io(), .{
-            .argv = &args,
+            .argv = argv,
         });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
@@ -161,17 +166,12 @@ pub const Resource = struct {
     fn manageMembers(self: Resource, allocator: std.mem.Allocator) !void {
         // Handle members
         if (self.members) |members| {
-            const flag = if (self.append) "-a" else "";
             var iter = std.mem.splitSequence(u8, members, ",");
             while (iter.next()) |member| {
                 const trimmed = std.mem.trim(u8, member, &std.ascii.whitespace);
                 if (trimmed.len > 0) {
-                    const cmd = try std.fmt.allocPrint(
-                        allocator,
-                        "gpasswd {s} -a {s} {s}",
-                        .{ flag, trimmed, self.group_name },
-                    );
-                    _ = try executeCommand(cmd, allocator);
+                    const argv = [_][]const u8{ "gpasswd", "-a", trimmed, self.group_name };
+                    _ = try executeCommand(&argv, allocator);
                 }
             }
         }
@@ -182,12 +182,8 @@ pub const Resource = struct {
             while (iter.next()) |member| {
                 const trimmed = std.mem.trim(u8, member, &std.ascii.whitespace);
                 if (trimmed.len > 0) {
-                    const cmd = try std.fmt.allocPrint(
-                        allocator,
-                        "gpasswd -d {s} {s}",
-                        .{ trimmed, self.group_name },
-                    );
-                    _ = try executeCommand(cmd, allocator);
+                    const argv = [_][]const u8{ "gpasswd", "-d", trimmed, self.group_name };
+                    _ = try executeCommand(&argv, allocator);
                 }
             }
         }
@@ -204,8 +200,8 @@ pub const Resource = struct {
             return false;
         }
 
-        const cmd = try self.buildCommand("groupadd", allocator);
-        const result = try executeCommand(cmd, allocator);
+        const argv = try self.buildArgv("groupadd", allocator);
+        const result = try executeCommand(argv, allocator);
 
         // Manage members after creating group
         if (result) {
@@ -226,8 +222,8 @@ pub const Resource = struct {
             return error.GroupNotFound;
         }
 
-        const cmd = try self.buildCommand("groupmod", allocator);
-        const result = try executeCommand(cmd, allocator);
+        const argv = try self.buildArgv("groupmod", allocator);
+        const result = try executeCommand(argv, allocator);
 
         // Manage members after modifying group
         try self.manageMembers(allocator);
@@ -246,10 +242,36 @@ pub const Resource = struct {
             return false;
         }
 
-        const cmd = try std.fmt.allocPrint(allocator, "groupdel {s}", .{self.group_name});
-        return try executeCommand(cmd, allocator);
+        const argv = [_][]const u8{ "groupdel", self.group_name };
+        return try executeCommand(&argv, allocator);
     }
 };
+
+test "buildArgv keeps shell metacharacters as literal argv elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = Resource{
+        .group_name = "evil; touch /tmp/pwned",
+        .gid = 4321,
+        .members = null,
+        .excluded_members = null,
+        .append = false,
+        .comment = null,
+        .system = true,
+        .non_unique = false,
+        .action = .create,
+        .common = base.CommonProps.init(allocator),
+    };
+
+    const argv = try res.buildArgv("groupadd", allocator);
+    const expected = [_][]const u8{ "groupadd", "-g", "4321", "-r", "evil; touch /tmp/pwned" };
+    try std.testing.expectEqual(expected.len, argv.len);
+    for (expected, argv) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
 
 /// Ruby prelude for group resource
 pub const ruby_prelude = @embedFile("group_resource.rb");

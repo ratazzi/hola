@@ -104,87 +104,74 @@ pub const Resource = struct {
         }
     }
 
-    fn buildCommand(
+    // Build an argv vector executed directly (no shell), so field values can
+    // never be interpreted as shell syntax.
+    fn buildArgv(
         self: Resource,
         comptime cmd: []const u8,
         allocator: std.mem.Allocator,
-    ) ![]const u8 {
+    ) ![]const []const u8 {
         _ = builtin; // Suppress unused import warning
 
-        // Simpler approach: build command string directly
-        var buf = try std.ArrayList(u8).initCapacity(allocator, 256);
-        errdefer buf.deinit(allocator);
+        var argv = std.ArrayList([]const u8).empty;
+        errdefer argv.deinit(allocator);
 
-        try buf.appendSlice(allocator, cmd);
+        try argv.append(allocator, cmd);
 
-        if (std.mem.eql(u8, cmd, "useradd")) {
+        const takes_user_options = std.mem.eql(u8, cmd, "useradd") or std.mem.eql(u8, cmd, "usermod");
+        if (takes_user_options) {
             if (self.uid) |uid| {
-                try buf.print(allocator, " -u {d}", .{uid});
+                try argv.append(allocator, "-u");
+                try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{uid}));
             }
             if (self.gid) |gid| {
-                try buf.print(allocator, " -g {d}", .{gid});
+                try argv.append(allocator, "-g");
+                try argv.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{gid}));
             }
             if (self.comment) |comment| {
-                try buf.print(allocator, " -c '{s}'", .{comment});
+                try argv.append(allocator, "-c");
+                try argv.append(allocator, comment);
             }
             if (self.home) |home| {
-                try buf.print(allocator, " -d '{s}'", .{home});
+                try argv.append(allocator, "-d");
+                try argv.append(allocator, home);
             }
             if (self.shell) |shell| {
-                try buf.print(allocator, " -s '{s}'", .{shell});
+                try argv.append(allocator, "-s");
+                try argv.append(allocator, shell);
             }
             if (self.password) |password| {
-                try buf.print(allocator, " -p '{s}'", .{password});
-            }
-            if (self.system) {
-                try buf.appendSlice(allocator, " -r");
-            }
-            if (self.manage_home) {
-                try buf.appendSlice(allocator, " -m");
-            } else {
-                try buf.appendSlice(allocator, " -M");
-            }
-            if (self.non_unique) {
-                try buf.appendSlice(allocator, " -o");
-            }
-        } else if (std.mem.eql(u8, cmd, "usermod")) {
-            if (self.uid) |uid| {
-                try buf.print(allocator, " -u {d}", .{uid});
-            }
-            if (self.gid) |gid| {
-                try buf.print(allocator, " -g {d}", .{gid});
-            }
-            if (self.comment) |comment| {
-                try buf.print(allocator, " -c '{s}'", .{comment});
-            }
-            if (self.home) |home| {
-                try buf.print(allocator, " -d '{s}'", .{home});
-            }
-            if (self.shell) |shell| {
-                try buf.print(allocator, " -s '{s}'", .{shell});
-            }
-            if (self.password) |password| {
-                try buf.print(allocator, " -p '{s}'", .{password});
-            }
-            if (self.non_unique) {
-                try buf.appendSlice(allocator, " -o");
-            }
-        } else if (std.mem.eql(u8, cmd, "userdel")) {
-            if (self.manage_home) {
-                try buf.appendSlice(allocator, " -r");
+                try argv.append(allocator, "-p");
+                try argv.append(allocator, password);
             }
         }
 
-        try buf.print(allocator, " {s}", .{self.username});
-        return try buf.toOwnedSlice(allocator);
+        if (std.mem.eql(u8, cmd, "useradd")) {
+            if (self.system) {
+                try argv.append(allocator, "-r");
+            }
+            try argv.append(allocator, if (self.manage_home) "-m" else "-M");
+        } else if (std.mem.eql(u8, cmd, "userdel")) {
+            if (self.manage_home) {
+                try argv.append(allocator, "-r");
+            }
+        }
+
+        if (takes_user_options and self.non_unique) {
+            try argv.append(allocator, "-o");
+        }
+
+        try argv.append(allocator, self.username);
+        return try argv.toOwnedSlice(allocator);
     }
 
-    fn executeCommand(cmd: []const u8, allocator: std.mem.Allocator) !bool {
+    fn executeCommand(argv: []const []const u8, allocator: std.mem.Allocator) !bool {
+        const cmd = try std.mem.join(allocator, " ", argv);
+        defer allocator.free(cmd);
         logger.debug("Executing: {s}", .{cmd});
 
-        const args = [_][]const u8{ "/bin/sh", "-c", cmd };
         const result = try std.process.run(allocator, global_io.io(), .{
-            .argv = &args,
+            .argv = argv,
         });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
@@ -223,8 +210,8 @@ pub const Resource = struct {
             return false;
         }
 
-        const cmd = try self.buildCommand("useradd", allocator);
-        return try executeCommand(cmd, allocator);
+        const argv = try self.buildArgv("useradd", allocator);
+        return try executeCommand(argv, allocator);
     }
 
     fn applyModify(self: Resource) !bool {
@@ -238,8 +225,8 @@ pub const Resource = struct {
             return error.UserNotFound;
         }
 
-        const cmd = try self.buildCommand("usermod", allocator);
-        return try executeCommand(cmd, allocator);
+        const argv = try self.buildArgv("usermod", allocator);
+        return try executeCommand(argv, allocator);
     }
 
     fn applyRemove(self: Resource) !bool {
@@ -253,8 +240,8 @@ pub const Resource = struct {
             return false;
         }
 
-        const cmd = try self.buildCommand("userdel", allocator);
-        return try executeCommand(cmd, allocator);
+        const argv = try self.buildArgv("userdel", allocator);
+        return try executeCommand(argv, allocator);
     }
 
     fn applyLock(self: Resource) !bool {
@@ -262,8 +249,8 @@ pub const Resource = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
 
-        const cmd = try std.fmt.allocPrint(allocator, "passwd -l {s}", .{self.username});
-        return try executeCommand(cmd, allocator);
+        const argv = [_][]const u8{ "passwd", "-l", self.username };
+        return try executeCommand(&argv, allocator);
     }
 
     fn applyUnlock(self: Resource) !bool {
@@ -271,10 +258,68 @@ pub const Resource = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
 
-        const cmd = try std.fmt.allocPrint(allocator, "passwd -u {s}", .{self.username});
-        return try executeCommand(cmd, allocator);
+        const argv = [_][]const u8{ "passwd", "-u", self.username };
+        return try executeCommand(&argv, allocator);
     }
 };
+
+test "buildArgv keeps shell metacharacters as literal argv elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = Resource{
+        .username = "evil; touch /tmp/pwned",
+        .uid = 1234,
+        .gid = null,
+        .comment = "O'Reilly $(reboot)",
+        .home = null,
+        .shell = null,
+        .password = null,
+        .system = false,
+        .manage_home = false,
+        .non_unique = false,
+        .action = .create,
+        .common = base.CommonProps.init(allocator),
+    };
+
+    const argv = try res.buildArgv("useradd", allocator);
+    const expected = [_][]const u8{
+        "useradd", "-u", "1234", "-c", "O'Reilly $(reboot)", "-M", "evil; touch /tmp/pwned",
+    };
+    try std.testing.expectEqual(expected.len, argv.len);
+    for (expected, argv) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
+
+test "buildArgv builds userdel with manage_home" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const res = Resource{
+        .username = "deploy",
+        .uid = null,
+        .gid = null,
+        .comment = null,
+        .home = null,
+        .shell = null,
+        .password = null,
+        .system = false,
+        .manage_home = true,
+        .non_unique = false,
+        .action = .remove,
+        .common = base.CommonProps.init(allocator),
+    };
+
+    const argv = try res.buildArgv("userdel", allocator);
+    const expected = [_][]const u8{ "userdel", "-r", "deploy" };
+    try std.testing.expectEqual(expected.len, argv.len);
+    for (expected, argv) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
 
 /// Ruby prelude for user resource
 pub const ruby_prelude = @embedFile("user_resource.rb");
