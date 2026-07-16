@@ -14,6 +14,7 @@ const params = clap.parseParamsComptime(
     \\-c, --callback <URL>       Default callback URL (overridden by event)
     \\    --client-cert <PATH>   Client certificate for mTLS
     \\    --client-key <PATH>    Client private key for mTLS
+    \\    --ws-heartbeat         Enable app-level heartbeat (30s ping / 90s idle teardown; hub must auto-reply "pong")
     \\<endpoint>                  Endpoint URL
     \\
 );
@@ -365,7 +366,7 @@ fn sendCallback(allocator: std.mem.Allocator, callback_url: []const u8, event_da
 
 // -- WebSocket mode --
 
-fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) void {
+fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth, heartbeat: bool) void {
     // Convert http(s) URL to ws(s) URL
     const ws_endpoint = blk: {
         if (std.mem.startsWith(u8, endpoint, "https://")) {
@@ -383,7 +384,7 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
 
     var backoff_ms: u64 = INITIAL_BACKOFF_MS;
     while (true) {
-        wsConnect(allocator, ws_endpoint, node_name, default_callback, tls_auth) catch {
+        wsConnect(allocator, ws_endpoint, node_name, default_callback, tls_auth, heartbeat) catch {
             std.debug.print("[agent] reconnecting in {d}ms...\n", .{backoff_ms});
             std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
             backoff_ms = @min(backoff_ms * 2, MAX_BACKOFF_MS);
@@ -395,7 +396,7 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
     }
 }
 
-fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth) !void {
+fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth, heartbeat: bool) !void {
     const curl = @import("../curl.zig");
     const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
     defer curl.curl_easy_cleanup(handle);
@@ -518,11 +519,11 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
         }
 
         const now = std.time.milliTimestamp();
-        if (now - last_rx > WS_IDLE_TIMEOUT_MS) {
+        if (heartbeat and now - last_rx > WS_IDLE_TIMEOUT_MS) {
             std.debug.print("[agent] no data for {d}s, assuming dead connection\n", .{@divTrunc(now - last_rx, 1000)});
             return error.ConnectionFailed;
         }
-        if (now - last_ping >= WS_PING_INTERVAL_MS) {
+        if (heartbeat and now - last_ping >= WS_PING_INTERVAL_MS) {
             var sent: usize = 0;
             const send_rc = curl.curl_ws_send(handle, "ping", 4, &sent, 0, curl.CURLWS_TEXT);
             if (send_rc != .CURLE_OK and send_rc != .CURLE_AGAIN) {
@@ -678,9 +679,11 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
     // key file". Message is already printed inside the helper.
     http.validateClientAuthFiles(tls_auth.cert, tls_auth.key) catch std.process.exit(1);
 
+    const ws_heartbeat = res.args.@"ws-heartbeat" != 0;
+
     const agent_mode = res.args.mode orelse "ws";
     if (std.mem.eql(u8, agent_mode, "ws") or std.mem.eql(u8, agent_mode, "sse")) {
-        runSseMode(allocator, endpoint, node_name, default_callback, tls_auth);
+        runSseMode(allocator, endpoint, node_name, default_callback, tls_auth, ws_heartbeat);
     } else if (std.mem.eql(u8, agent_mode, "watch")) {
         runWatchMode(allocator, endpoint, node_name, interval, default_callback, tls_auth);
     } else {
@@ -710,6 +713,11 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  -c, --callback URL       Default callback URL (overridden by event payload)
         \\      --client-cert PATH   Client certificate for mTLS (PEM)
         \\      --client-key PATH    Client private key for mTLS (PEM)
+        \\      --ws-heartbeat       Enable app-level heartbeat: send "ping" every 30s and drop
+        \\                           the connection after 90s without any inbound data. Requires
+        \\                           the hub to auto-reply "pong" (e.g. Durable Object
+        \\                           setWebSocketAutoResponse). Off by default: without it, dead
+        \\                           connections are only detected by TCP keepalive / send errors.
         \\
         \\Task JSON Format:
         \\  {"url": "https://r2.example.com/task.rb", "callback": "https://example.com/done", ...}
