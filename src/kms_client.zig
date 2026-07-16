@@ -93,12 +93,10 @@ pub const KMSClient = struct {
     allocator: std.mem.Allocator,
     config: KMSConfig,
 
+    // libcurl global state is initialized once at program startup (see
+    // main.zig); doing it per-client would tear down shared state while
+    // other transfers are still running.
     pub fn init(allocator: std.mem.Allocator, config: KMSConfig) !KMSClient {
-        const init_result = curl.curl_global_init(0x03);
-        if (init_result != .CURLE_OK) {
-            return KMSError.CurlInitFailed;
-        }
-
         return KMSClient{
             .allocator = allocator,
             .config = config,
@@ -107,7 +105,6 @@ pub const KMSClient = struct {
 
     pub fn deinit(self: *KMSClient) void {
         _ = self;
-        curl.curl_global_cleanup();
     }
 
     /// Encrypt plaintext using a KMS key

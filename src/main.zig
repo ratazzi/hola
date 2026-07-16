@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const clap = @import("clap");
 const logger = @import("logger.zig");
 const global_io = @import("global_io.zig");
+const curl = @import("curl.zig");
 const help_formatter = @import("help_formatter.zig");
 pub const build_options = @import("build_options");
 const commands = @import("commands.zig");
@@ -23,6 +24,14 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     global_io.set(init.io);
     global_io.setEnviron(init.environ_map);
+
+    // libcurl's lazy global initialization is not thread-safe; download
+    // workers create curl handles concurrently, so initialize it once here
+    // while the process is still single-threaded.
+    if (curl.curl_global_init(curl.CURL_GLOBAL_ALL) != .CURLE_OK) {
+        return error.CurlGlobalInitFailed;
+    }
+    defer curl.curl_global_cleanup();
 
     // Initialize logger (non-critical, continue if it fails)
     logger.initGlobal(allocator, null) catch {};
@@ -179,8 +188,6 @@ fn printMainHelp(unknown: ?[]const u8) !void {
 }
 
 fn printVersion() !void {
-    const curl = @import("curl.zig");
-
     // Get curl version info
     const curl_info = curl.getVersionInfo();
     const curl_ver = curl.parseVersion(curl_info.version_num);
