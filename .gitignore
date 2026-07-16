@@ -2,6 +2,7 @@
 .zig-cache
 .zig-global-cache
 zig-out
+zig-pkg
 /indicatif
 /test_*
 /zig-cache
