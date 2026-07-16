@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 const logger = @import("logger.zig");
 
 /// Execute a command with real-time output and log it via logger.logCommand.
@@ -25,26 +26,25 @@ pub fn executeCommandWithLogging(
     // Show command being executed.
     std.debug.print("\x1b[90m$ {s}\x1b[0m\n", .{cmd_str});
 
-    var proc = std.process.Child.init(args, allocator);
-    if (cwd) |dir| {
-        proc.cwd = dir;
-    }
+    const io = global_io.io();
     // Inherit stdout/stderr for real-time output.
-    proc.stdout_behavior = .Inherit;
-    proc.stderr_behavior = .Inherit;
-
-    try proc.spawn();
-    const term = try proc.wait();
+    var proc = try std.process.spawn(io, .{
+        .argv = args,
+        .cwd = if (cwd) |dir| .{ .path = dir } else .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try proc.wait(io);
 
     const exit_code: ?i32 = switch (term) {
-        .Exited => |code| code,
+        .exited => |code| code,
         else => null,
     };
 
     logger.logCommand(cmd_str, "", "", exit_code);
 
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.CommandFailed;
         },
         else => return error.CommandFailed,

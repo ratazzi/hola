@@ -4,6 +4,7 @@ const base = @import("../base_resource.zig");
 const ansi = @import("../ansi_constants.zig");
 const logger = @import("../logger.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
+const global_io = @import("../global_io.zig");
 
 const DEFAULT_TIMEOUT_S: u32 = 3600;
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -67,7 +68,7 @@ pub const Resource = struct {
         // Check 'creates' property - skip if file exists
         if (self.creates) |creates_path| {
             const file_exists = blk: {
-                std.fs.cwd().access(creates_path, .{}) catch |err| {
+                std.Io.Dir.cwd().access(global_io.io(), creates_path, .{}) catch |err| {
                     if (err != error.FileNotFound) {
                         logger.warn("execute[{s}]: Error checking creates path '{s}': {}", .{ self.name, creates_path, err });
                     }
@@ -142,24 +143,25 @@ pub const Resource = struct {
 
     fn termFromStatus(status: u32) std.process.Child.Term {
         return if (std.posix.W.IFEXITED(status))
-            .{ .Exited = std.posix.W.EXITSTATUS(status) }
+            .{ .exited = std.posix.W.EXITSTATUS(status) }
         else if (std.posix.W.IFSIGNALED(status))
-            .{ .Signal = std.posix.W.TERMSIG(status) }
+            .{ .signal = std.posix.W.TERMSIG(status) }
         else if (std.posix.W.IFSTOPPED(status))
-            .{ .Stopped = std.posix.W.STOPSIG(status) }
+            .{ .stopped = std.posix.W.STOPSIG(status) }
         else
-            .{ .Unknown = status };
+            .{ .unknown = status };
     }
 
     fn pollChildTerm(pid: std.posix.pid_t) ?std.process.Child.Term {
-        const result = std.posix.waitpid(pid, std.posix.W.NOHANG);
-        if (result.pid == 0) return null;
-        return termFromStatus(result.status);
+        var status: c_int = undefined;
+        const rc = std.c.waitpid(pid, &status, @intCast(std.posix.W.NOHANG));
+        if (rc <= 0) return null;
+        return termFromStatus(@bitCast(status));
     }
 
-    fn closePipe(pipe: *?std.fs.File) void {
+    fn closePipe(pipe: *?std.Io.File) void {
         if (pipe.*) |*file| {
-            file.close();
+            file.close(global_io.io());
             pipe.* = null;
         }
     }
@@ -170,7 +172,7 @@ pub const Resource = struct {
         closePipe(&child.stderr);
     }
 
-    fn signalProcessGroup(pid: std.posix.pid_t, sig: u8) void {
+    fn signalProcessGroup(pid: std.posix.pid_t, sig: std.posix.SIG) void {
         std.posix.kill(-pid, sig) catch |err| {
             if (err != error.ProcessNotFound) {
                 logger.warn("[execute] failed to signal process group {d}: {}", .{ pid, err });
@@ -182,10 +184,11 @@ pub const Resource = struct {
     /// short grace period but never blocks indefinitely: a process stuck in
     /// uninterruptible sleep must not hang the caller.
     fn reapAfterKill(pid: std.posix.pid_t) void {
-        const deadline = std.time.milliTimestamp() + REAP_GRACE_MS;
-        while (std.time.milliTimestamp() < deadline) {
+        const io = global_io.io();
+        const deadline = std.Io.Timestamp.now(io, .real).toMilliseconds() + REAP_GRACE_MS;
+        while (std.Io.Timestamp.now(io, .real).toMilliseconds() < deadline) {
             if (pollChildTerm(pid) != null) return;
-            std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+            io.sleep(.fromNanoseconds(POLL_INTERVAL_MS * std.time.ns_per_ms), .awake) catch {};
         }
         logger.warn("[execute] child {d} not reaped after SIGKILL; possible zombie", .{pid});
     }
@@ -211,11 +214,11 @@ pub const Resource = struct {
 
     fn drainPipe(
         allocator: std.mem.Allocator,
-        file: std.fs.File,
+        file: std.Io.File,
         output: *std.ArrayList(u8),
     ) !bool {
         var buf: [READ_BUFFER_SIZE]u8 = undefined;
-        const n = try file.read(&buf);
+        const n = try std.posix.read(file.handle, &buf);
         if (n == 0) return false;
         try appendOutputBounded(allocator, output, buf[0..n]);
         return true;
@@ -223,7 +226,7 @@ pub const Resource = struct {
 
     fn drainReadyPipe(
         allocator: std.mem.Allocator,
-        pipe: *?std.fs.File,
+        pipe: *?std.Io.File,
         output: *std.ArrayList(u8),
         is_open: *bool,
     ) !void {
@@ -260,20 +263,12 @@ pub const Resource = struct {
         allocator: std.mem.Allocator,
         timeout_s: u32,
     ) !ExecuteResult {
+        const io = global_io.io();
+
         var stdout = std.ArrayList(u8).empty;
         defer stdout.deinit(allocator);
         var stderr = std.ArrayList(u8).empty;
         defer stderr.deinit(allocator);
-
-        try child.spawn();
-        // On a pre-exec failure (bad cwd, setpgid, etc.) the forked child
-        // reports the error and _exit()s. Close our pipe ends and reap it so
-        // the error path doesn't leak fds or leave a zombie.
-        child.waitForSpawn() catch |err| {
-            closeChildPipes(child);
-            reapAfterKill(child.id);
-            return err;
-        };
 
         var stdout_open = child.stdout != null;
         var stderr_open = child.stderr != null;
@@ -283,16 +278,16 @@ pub const Resource = struct {
         var sent_kill = false;
         var post_exit_pipe_deadline_ms: ?i64 = null;
 
-        const pid = child.id;
+        const pid = child.id.?;
         const deadline_ms: ?i64 = if (timeout_s == 0)
             null
         else
-            std.time.milliTimestamp() + @as(i64, timeout_s) * std.time.ms_per_s;
+            std.Io.Timestamp.now(io, .real).toMilliseconds() + @as(i64, timeout_s) * std.time.ms_per_s;
         var kill_deadline_ms: ?i64 = null;
         var close_deadline_ms: ?i64 = null;
 
         while (child_running or stdout_open or stderr_open) {
-            const now = std.time.milliTimestamp();
+            const now = std.Io.Timestamp.now(io, .real).toMilliseconds();
 
             // Reap the child FIRST so the timeout decision below sees accurate
             // liveness in this same iteration. Otherwise a command that exits
@@ -356,7 +351,7 @@ pub const Resource = struct {
             }
 
             if (!stdout_open and !stderr_open) {
-                if (child_running) std.Thread.sleep(POLL_INTERVAL_MS * std.time.ns_per_ms);
+                if (child_running) io.sleep(.fromNanoseconds(POLL_INTERVAL_MS * std.time.ns_per_ms), .awake) catch {};
                 continue;
             }
 
@@ -416,7 +411,7 @@ pub const Resource = struct {
 
         const result_allocator = std.heap.page_allocator;
         return ExecuteResult{
-            .term = term orelse .{ .Unknown = 0 },
+            .term = term orelse .{ .unknown = 0 },
             .stdout = try result_allocator.dupe(u8, stdout.items),
             .stderr = try result_allocator.dupe(u8, stderr.items),
             .timed_out = timed_out,
@@ -428,53 +423,54 @@ pub const Resource = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const temp_allocator = arena.allocator();
+        const io = global_io.io();
 
         // Prepare command for shell execution
         const shell_cmd = try std.fmt.allocPrint(temp_allocator, "{s}", .{ctx.command});
 
-        // Create child process
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", shell_cmd }, temp_allocator);
-
-        // Set working directory if specified
-        if (ctx.cwd) |cwd| {
-            child.cwd = cwd;
-        }
-
         // Set environment variables if specified
         // Note: env_map must live until child.wait() completes
-        var env_map_storage: ?std.process.EnvMap = null;
+        var env_map_storage: ?std.process.Environ.Map = null;
         defer if (env_map_storage) |*map| map.deinit();
+        var environ_map: ?*const std.process.Environ.Map = null;
 
         if (ctx.environment) |env_str| {
-            // Parse environment string "KEY=VALUE\0KEY2=VALUE2\0" into a map
-            // Start with current environment
-            var env_map = try std.process.getEnvMap(temp_allocator);
+            // Parse environment string "KEY=VALUE\0KEY2=VALUE2\0" into a map.
+            // Start from the parent environment so the child keeps PATH etc.
+            // When the process env map is unavailable (unit tests, before main
+            // ran), leave environ_map null to inherit the real parent env
+            // rather than spawning with only the overrides.
+            if (global_io.environMap()) |parent| {
+                var env_map = try parent.clone(temp_allocator);
 
-            // Parse and add/override environment variables
-            var pos: usize = 0;
-            while (pos < env_str.len) {
-                // Find next KEY=VALUE pair (null-terminated)
-                const start = pos;
-                while (pos < env_str.len and env_str[pos] != 0) : (pos += 1) {}
+                // Parse and add/override environment variables
+                var pos: usize = 0;
+                while (pos < env_str.len) {
+                    // Find next KEY=VALUE pair (null-terminated)
+                    const start = pos;
+                    while (pos < env_str.len and env_str[pos] != 0) : (pos += 1) {}
 
-                const pair = env_str[start..pos];
-                if (pair.len > 0) {
-                    // Split on '='
-                    if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
-                        const key = pair[0..eq_pos];
-                        const value = pair[eq_pos + 1 ..];
-                        try env_map.put(key, value);
+                    const pair = env_str[start..pos];
+                    if (pair.len > 0) {
+                        // Split on '='
+                        if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
+                            const key = pair[0..eq_pos];
+                            const value = pair[eq_pos + 1 ..];
+                            try env_map.put(key, value);
+                        }
                     }
+
+                    pos += 1; // Skip null terminator
                 }
 
-                pos += 1; // Skip null terminator
+                env_map_storage = env_map;
+                environ_map = &env_map_storage.?;
             }
-
-            env_map_storage = env_map;
-            child.env_map = &env_map_storage.?;
         }
 
         // Set user and/or group if specified (requires root privileges)
+        var uid: ?std.posix.uid_t = null;
+        var gid: ?std.posix.gid_t = null;
         if (ctx.user != null or ctx.group != null) {
             const c = @cImport({
                 @cInclude("pwd.h");
@@ -494,8 +490,8 @@ pub const Resource = struct {
                     return error.UserNotFound;
                 }
 
-                child.uid = @intCast(pwd.*.pw_uid);
-                child.gid = @intCast(pwd.*.pw_gid);
+                uid = @intCast(pwd.*.pw_uid);
+                gid = @intCast(pwd.*.pw_gid);
             }
 
             // Override with group if specified
@@ -511,15 +507,23 @@ pub const Resource = struct {
                     return error.GroupNotFound;
                 }
 
-                child.gid = @intCast(grp.*.gr_gid);
+                gid = @intCast(grp.*.gr_gid);
             }
         }
 
-        // Capture output
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        child.pgid = 0;
+        // Create child process, capturing output. pgid=0 starts a new process
+        // group so the timeout path can signal the whole group.
+        var child = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{ "/bin/sh", "-c", shell_cmd },
+            .cwd = if (ctx.cwd) |cwd| .{ .path = cwd } else .inherit,
+            .environ_map = environ_map,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+            .uid = uid,
+            .gid = gid,
+            .pgid = 0,
+        });
 
         return try collectOutputAndWait(&child, temp_allocator, ctx.timeout_s);
     }
@@ -553,7 +557,7 @@ pub const Resource = struct {
 
         // Log command execution
         const exit_code: ?i32 = switch (term) {
-            .Exited => |code| code,
+            .exited => |code| code,
             else => null,
         };
 
@@ -607,21 +611,21 @@ pub const Resource = struct {
 
         // Check exit status
         switch (term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) {
                     logger.err("[execute] command exited with code {d}", .{code});
                     return error.CommandFailed;
                 }
             },
-            .Signal => |sig| {
-                logger.err("[execute] command killed by signal {d}", .{sig});
+            .signal => |sig| {
+                logger.err("[execute] command killed by signal {d}", .{@intFromEnum(sig)});
                 return error.CommandKilled;
             },
-            .Stopped => |sig| {
-                logger.err("[execute] command stopped by signal {d}", .{sig});
+            .stopped => |sig| {
+                logger.err("[execute] command stopped by signal {d}", .{@intFromEnum(sig)});
                 return error.CommandStopped;
             },
-            .Unknown => |unknown_status| {
+            .unknown => |unknown_status| {
                 logger.err("[execute] command exited with unknown status {d}", .{unknown_status});
                 return error.CommandFailed;
             },

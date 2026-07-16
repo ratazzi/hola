@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 const indicatif = @import("indicatif.zig");
 const ansi = @import("ansi_term");
 const ansi_constants = @import("ansi_constants.zig");
@@ -29,7 +30,7 @@ pub const ModernProvisionDisplay = struct {
     allocator: std.mem.Allocator,
     mp: indicatif.MultiProgress,
     download_spinners: std.StringHashMap(DownloadEntry),
-    download_spinners_mutex: std.Thread.Mutex = .{},
+    download_spinners_mutex: std.Io.Mutex = .init,
     download_finished_messages: std.ArrayList([]const u8), // Keep finished messages allocated
     section_messages: std.ArrayList([]const u8), // Keep section header messages allocated
     download_section_spinner: ?*indicatif.ProgressBar = null, // Static section header for downloads
@@ -150,7 +151,8 @@ pub const ModernProvisionDisplay = struct {
         if (!self.show_progress) return;
         if (self.timer_spinner == null) return;
 
-        const current_time = std.time.nanoTimestamp();
+        const io = global_io.io();
+        const current_time: i128 = std.Io.Timestamp.now(io, .real).toNanoseconds();
         const elapsed_ns = current_time - self.start_time;
         const elapsed_ms = @divTrunc(elapsed_ns, std.time.ns_per_ms);
         const elapsed_s = @divTrunc(elapsed_ms, 1000);
@@ -177,7 +179,8 @@ pub const ModernProvisionDisplay = struct {
         if (!self.show_progress) return;
         if (self.timer_spinner == null) return;
 
-        const current_time = std.time.nanoTimestamp();
+        const io = global_io.io();
+        const current_time: i128 = std.Io.Timestamp.now(io, .real).toNanoseconds();
         const elapsed_ns = current_time - self.start_time;
         const elapsed_ms = @divTrunc(elapsed_ns, std.time.ns_per_ms);
         const elapsed_s = @divTrunc(elapsed_ms, 1000);
@@ -299,9 +302,9 @@ pub const ModernProvisionDisplay = struct {
         if (!self.show_progress) return;
 
         for (names) |name| {
-            self.download_spinners_mutex.lock();
+            self.download_spinners_mutex.lockUncancelable(global_io.io());
             const already_exists = self.download_spinners.contains(name);
-            self.download_spinners_mutex.unlock();
+            self.download_spinners_mutex.unlock(global_io.io());
             if (already_exists) continue;
 
             const spinner = try self.mp.addSpinner();
@@ -314,9 +317,9 @@ pub const ModernProvisionDisplay = struct {
             spinner.setMessage(label);
             spinner.setPrefix(STATUS_PENDING);
 
-            self.download_spinners_mutex.lock();
+            self.download_spinners_mutex.lockUncancelable(global_io.io());
             try self.download_spinners.put(name_copy, .{ .spinner = spinner, .label = label });
-            self.download_spinners_mutex.unlock();
+            self.download_spinners_mutex.unlock(global_io.io());
         }
     }
 
@@ -327,8 +330,8 @@ pub const ModernProvisionDisplay = struct {
             return;
         }
 
-        self.download_spinners_mutex.lock();
-        defer self.download_spinners_mutex.unlock();
+        self.download_spinners_mutex.lockUncancelable(global_io.io());
+        defer self.download_spinners_mutex.unlock(global_io.io());
 
         if (self.download_spinners.getPtr(name)) |entry| {
             // Update existing entry
@@ -369,8 +372,8 @@ pub const ModernProvisionDisplay = struct {
     pub fn updateDownload(self: *Self, name: []const u8, bytes_downloaded: u64) !void {
         if (!self.show_progress) return;
 
-        self.download_spinners_mutex.lock();
-        defer self.download_spinners_mutex.unlock();
+        self.download_spinners_mutex.lockUncancelable(global_io.io());
+        defer self.download_spinners_mutex.unlock(global_io.io());
 
         if (self.download_spinners.getPtr(name)) |entry| {
             entry.bytes_downloaded = bytes_downloaded;
@@ -420,9 +423,9 @@ pub const ModernProvisionDisplay = struct {
             return;
         }
 
-        self.download_spinners_mutex.lock();
+        self.download_spinners_mutex.lockUncancelable(global_io.io());
         if (self.download_spinners.getPtr(name)) |entry| {
-            self.download_spinners_mutex.unlock();
+            self.download_spinners_mutex.unlock(global_io.io());
 
             const status_text = if (success) "done" else "failed";
             const label_text = entry.label orelse name;
@@ -445,7 +448,7 @@ pub const ModernProvisionDisplay = struct {
             entry.spinner.state.finish();
             entry.spinner.setPrefix(if (success) STATUS_DONE else STATUS_FAILED);
         } else {
-            self.download_spinners_mutex.unlock();
+            self.download_spinners_mutex.unlock(global_io.io());
         }
     }
 
@@ -661,7 +664,8 @@ pub const ModernProvisionDisplay = struct {
                 std.debug.print("Failed: \x1b[31m{d}\x1b[0m resources\n", .{self.failed_count});
             }
 
-            const current_time = std.time.nanoTimestamp();
+            const io = global_io.io();
+            const current_time: i128 = std.Io.Timestamp.now(io, .real).toNanoseconds();
             const elapsed_ns = current_time - self.start_time;
             const elapsed_ms = @divTrunc(elapsed_ns, std.time.ns_per_ms);
             const elapsed_s = @divTrunc(elapsed_ms, 1000);
@@ -685,7 +689,7 @@ pub const ModernProvisionDisplay = struct {
         try self.updateTimer();
 
         // Tick all ACTIVE spinners to animate them (only those still in the HashMap)
-        self.download_spinners_mutex.lock();
+        self.download_spinners_mutex.lockUncancelable(global_io.io());
         var iter = self.download_spinners.valueIterator();
         while (iter.next()) |entry_ptr| {
             const entry = entry_ptr.*;
@@ -693,7 +697,7 @@ pub const ModernProvisionDisplay = struct {
                 entry.spinner.tickNoDraw();
             }
         }
-        self.download_spinners_mutex.unlock();
+        self.download_spinners_mutex.unlock(global_io.io());
 
         if (self.resource_spinner) |spinner| {
             spinner.tickNoDraw();
@@ -709,17 +713,17 @@ pub const ModernProvisionDisplay = struct {
     }
 
     fn makeColoredMessage(self: *Self, color: AnsiColor, bold: bool, text: []const u8) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        errdefer buffer.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer aw.deinit();
         const style = AnsiStyle{
             .foreground = color,
             .font_style = if (bold) .{ .bold = true } else .{},
         };
-        var writer = buffer.writer(self.allocator);
+        const writer = &aw.writer;
         try ansi.format.updateStyle(writer, style, null);
         try writer.writeAll(text);
         try ansi.format.resetStyle(writer);
-        return try buffer.toOwnedSlice(self.allocator);
+        return try aw.toOwnedSlice();
     }
 
     fn buildResourceMessage(self: *Self, resource_type: []const u8, resource_name: []const u8, suffix: []const u8) ![]u8 {

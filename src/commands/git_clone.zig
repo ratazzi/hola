@@ -2,6 +2,7 @@ const std = @import("std");
 const clap = @import("clap");
 const git = @import("../git.zig");
 const http = @import("../http.zig");
+const global_io = @import("../global_io.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for git-clone
@@ -20,13 +21,13 @@ const parsers = .{
     .dest = clap.parsers.string,
 };
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(global_io.io(), std.Io.File.stderr(), err);
         return;
     };
     defer res.deinit();
@@ -53,12 +54,13 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 }
 
 fn printHelp(reason: ?[]const u8) !void {
-    const out = std.fs.File.stdout();
+    const io = global_io.io();
+    const out = std.Io.File.stdout();
     if (reason) |msg| {
-        try out.writeAll(msg);
-        try out.writeAll("\n\n");
+        try out.writeStreamingAll(io, msg);
+        try out.writeStreamingAll(io, "\n\n");
     }
-    try out.writeAll(
+    try out.writeStreamingAll(io,
         \\git-clone
         \\  hola git-clone <repo> <dest> [--branch <name>] [--bare] [--quiet]
         \\

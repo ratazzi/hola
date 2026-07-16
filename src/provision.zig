@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 const mruby = @import("mruby.zig");
 const mruby_module = @import("mruby_module.zig");
 const resources = @import("resources.zig");
@@ -942,7 +943,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     };
 
     // Record start time for timer
-    const start_time = std.time.nanoTimestamp();
+    const start_time: i128 = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
 
     // Initialize resource results collection
     var resource_results = std.ArrayList(ResourceResult).empty;
@@ -991,14 +992,14 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         display: *modern_display.ModernProvisionDisplay,
         allocator: std.mem.Allocator,
         tasks: *std.ArrayList(http.download.Task),
-        mutex: *std.Thread.Mutex,
+        mutex: *std.Io.Mutex,
         initialized: [256]std.atomic.Value(bool), // Fixed size array with atomic values
 
         fn callback(ctx_ptr: *anyopaque, task_index: usize, downloaded: usize, total: usize) void {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
 
-            ctx.mutex.lock();
-            defer ctx.mutex.unlock();
+            ctx.mutex.lockUncancelable(global_io.io());
+            defer ctx.mutex.unlock(global_io.io());
 
             if (task_index >= ctx.tasks.items.len or task_index >= 256) return;
 
@@ -1026,7 +1027,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
     };
 
-    var progress_mutex = std.Thread.Mutex{};
+    var progress_mutex: std.Io.Mutex = .init;
     const progress_ctx = try allocator.create(ProgressContext);
     defer allocator.destroy(progress_ctx);
     progress_ctx.* = .{
@@ -1219,7 +1220,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
                         try display.update();
                         std.Thread.yield() catch {};
-                        std.Thread.sleep(10 * std.time.ns_per_ms);
+                        global_io.io().sleep(.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
                         max_wait_iterations -= 1;
                     }
                 }
@@ -1364,7 +1365,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     try display.showSummaryWithDuration(0, 0);
 
     // Compute duration
-    const end_time = std.time.nanoTimestamp();
+    const end_time: i128 = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
     const elapsed_ms = @divTrunc(end_time - start_time, std.time.ns_per_ms);
 
     return ProvisionResult{

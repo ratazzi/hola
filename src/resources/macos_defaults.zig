@@ -13,6 +13,7 @@ comptime {
 // IMPORTANT: Use global CoreFoundation bindings to ensure consistent constant addresses across all modules
 const cf = @import("../cf.zig");
 const c = cf.c;
+const global_io = @import("../global_io.zig");
 
 // ============================================================================
 // C wrapper functions for CFPreferences operations
@@ -144,7 +145,7 @@ pub const Resource = struct {
     }
 
     fn applyWrite(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -198,49 +199,43 @@ pub const Resource = struct {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
+        const io = global_io.io();
 
         // Kill Finder
-        var kill_proc = std.process.Child.init(&[_][]const u8{ "killall", "Finder" }, arena_allocator);
-        kill_proc.stdout_behavior = .Ignore;
-        kill_proc.stderr_behavior = .Ignore;
-        _ = kill_proc.spawnAndWait() catch {};
+        _ = std.process.run(arena_allocator, io, .{ .argv = &[_][]const u8{ "killall", "Finder" } }) catch {};
 
         // Finder will automatically restart
-        std.Thread.sleep(500_000_000); // 0.5 seconds
+        io.sleep(.fromNanoseconds(500_000_000), .awake) catch {}; // 0.5 seconds
     }
 
     fn restartDock(_: std.mem.Allocator) !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
+        const io = global_io.io();
 
         // Kill Dock
-        var kill_proc = std.process.Child.init(&[_][]const u8{ "killall", "Dock" }, arena_allocator);
-        kill_proc.stdout_behavior = .Ignore;
-        kill_proc.stderr_behavior = .Ignore;
-        _ = kill_proc.spawnAndWait() catch {};
+        _ = std.process.run(arena_allocator, io, .{ .argv = &[_][]const u8{ "killall", "Dock" } }) catch {};
 
         // Dock will automatically restart
-        std.Thread.sleep(500_000_000); // 0.5 seconds
+        io.sleep(.fromNanoseconds(500_000_000), .awake) catch {}; // 0.5 seconds
     }
 
     fn restartSystemUIServer(_: std.mem.Allocator) !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
+        const io = global_io.io();
 
         // Kill SystemUIServer
-        var kill_proc = std.process.Child.init(&[_][]const u8{ "killall", "SystemUIServer" }, arena_allocator);
-        kill_proc.stdout_behavior = .Ignore;
-        kill_proc.stderr_behavior = .Ignore;
-        _ = kill_proc.spawnAndWait() catch {};
+        _ = std.process.run(arena_allocator, io, .{ .argv = &[_][]const u8{ "killall", "SystemUIServer" } }) catch {};
 
         // SystemUIServer will automatically restart
-        std.Thread.sleep(500_000_000); // 0.5 seconds
+        io.sleep(.fromNanoseconds(500_000_000), .awake) catch {}; // 0.5 seconds
     }
 
     fn applyDelete(self: Resource) !void {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
@@ -318,15 +313,14 @@ pub const Resource = struct {
         const arena_alloc = arena.allocator();
 
         const cmd = try std.fmt.allocPrint(arena_alloc, "defaults read {s} {s}", .{ domain, key });
-        var proc = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, arena_alloc);
-        proc.stdout_behavior = .Pipe;
-        proc.stderr_behavior = .Ignore;
-        try proc.spawn();
-        const stdout = try proc.stdout.?.readToEndAlloc(arena_alloc, 1024);
-        const result = try proc.wait();
+        const run_result = try std.process.run(arena_alloc, global_io.io(), .{
+            .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
+            .stdout_limit = .limited(1024),
+        });
+        const stdout = run_result.stdout;
 
         // If the key doesn't exist, `defaults read` will exit with non-zero status
-        if (result.Exited != 0) {
+        if (run_result.term.exited != 0) {
             return null; // Key doesn't exist
         }
 

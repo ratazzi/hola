@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 
 /// XDG Base Directory Specification paths for hola
 /// See: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
@@ -12,7 +13,7 @@ pub const XDG = struct {
     }
 
     fn getHomeDir(self: Self) ![]const u8 {
-        return std.process.getEnvVarOwned(self.allocator, "HOME") catch |err| {
+        return global_io.getEnvOwned(self.allocator, "HOME") catch |err| {
             if (err == error.EnvironmentVariableNotFound) {
                 std.debug.print("Error: HOME environment variable is not set\n", .{});
                 std.debug.print("Hint: if running with sudo, use 'sudo -E' or 'sudo --preserve-env=HOME' to preserve HOME\n", .{});
@@ -25,7 +26,7 @@ pub const XDG = struct {
     /// Default: ~/.config/hola
     /// Environment variable: XDG_CONFIG_HOME (if set, uses $XDG_CONFIG_HOME/hola)
     pub fn getConfigHome(self: Self) ![]const u8 {
-        if (std.process.getEnvVarOwned(self.allocator, "XDG_CONFIG_HOME")) |xdg_config| {
+        if (global_io.getEnvOwned(self.allocator, "XDG_CONFIG_HOME")) |xdg_config| {
             defer self.allocator.free(xdg_config);
             return std.fs.path.join(self.allocator, &.{ xdg_config, "hola" });
         } else |_| {
@@ -39,7 +40,7 @@ pub const XDG = struct {
     /// Default: ~/.local/share/hola
     /// Environment variable: XDG_DATA_HOME (if set, uses $XDG_DATA_HOME/hola)
     pub fn getDataHome(self: Self) ![]const u8 {
-        if (std.process.getEnvVarOwned(self.allocator, "XDG_DATA_HOME")) |xdg_data| {
+        if (global_io.getEnvOwned(self.allocator, "XDG_DATA_HOME")) |xdg_data| {
             defer self.allocator.free(xdg_data);
             return std.fs.path.join(self.allocator, &.{ xdg_data, "hola" });
         } else |_| {
@@ -53,7 +54,7 @@ pub const XDG = struct {
     /// Default: ~/.cache/hola
     /// Environment variable: XDG_CACHE_HOME (if set, uses $XDG_CACHE_HOME/hola)
     pub fn getCacheHome(self: Self) ![]const u8 {
-        if (std.process.getEnvVarOwned(self.allocator, "XDG_CACHE_HOME")) |xdg_cache| {
+        if (global_io.getEnvOwned(self.allocator, "XDG_CACHE_HOME")) |xdg_cache| {
             defer self.allocator.free(xdg_cache);
             return std.fs.path.join(self.allocator, &.{ xdg_cache, "hola" });
         } else |_| {
@@ -67,7 +68,7 @@ pub const XDG = struct {
     /// Default: ~/.local/state/hola
     /// Environment variable: XDG_STATE_HOME (if set, uses $XDG_STATE_HOME/hola)
     pub fn getStateHome(self: Self) ![]const u8 {
-        if (std.process.getEnvVarOwned(self.allocator, "XDG_STATE_HOME")) |xdg_state| {
+        if (global_io.getEnvOwned(self.allocator, "XDG_STATE_HOME")) |xdg_state| {
             defer self.allocator.free(xdg_state);
             return std.fs.path.join(self.allocator, &.{ xdg_state, "hola" });
         } else |_| {

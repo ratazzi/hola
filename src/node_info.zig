@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("global_io.zig");
 const mruby = @import("mruby.zig");
 const builtin = @import("builtin");
 const http_client = @import("http/client.zig");
@@ -471,10 +472,13 @@ fn isRunningOnEc2() bool {
     }
 
     // Best method: Check system vendor (works for all EC2 instance types)
-    if (std.fs.cwd().openFile("/sys/class/dmi/id/sys_vendor", .{})) |file| {
-        defer file.close();
+    const io = global_io.io();
+    if (std.Io.Dir.cwd().openFile(io, "/sys/class/dmi/id/sys_vendor", .{})) |file| {
+        defer file.close(io);
         var buf: [64]u8 = undefined;
-        if (file.readAll(&buf)) |n| {
+        var read_buf: [64]u8 = undefined;
+        var file_reader = file.readerStreaming(io, &read_buf);
+        if (file_reader.interface.readSliceShort(&buf)) |n| {
             const content = std.mem.trim(u8, buf[0..n], " \n\r\t");
             // Amazon EC2 instances report "Amazon EC2" as sys_vendor
             if (std.mem.eql(u8, content, "Amazon EC2")) {
@@ -669,10 +673,13 @@ fn parseEc2IdentityDocument(allocator: std.mem.Allocator, json_body: []const u8)
 pub fn getLsbInfo(allocator: std.mem.Allocator) !?LsbInfo {
     if (builtin.os.tag != .linux) return null;
 
-    const file = std.fs.cwd().openFile("/etc/os-release", .{}) catch return null;
-    defer file.close();
+    const io = global_io.io();
+    const file = std.Io.Dir.cwd().openFile(io, "/etc/os-release", .{}) catch return null;
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 8192);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(8192));
     defer allocator.free(content);
 
     var id: ?[]const u8 = null;
@@ -804,10 +811,13 @@ fn getDefaultGatewayMacOS(allocator: std.mem.Allocator) !?DefaultGateway {
 
 /// Get default gateway on Linux by reading /proc/net/route
 fn getDefaultGatewayLinux(allocator: std.mem.Allocator) !?DefaultGateway {
-    const file = std.fs.cwd().openFile("/proc/net/route", .{}) catch return null;
-    defer file.close();
+    const io = global_io.io();
+    const file = std.Io.Dir.cwd().openFile(io, "/proc/net/route", .{}) catch return null;
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 8192);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(8192));
     defer allocator.free(content);
 
     var lines = std.mem.splitScalar(u8, content, '\n');
@@ -1318,10 +1328,13 @@ fn getCpuInfoMacOS(allocator: std.mem.Allocator) !CPU {
 fn getCpuInfoLinux(allocator: std.mem.Allocator) !CPU {
     var cpu = CPU{ .architecture = getCpuArch() };
 
-    const file = std.fs.cwd().openFile("/proc/cpuinfo", .{}) catch return cpu;
-    defer file.close();
+    const io = global_io.io();
+    const file = std.Io.Dir.cwd().openFile(io, "/proc/cpuinfo", .{}) catch return cpu;
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 65536);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(65536));
     defer allocator.free(content);
 
     var processor_count: u32 = 0;
@@ -1394,8 +1407,7 @@ fn getMemoryInfoMacOS(allocator: std.mem.Allocator) !Memory {
     }
 
     // Use vm_stat command to get memory statistics
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, global_io.io(), .{
         .argv = &[_][]const u8{"vm_stat"},
     }) catch return memory;
     defer allocator.free(result.stdout);
@@ -1487,10 +1499,13 @@ fn convertKBtoMB(allocator: std.mem.Allocator, value_str: []const u8) ![]const u
 fn getMemoryInfoLinux(allocator: std.mem.Allocator) !Memory {
     var memory = Memory{};
 
-    const file = std.fs.cwd().openFile("/proc/meminfo", .{}) catch return memory;
-    defer file.close();
+    const io = global_io.io();
+    const file = std.Io.Dir.cwd().openFile(io, "/proc/meminfo", .{}) catch return memory;
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 8192);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.readerStreaming(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .limited(8192));
     defer allocator.free(content);
 
     var lines = std.mem.splitScalar(u8, content, '\n');

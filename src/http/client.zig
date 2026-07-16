@@ -3,6 +3,7 @@ const curl = @import("../curl.zig");
 const types = @import("types.zig");
 const config_mod = @import("config.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 const Request = types.Request;
 const Response = types.Response;
@@ -72,6 +73,7 @@ pub const Client = struct {
         // *this* call (or null on success / non-libcurl failure).
         clearLastCurlError();
 
+        const io = global_io.io();
         var attempt: u32 = 0;
         const max_attempts = @max(1, self.config.retry.max_attempts); // Ensure at least 1 attempt
 
@@ -95,7 +97,7 @@ pub const Client = struct {
                 // Calculate backoff delay
                 const backoff_ms = self.calculateBackoff(attempt);
                 logger.debug("Request failed (attempt {d}/{d}), retrying in {d}ms: {}", .{ attempt + 1, max_attempts, backoff_ms, err });
-                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+                io.sleep(.fromNanoseconds(backoff_ms * std.time.ns_per_ms), .awake) catch {};
                 continue;
             };
 
@@ -104,7 +106,7 @@ pub const Client = struct {
                 logger.debug("Server error {d} (attempt {d}/{d}), retrying in {d}ms", .{ result.status, attempt + 1, max_attempts, backoff_ms });
                 var owned = result;
                 owned.deinit();
-                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+                io.sleep(.fromNanoseconds(backoff_ms * std.time.ns_per_ms), .awake) catch {};
                 continue;
             }
 

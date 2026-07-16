@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// Group resource data structure
 pub const Resource = struct {
@@ -76,8 +77,7 @@ pub const Resource = struct {
         const allocator = arena.allocator();
 
         const args = [_][]const u8{ "getent", "group", group_name };
-        const result = std.process.Child.run(.{
-            .allocator = allocator,
+        const result = std.process.run(allocator, global_io.io(), .{
             .argv = &args,
         }) catch |err| {
             logger.debug("getent command failed for group '{s}': {}", .{ group_name, err });
@@ -87,7 +87,7 @@ pub const Resource = struct {
         defer allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| return code == 0,
+            .exited => |code| return code == 0,
             else => return false,
         }
     }
@@ -99,30 +99,29 @@ pub const Resource = struct {
     ) ![]const u8 {
         var buf = try std.ArrayList(u8).initCapacity(allocator, 128);
         errdefer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
 
-        try writer.writeAll(cmd);
+        try buf.appendSlice(allocator, cmd);
 
         if (std.mem.eql(u8, cmd, "groupadd")) {
             if (self.gid) |gid| {
-                try writer.print(" -g {d}", .{gid});
+                try buf.print(allocator, " -g {d}", .{gid});
             }
             if (self.system) {
-                try writer.writeAll(" -r");
+                try buf.appendSlice(allocator, " -r");
             }
             if (self.non_unique) {
-                try writer.writeAll(" -o");
+                try buf.appendSlice(allocator, " -o");
             }
         } else if (std.mem.eql(u8, cmd, "groupmod")) {
             if (self.gid) |gid| {
-                try writer.print(" -g {d}", .{gid});
+                try buf.print(allocator, " -g {d}", .{gid});
             }
             if (self.non_unique) {
-                try writer.writeAll(" -o");
+                try buf.appendSlice(allocator, " -o");
             }
         }
 
-        try writer.print(" {s}", .{self.group_name});
+        try buf.print(allocator, " {s}", .{self.group_name});
         return try buf.toOwnedSlice(allocator);
     }
 
@@ -130,8 +129,7 @@ pub const Resource = struct {
         logger.debug("Executing: {s}", .{cmd});
 
         const args = [_][]const u8{ "/bin/sh", "-c", cmd };
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
+        const result = try std.process.run(allocator, global_io.io(), .{
             .argv = &args,
         });
         defer allocator.free(result.stdout);
@@ -145,7 +143,7 @@ pub const Resource = struct {
         }
 
         switch (result.term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) {
                     logger.err("Command exited with code {d}: {s}", .{ code, cmd });
                     // Print error details

@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const global_io = @import("global_io.zig");
 
 // Only compile on macOS
 comptime {
@@ -33,9 +34,7 @@ comptime {
     }
 }
 
-const c = @cImport({
-    @cInclude("CoreFoundation/CoreFoundation.h");
-});
+const c = @import("cf.zig").c;
 
 /// Error types for plist operations
 pub const Error = error{
@@ -381,7 +380,7 @@ pub const Dictionary = struct {
         const cf_keys = try allocator.alloc(c.CFStringRef, @intCast(count));
         defer allocator.free(cf_keys);
 
-        c.CFDictionaryGetKeysAndValues(self.cf_dict, cf_keys.ptr, null);
+        c.CFDictionaryGetKeysAndValues(self.cf_dict, @ptrCast(cf_keys.ptr), null);
 
         for (0..@intCast(count)) |i| {
             const cf_key = cf_keys[i];
@@ -520,7 +519,7 @@ test "create and manipulate dictionary" {
 
 test "read and write plist file" {
     const gpa = std.testing.allocator;
-    const tmp_dir = std.fs.cwd();
+    const tmp_dir = std.Io.Dir.cwd();
     const test_file = "/tmp/test_hola.plist";
 
     // Create a test dictionary
@@ -546,5 +545,5 @@ test "read and write plist file" {
     int_val.deinit(gpa);
 
     // Cleanup
-    _ = tmp_dir.deleteFile(test_file) catch {};
+    _ = tmp_dir.deleteFile(global_io.io(), test_file) catch {};
 }

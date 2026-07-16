@@ -5,6 +5,7 @@ const Task = @import("task.zig").Task;
 const downloader = @import("downloader.zig");
 const logger = @import("../../logger.zig");
 const utils = @import("../utils.zig");
+const global_io = @import("../../global_io.zig");
 
 // Thread-local storage for current Manager (for use in remote_file resource)
 threadlocal var current_manager: ?*Manager = null;
@@ -18,8 +19,8 @@ pub const Manager = struct {
     // Worker pool
     workers: []std.Thread,
     max_concurrent: usize,
-    mutex: std.Thread.Mutex,
-    condition: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    condition: std.Io.Condition,
     shutdown: bool,
     next_task_index: usize,
 
@@ -45,8 +46,8 @@ pub const Manager = struct {
             .tasks = std.ArrayList(Task).empty,
             .workers = &.{},
             .max_concurrent = cfg.max_concurrent,
-            .mutex = .{},
-            .condition = .{},
+            .mutex = .init,
+            .condition = .init,
             .shutdown = false,
             .next_task_index = 0,
             .completed_counter = std.atomic.Value(usize).init(0),
@@ -89,15 +90,17 @@ pub const Manager = struct {
 
     /// Add task to queue
     pub fn addTask(self: *Manager, task: Task) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = global_io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         try self.tasks.append(self.allocator, task);
     }
 
     /// Pop next task in queue (used by tests and single-threaded flows)
     pub fn getNextTask(self: *Manager) ?*Task {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = global_io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         if (self.next_task_index >= self.tasks.items.len) {
             return null;
@@ -110,8 +113,9 @@ pub const Manager = struct {
 
     /// Get task by ID
     pub fn getTask(self: *Manager, id: []const u8) ?*Task {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = global_io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         for (self.tasks.items) |*task| {
             if (std.mem.eql(u8, task.id, id)) {
@@ -150,10 +154,11 @@ pub const Manager = struct {
 
     /// Cancel all pending tasks
     pub fn cancel(self: *Manager) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = global_io.io();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.shutdown = true;
-        self.condition.broadcast();
+        self.condition.broadcast(io);
     }
 
     /// Get progress statistics
@@ -205,23 +210,24 @@ const WorkerContext = struct {
 fn workerLoop(ctx: WorkerContext) void {
     const mgr = ctx.manager;
 
+    const io = global_io.io();
     while (true) {
         // Get next task index
-        mgr.mutex.lock();
+        mgr.mutex.lockUncancelable(io);
 
         if (mgr.shutdown) {
-            mgr.mutex.unlock();
+            mgr.mutex.unlock(io);
             break;
         }
 
         const task_index = mgr.next_task_index;
         if (task_index >= mgr.tasks.items.len) {
-            mgr.mutex.unlock();
+            mgr.mutex.unlock(io);
             break;
         }
 
         mgr.next_task_index += 1;
-        mgr.mutex.unlock();
+        mgr.mutex.unlock(io);
 
         // Process task (without holding lock)
         processTask(mgr, task_index);
@@ -243,9 +249,10 @@ fn taskProgressWrapper(downloaded: usize, total: usize, context: *anyopaque) voi
 
 /// Process single task
 fn processTask(mgr: *Manager, task_index: usize) void {
-    mgr.mutex.lock();
+    const io = global_io.io();
+    mgr.mutex.lockUncancelable(io);
     const task = &mgr.tasks.items[task_index];
-    mgr.mutex.unlock();
+    mgr.mutex.unlock(io);
 
     logger.debug("Worker processing task {d}: {s}", .{ task_index, task.display_name });
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const fmt = std.fmt;
+const global_io = @import("global_io.zig");
 const table = @import("table.zig");
 const glob = @import("glob.zig");
 const logger = @import("logger.zig");
@@ -18,7 +19,7 @@ pub const Options = struct {
     dry_run: bool = false, // Default: actually create links
     home_override: ?[]const u8 = null,
     ignore_patterns: ?[]const []const u8 = null,
-    output_writer: ?std.fs.File.Writer = null, // Optional writer for output (for progress display integration)
+    output_writer: ?std.Io.File.Writer = null, // Optional writer for output (for progress display integration)
 };
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
@@ -48,7 +49,7 @@ pub const runDryRun = run;
 
 fn resolveHome(allocator: std.mem.Allocator, override: ?[]const u8) ![]const u8 {
     if (override) |value| return allocator.dupe(u8, value);
-    return std.process.getEnvVarOwned(allocator, "HOME");
+    return global_io.getEnvOwned(allocator, "HOME");
 }
 
 fn resolvePath(allocator: std.mem.Allocator, path: []const u8, home: []const u8) ![]const u8 {
@@ -62,8 +63,10 @@ fn resolvePath(allocator: std.mem.Allocator, path: []const u8, home: []const u8)
     if (std.fs.path.isAbsolute(path)) {
         return allocator.dupe(u8, path);
     }
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
-    defer allocator.free(cwd);
+    const io = global_io.io();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_len = try std.Io.Dir.cwd().realPath(io, &cwd_buf);
+    const cwd = cwd_buf[0..cwd_len];
     return std.fs.path.join(allocator, &.{ cwd, path });
 }
 
@@ -87,9 +90,9 @@ const Planner = struct {
     home: []const u8,
     display_prefix: []const u8,
     owns_display_prefix: bool,
-    entries: std.ArrayListUnmanaged(PlanEntry) = .{},
-    builder: std.ArrayListUnmanaged(u8) = .{},
-    ignore_patterns: std.ArrayListUnmanaged([]const u8) = .{},
+    entries: std.ArrayListUnmanaged(PlanEntry) = .empty,
+    builder: std.ArrayListUnmanaged(u8) = .empty,
+    ignore_patterns: std.ArrayListUnmanaged([]const u8) = .empty,
 
     const PlanEntry = struct {
         rel_path: []const u8,
@@ -162,11 +165,12 @@ const Planner = struct {
     }
 
     fn scan(self: *Planner, abs_path: []const u8) !void {
-        var dir = try std.fs.openDirAbsolute(abs_path, .{ .iterate = true });
-        defer dir.close();
+        const io = global_io.io();
+        var dir = try std.Io.Dir.openDirAbsolute(io, abs_path, .{ .iterate = true });
+        defer dir.close(io);
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(io)) |entry| {
             const prev_len = self.builder.items.len;
             if (prev_len != 0) try self.builder.append(self.allocator, '/');
             try self.builder.appendSlice(self.allocator, entry.name);
@@ -207,8 +211,9 @@ const Planner = struct {
         const target_abs = try std.fs.path.join(self.allocator, &.{ self.home, rel_path });
         defer self.allocator.free(target_abs);
 
+        const io = global_io.io();
         var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const link_result = std.fs.readLinkAbsolute(target_abs, &link_buf) catch |err| switch (err) {
+        const link_len = std.Io.Dir.readLinkAbsolute(io, target_abs, &link_buf) catch |err| switch (err) {
             error.FileNotFound => return .{ .status = .create_link },
             error.NotLink => {
                 const kind = try statKind(target_abs);
@@ -219,6 +224,7 @@ const Planner = struct {
             },
             else => return err,
         };
+        const link_result = link_buf[0..link_len];
 
         if (std.mem.eql(u8, link_result, source_abs)) {
             return .{ .status = .already_linked };
@@ -228,17 +234,18 @@ const Planner = struct {
         return .{ .status = .different_link, .existing_target = existing };
     }
 
-    fn statKind(path: []const u8) !std.fs.File.Kind {
+    fn statKind(path: []const u8) !std.Io.File.Kind {
+        const io = global_io.io();
         const parent = std.fs.path.dirname(path) orelse "/";
         const base = std.fs.path.basename(path);
-        var dir = try std.fs.openDirAbsolute(parent, .{});
-        defer dir.close();
-        const stat = try dir.statFile(base);
+        var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{});
+        defer dir.close(io);
+        const stat = try dir.statFile(io, base, .{});
         return stat.kind;
     }
 
     fn renderReport(self: *Planner) !void {
-        const out = std.fs.File.stdout();
+        const out = std.Io.File.stdout();
         const simple = table.SimpleTable.init(self.allocator, out);
 
         if (self.entries.items.len == 0) {
@@ -265,7 +272,7 @@ const Planner = struct {
         });
         defer tbl.deinit();
 
-        var cells_buf: std.ArrayListUnmanaged([]const u8) = .{};
+        var cells_buf: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
             for (cells_buf.items) |cell| {
                 self.allocator.free(cell);
@@ -299,7 +306,7 @@ const Planner = struct {
 
         try tbl.render();
 
-        try out.writeAll("\n");
+        try out.writeStreamingAll(global_io.io(), "\n");
         try simple.printSummary(&.{
             .{ .label = "plan", .value = create_count, .color = Ansi.green },
             .{ .label = "ok", .value = ok_count, .color = Ansi.cyan },
@@ -368,7 +375,7 @@ const Planner = struct {
     }
 
     fn apply(self: *Planner) !void {
-        const out = std.fs.File.stdout();
+        const out = std.Io.File.stdout();
         const simple = table.SimpleTable.init(self.allocator, out);
 
         var buf: [256]u8 = undefined;
@@ -383,7 +390,7 @@ const Planner = struct {
         });
         defer tbl.deinit();
 
-        var cells_buf: std.ArrayListUnmanaged([]const u8) = .{};
+        var cells_buf: std.ArrayListUnmanaged([]const u8) = .empty;
         defer {
             for (cells_buf.items) |cell| {
                 self.allocator.free(cell);
@@ -451,7 +458,7 @@ const Planner = struct {
 
         try tbl.render();
 
-        try out.writeAll("\n");
+        try out.writeStreamingAll(global_io.io(), "\n");
         try simple.printSummary(&.{
             .{ .label = "linked", .value = linked_count, .color = Ansi.green },
             .{ .label = "skipped", .value = skipped_count, .color = Ansi.yellow },
@@ -459,19 +466,20 @@ const Planner = struct {
     }
 
     fn applyLink(self: *Planner, entry: PlanEntry) !ApplyOutcome {
+        const io = global_io.io();
         const source_abs = try std.fs.path.join(self.allocator, &.{ self.root, entry.rel_path });
         defer self.allocator.free(source_abs);
         const target_abs = try std.fs.path.join(self.allocator, &.{ self.home, entry.rel_path });
         defer self.allocator.free(target_abs);
 
         if (std.fs.path.dirname(target_abs)) |dir| {
-            std.fs.cwd().makePath(dir) catch |err| {
+            std.Io.Dir.cwd().createDirPath(io, dir) catch |err| {
                 logger.err("Failed to create parent directories for {s}: {s}", .{ target_abs, @errorName(err) });
                 return .skipped;
             };
         }
 
-        std.fs.symLinkAbsolute(source_abs, target_abs, .{}) catch |err| {
+        std.Io.Dir.symLinkAbsolute(io, source_abs, target_abs, .{}) catch |err| {
             logger.err("Failed to create symlink {s}: {s}", .{ target_abs, @errorName(err) });
             return .skipped;
         };
@@ -481,11 +489,12 @@ const Planner = struct {
 };
 
 fn ensureRootExists(path: []const u8) !void {
-    var dir = try std.fs.openDirAbsolute(path, .{});
-    defer dir.close();
+    const io = global_io.io();
+    var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+    defer dir.close(io);
 }
 
-fn shouldSkip(planner: *Planner, rel_path: []const u8, kind: std.fs.Dir.Entry.Kind) bool {
+fn shouldSkip(planner: *Planner, rel_path: []const u8, kind: std.Io.File.Kind) bool {
     // Check default ignore components (first component only)
     const component_end = std.mem.indexOfScalar(u8, rel_path, '/') orelse rel_path.len;
     const first_component = rel_path[0..component_end];

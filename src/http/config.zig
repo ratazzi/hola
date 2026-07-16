@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const global_io = @import("../global_io.zig");
 const build_options = if (@hasDecl(@import("root"), "build_options")) @import("build_options") else struct {
     pub const version = "0.1.0";
     pub const is_nightly = false;
@@ -83,7 +84,8 @@ pub fn validateClientAuthFiles(cert: ?[]const u8, key: ?[]const u8) error{Invali
 }
 
 fn ensureReadable(path: []const u8, label: []const u8) error{InvalidClientAuth}!void {
-    var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const io = global_io.io();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         if (!builtin.is_test) {
             switch (err) {
                 error.FileNotFound => std.debug.print("Error: {s} file not found: {s}\n", .{ label, path }),
@@ -93,7 +95,7 @@ fn ensureReadable(path: []const u8, label: []const u8) error{InvalidClientAuth}!
         }
         return error.InvalidClientAuth;
     };
-    file.close();
+    file.close(io);
 }
 
 /// Version string for User-Agent from build.zig.zon

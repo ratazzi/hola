@@ -9,13 +9,15 @@ const logger = @import("logger.zig");
 const help_formatter = @import("help_formatter.zig");
 const command_runner = @import("command_runner.zig");
 const build_options = @import("build_options");
+const global_io = @import("global_io.zig");
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
 
 /// Helper: find an executable by searching PATH, returning its absolute path if found.
 fn findExecutableInPath(allocator: std.mem.Allocator, names: []const []const u8) !?[]const u8 {
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return null;
+    const io = global_io.io();
+    const path_env = global_io.getEnvOwned(allocator, "PATH") catch return null;
     defer allocator.free(path_env);
 
     var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -25,7 +27,7 @@ fn findExecutableInPath(allocator: std.mem.Allocator, names: []const []const u8)
             const full_path = try std.fs.path.join(allocator, &.{ dir, name });
             defer allocator.free(full_path);
 
-            if (std.fs.accessAbsolute(full_path, .{})) |_| {
+            if (std.Io.Dir.accessAbsolute(io, full_path, .{})) |_| {
                 return try allocator.dupe(u8, full_path);
             } else |_| {}
         }
@@ -47,11 +49,12 @@ fn findFirstExistingJoinedPath(
     roots: []const []const u8,
     leaf: []const u8,
 ) !?[]const u8 {
+    const io = global_io.io();
     for (roots) |root| {
         const path = try std.fs.path.join(allocator, &.{ root, leaf });
         defer allocator.free(path);
 
-        std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -159,7 +162,7 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
     // 1. config_root/.config/hola/provision.rb
     // 2. ~/.dotfiles/.config/hola/provision.rb
     // 3. $HOME/.config/hola/provision.rb
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try global_io.getEnvOwned(allocator, "HOME");
     defer allocator.free(home);
     const dotfiles_root = try std.fs.path.join(allocator, &.{ home, ".dotfiles" });
     defer allocator.free(dotfiles_root);
@@ -213,7 +216,8 @@ fn linkDotfiles(allocator: std.mem.Allocator, config_root: []const u8, dry_run: 
 
     // config_root is the dotfiles repository location
     // Check if it exists
-    std.fs.accessAbsolute(config_root, .{}) catch |err| switch (err) {
+    const io = global_io.io();
+    std.Io.Dir.accessAbsolute(io, config_root, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             const msg = try std.fmt.allocPrint(allocator, "Dotfiles directory not found: {s}, skipping dotfiles linking", .{config_root});
             defer allocator.free(msg);
@@ -259,13 +263,16 @@ fn installHomebrew(allocator: std.mem.Allocator, display: *modern_display.Modern
 
             // Run homebrew install script
             const install_script = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"";
-            var proc = std.process.Child.init(&[_][]const u8{ "/bin/bash", "-c", install_script }, allocator);
-            proc.stdout_behavior = .Inherit;
-            proc.stderr_behavior = .Inherit;
+            const io = global_io.io();
+            var proc = try std.process.spawn(io, .{
+                .argv = &[_][]const u8{ "/bin/bash", "-c", install_script },
+                .stdout = .inherit,
+                .stderr = .inherit,
+            });
 
-            const term = try proc.spawnAndWait();
+            const term = try proc.wait(io);
             switch (term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code != 0) {
                         return error.HomebrewInstallFailed;
                     }
@@ -333,7 +340,7 @@ fn installBrewPackages(allocator: std.mem.Allocator, _: []const u8, display: *mo
     // Check if user wants to skip upgrades (default: yes, skip upgrades)
     // Only upgrade if HOMEBREW_BUNDLE_NO_UPGRADE is explicitly set to "0"
     const should_upgrade = blk: {
-        const env_val = std.process.getEnvVarOwned(allocator, "HOMEBREW_BUNDLE_NO_UPGRADE") catch break :blk false;
+        const env_val = global_io.getEnvOwned(allocator, "HOMEBREW_BUNDLE_NO_UPGRADE") catch break :blk false;
         defer allocator.free(env_val);
         break :blk std.mem.eql(u8, env_val, "0");
     };
@@ -367,6 +374,7 @@ fn installBrewPackages(allocator: std.mem.Allocator, _: []const u8, display: *mo
 
 /// Install mise and mise tools
 fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, display: *modern_display.ModernProvisionDisplay) !void {
+    const io = global_io.io();
     // Step 1: Install mise if not installed
     const mise_path = findMise(allocator) catch |err| switch (err) {
         error.MiseNotFound => blk: {
@@ -400,7 +408,7 @@ fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, displ
         const path = try std.fs.path.join(allocator, &.{ config_root, config_name });
         defer allocator.free(path);
 
-        std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -412,7 +420,7 @@ fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, displ
 
     // If not found in config_root, try ~/.dotfiles
     if (mise_toml_path == null) {
-        const home = try std.process.getEnvVarOwned(allocator, "HOME");
+        const home = try global_io.getEnvOwned(allocator, "HOME");
         defer allocator.free(home);
         const dotfiles_root = try std.fs.path.join(allocator, &.{ home, ".dotfiles" });
         defer allocator.free(dotfiles_root);
@@ -421,7 +429,7 @@ fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, displ
             const path = try std.fs.path.join(allocator, &.{ dotfiles_root, config_name });
             defer allocator.free(path);
 
-            std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+            std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
@@ -437,7 +445,7 @@ fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, displ
                 const path = try std.fs.path.join(allocator, &.{ home, config_name });
                 defer allocator.free(path);
 
-                std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
                     error.FileNotFound => continue,
                     else => return err,
                 };
@@ -468,6 +476,7 @@ fn installMiseTools(allocator: std.mem.Allocator, config_root: []const u8, displ
 
 /// Find mise executable
 fn findMise(allocator: std.mem.Allocator) ![]const u8 {
+    const io = global_io.io();
     // Check common locations
     const locations = [_][]const u8{
         "/usr/local/bin/mise",
@@ -477,18 +486,18 @@ fn findMise(allocator: std.mem.Allocator) ![]const u8 {
 
     for (locations) |path| {
         const expanded = if (path[0] == '~') blk: {
-            const home = std.process.getEnvVarOwned(allocator, "HOME") catch continue;
+            const home = global_io.getEnvOwned(allocator, "HOME") catch continue;
             defer allocator.free(home);
             break :blk try std.fmt.allocPrint(allocator, "{s}{s}", .{ home, path[1..] });
         } else try allocator.dupe(u8, path);
         defer allocator.free(expanded);
 
-        std.fs.accessAbsolute(expanded, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(io, expanded, .{}) catch continue;
         return try allocator.dupe(u8, expanded);
     }
 
     // Search PATH environment variable
-    const path_env = std.process.getEnvVarOwned(allocator, "PATH") catch return error.MiseNotFound;
+    const path_env = global_io.getEnvOwned(allocator, "PATH") catch return error.MiseNotFound;
     defer allocator.free(path_env);
 
     var it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -497,7 +506,7 @@ fn findMise(allocator: std.mem.Allocator) ![]const u8 {
         const full_path = std.fs.path.join(allocator, &.{ dir, "mise" }) catch continue;
         defer allocator.free(full_path);
 
-        if (std.fs.accessAbsolute(full_path, .{})) |_| {
+        if (std.Io.Dir.accessAbsolute(io, full_path, .{})) |_| {
             return allocator.dupe(u8, full_path) catch return error.MiseNotFound;
         } else |_| {}
     }
@@ -506,16 +515,19 @@ fn findMise(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Install mise using official installer
-fn installMise(allocator: std.mem.Allocator) !void {
+fn installMise(_: std.mem.Allocator) !void {
     // Use official mise installer
     const install_script = "curl https://mise.run | sh";
-    var proc = std.process.Child.init(&[_][]const u8{ "/bin/bash", "-c", install_script }, allocator);
-    proc.stdout_behavior = .Inherit;
-    proc.stderr_behavior = .Inherit;
+    const io = global_io.io();
+    var proc = try std.process.spawn(io, .{
+        .argv = &[_][]const u8{ "/bin/bash", "-c", install_script },
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
 
-    const term = try proc.spawnAndWait();
+    const term = try proc.wait(io);
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 return error.MiseInstallFailed;
             }
@@ -532,7 +544,8 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
     // 1. Project directory: .hola.toml, hola.toml
     // 2. XDG config directory: ~/.config/hola/hola.toml
     const project_config_paths = [_][]const u8{ ".hola.toml", "hola.toml" };
-    var config_file: ?std.fs.File = null;
+    const io = global_io.io();
+    var config_file: ?std.Io.File = null;
     var config_path: []const u8 = undefined;
 
     // Try project directory first
@@ -540,7 +553,7 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
         const path = try std.fs.path.join(allocator, &.{ root, config_name });
         defer allocator.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -556,7 +569,7 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
         const xdg_config_path = try xdg.getConfigFile();
         defer allocator.free(xdg_config_path);
 
-        if (std.fs.openFileAbsolute(xdg_config_path, .{})) |f| {
+        if (std.Io.Dir.openFileAbsolute(io, xdg_config_path, .{})) |f| {
             config_file = f;
             config_path = try allocator.dupe(u8, xdg_config_path);
         } else |err| switch (err) {
@@ -567,10 +580,12 @@ fn loadLinkConfig(allocator: std.mem.Allocator, root: []const u8) !?[]const []co
 
     // No config file found, use defaults
     const file = config_file orelse return null;
-    defer file.close();
+    defer file.close(io);
     defer allocator.free(config_path);
 
-    const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const content = try file_reader.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(content);
 
     const Config = struct {

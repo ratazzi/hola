@@ -2,6 +2,7 @@ const std = @import("std");
 const mruby = @import("../mruby.zig");
 const base = @import("../base_resource.zig");
 const logger = @import("../logger.zig");
+const global_io = @import("../global_io.zig");
 
 /// Template resource data structure
 pub const Resource = struct {
@@ -96,15 +97,16 @@ pub const Resource = struct {
         defer std.heap.c_allocator.free(rendered_content);
 
         // Check if file exists and content matches
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         const file_exists = blk: {
             if (is_abs) {
-                std.fs.accessAbsolute(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.accessAbsolute(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
             } else {
-                std.fs.cwd().access(self.path, .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
                     error.FileNotFound => break :blk false,
                     else => return err,
                 };
@@ -115,19 +117,20 @@ pub const Resource = struct {
         if (file_exists) {
             // Read existing file and compare content
             const existing_file = if (is_abs)
-                try std.fs.openFileAbsolute(self.path, .{})
+                try std.Io.Dir.openFileAbsolute(io, self.path, .{})
             else
-                try std.fs.cwd().openFile(self.path, .{});
-            defer existing_file.close();
+                try std.Io.Dir.cwd().openFile(io, self.path, .{});
+            defer existing_file.close(io);
 
-            const existing_content = try existing_file.readToEndAlloc(std.heap.c_allocator, std.math.maxInt(usize));
+            var existing_reader = existing_file.reader(io, &.{});
+            const existing_content = try existing_reader.interface.allocRemaining(std.heap.c_allocator, .unlimited);
             defer std.heap.c_allocator.free(existing_content);
 
             if (std.mem.eql(u8, existing_content, rendered_content)) {
                 // Content matches, check attributes if specified
                 if (self.attrs.mode) |m| {
-                    const stat = try existing_file.stat();
-                    const current_mode = stat.mode & 0o777;
+                    const stat = try existing_file.stat(io);
+                    const current_mode = stat.permissions.toMode() & 0o777;
                     if (current_mode == m) {
                         return false; // File exists with same content and mode
                     }
@@ -140,19 +143,21 @@ pub const Resource = struct {
         // Write rendered content to target file
         try base.ensureParentDir(self.path);
         var file = if (is_abs)
-            try std.fs.createFileAbsolute(self.path, .{ .truncate = true })
+            try std.Io.Dir.createFileAbsolute(io, self.path, .{ .truncate = true })
         else
-            try std.fs.cwd().createFile(self.path, .{ .truncate = true });
+            try std.Io.Dir.cwd().createFile(io, self.path, .{ .truncate = true });
 
-        try file.writeAll(rendered_content);
+        var file_writer = file.writer(io, &.{});
+        try file_writer.interface.writeAll(rendered_content);
+        try file_writer.interface.flush();
 
         // Apply file mode if specified
         if (self.attrs.mode) |m| {
-            std.posix.fchmod(file.handle, @as(std.posix.mode_t, @intCast(m))) catch {};
+            file.setPermissions(io, .fromMode(@as(std.posix.mode_t, @intCast(m)))) catch {};
         }
 
         // Close file before changing ownership
-        file.close();
+        file.close(io);
 
         // Apply owner/group after file is closed
         if (self.attrs.owner != null or self.attrs.group != null) {
@@ -165,14 +170,15 @@ pub const Resource = struct {
     }
 
     fn applyDelete(self: Resource) !void {
+        const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         if (is_abs) {
-            std.fs.deleteFileAbsolute(self.path) catch |err| switch (err) {
+            std.Io.Dir.deleteFileAbsolute(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => return err,
             };
         } else {
-            std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
+            std.Io.Dir.cwd().deleteFile(io, self.path) catch |err| switch (err) {
                 error.FileNotFound => return,
                 else => return err,
             };
@@ -180,20 +186,22 @@ pub const Resource = struct {
     }
 
     fn readTemplateFile(source: []const u8) ![]u8 {
+        const io = global_io.io();
         // Try to find template file in templates/ directory
         const templates_dir = "templates";
         const template_path = try std.fmt.allocPrint(std.heap.c_allocator, "{s}/{s}", .{ templates_dir, source });
         defer std.heap.c_allocator.free(template_path);
 
         // Try to read from templates directory first
-        const content = std.fs.cwd().readFileAlloc(std.heap.c_allocator, template_path, std.math.maxInt(usize)) catch {
+        const content = std.Io.Dir.cwd().readFileAlloc(io, template_path, std.heap.c_allocator, .unlimited) catch {
             // If not found, try absolute path or current directory
             if (std.fs.path.isAbsolute(source)) {
-                var file = try std.fs.openFileAbsolute(source, .{});
-                defer file.close();
-                return try file.readToEndAlloc(std.heap.c_allocator, std.math.maxInt(usize));
+                var file = try std.Io.Dir.openFileAbsolute(io, source, .{});
+                defer file.close(io);
+                var file_reader = file.reader(io, &.{});
+                return try file_reader.interface.allocRemaining(std.heap.c_allocator, .unlimited);
             } else {
-                return try std.fs.cwd().readFileAlloc(std.heap.c_allocator, source, std.math.maxInt(usize));
+                return try std.Io.Dir.cwd().readFileAlloc(io, source, std.heap.c_allocator, .unlimited);
             }
         };
 
@@ -214,7 +222,7 @@ pub const Resource = struct {
         defer ruby_code.deinit(std.heap.c_allocator);
 
         // Set up variables in Ruby as local variables
-        try ruby_code.writer(std.heap.c_allocator).writeAll("_erb_result = ''\n");
+        try ruby_code.appendSlice(std.heap.c_allocator, "_erb_result = ''\n");
         for (variables) |var_| {
             // Convert variable name to valid Ruby identifier
             const safe_name = try sanitizeRubyIdentifier(var_.name);
@@ -223,28 +231,28 @@ pub const Resource = struct {
             // Generate Ruby code based on type
             if (std.mem.eql(u8, var_.var_type, "integer")) {
                 // Integer: convert string to integer
-                try ruby_code.writer(std.heap.c_allocator).print("{s} = {s}.to_i\n", .{ safe_name, var_.value });
+                try ruby_code.print(std.heap.c_allocator, "{s} = {s}.to_i\n", .{ safe_name, var_.value });
             } else if (std.mem.eql(u8, var_.var_type, "float")) {
                 // Float: convert string to float
-                try ruby_code.writer(std.heap.c_allocator).print("{s} = {s}.to_f\n", .{ safe_name, var_.value });
+                try ruby_code.print(std.heap.c_allocator, "{s} = {s}.to_f\n", .{ safe_name, var_.value });
             } else if (std.mem.eql(u8, var_.var_type, "boolean")) {
                 // Boolean: convert string to boolean
                 if (std.mem.eql(u8, var_.value, "true")) {
-                    try ruby_code.writer(std.heap.c_allocator).print("{s} = true\n", .{safe_name});
+                    try ruby_code.print(std.heap.c_allocator, "{s} = true\n", .{safe_name});
                 } else {
-                    try ruby_code.writer(std.heap.c_allocator).print("{s} = false\n", .{safe_name});
+                    try ruby_code.print(std.heap.c_allocator, "{s} = false\n", .{safe_name});
                 }
             } else if (std.mem.eql(u8, var_.var_type, "nil")) {
                 // Nil
-                try ruby_code.writer(std.heap.c_allocator).print("{s} = nil\n", .{safe_name});
+                try ruby_code.print(std.heap.c_allocator, "{s} = nil\n", .{safe_name});
             } else if (std.mem.eql(u8, var_.var_type, "array")) {
                 // Array: value is already a Ruby array literal string, just assign it
-                try ruby_code.writer(std.heap.c_allocator).print("{s} = {s}\n", .{ safe_name, var_.value });
+                try ruby_code.print(std.heap.c_allocator, "{s} = {s}\n", .{ safe_name, var_.value });
             } else {
                 // String: escape properly
                 const escaped_value = try escapeRubyString(var_.value);
                 defer std.heap.c_allocator.free(escaped_value);
-                try ruby_code.writer(std.heap.c_allocator).print("{s} = {s}\n", .{ safe_name, escaped_value });
+                try ruby_code.print(std.heap.c_allocator, "{s} = {s}\n", .{ safe_name, escaped_value });
             }
         }
 
@@ -272,7 +280,7 @@ pub const Resource = struct {
                     // Extract expression
                     const expr = std.mem.trim(u8, template_content[i + 3 .. j], " \t\n\r");
                     // Convert to Ruby: _erb_result << (expression).to_s
-                    try ruby_code.writer(std.heap.c_allocator).print("_erb_result << ({s}).to_s\n", .{expr});
+                    try ruby_code.print(std.heap.c_allocator, "_erb_result << ({s}).to_s\n", .{expr});
                     i = j + 2;
                     continue;
                 }
@@ -298,7 +306,7 @@ pub const Resource = struct {
                     // Extract code
                     const code = std.mem.trim(u8, template_content[i + 2 .. j], " \t\n\r");
                     // Execute code directly
-                    try ruby_code.writer(std.heap.c_allocator).print("{s}\n", .{code});
+                    try ruby_code.print(std.heap.c_allocator, "{s}\n", .{code});
                     i = j + 2;
                     continue;
                 }
@@ -323,7 +331,7 @@ pub const Resource = struct {
                 const text_block = template_content[text_start..text_end];
                 const escaped_text = try escapeRubyString(text_block);
                 defer std.heap.c_allocator.free(escaped_text);
-                try ruby_code.writer(std.heap.c_allocator).print("_erb_result << {s}\n", .{escaped_text});
+                try ruby_code.print(std.heap.c_allocator, "_erb_result << {s}\n", .{escaped_text});
                 i = text_end;
             } else {
                 i += 1;
@@ -331,7 +339,7 @@ pub const Resource = struct {
         }
 
         // Get result: _erb_result
-        try ruby_code.writer(std.heap.c_allocator).writeAll("_erb_result");
+        try ruby_code.appendSlice(std.heap.c_allocator, "_erb_result");
 
         // Execute Ruby code
         const code_str = try ruby_code.toOwnedSlice(std.heap.c_allocator);
@@ -391,13 +399,13 @@ pub const Resource = struct {
                     var var_found = false;
                     for (variables) |var_| {
                         if (std.mem.eql(u8, var_.name, var_name)) {
-                            try result.writer(std.heap.c_allocator).writeAll(var_.value);
+                            try result.appendSlice(std.heap.c_allocator, var_.value);
                             var_found = true;
                             break;
                         }
                     }
                     if (!var_found) {
-                        try result.writer(std.heap.c_allocator).writeAll(template_content[i .. j + 2]);
+                        try result.appendSlice(std.heap.c_allocator, template_content[i .. j + 2]);
                     }
                     i = j + 2;
                     continue;
@@ -423,7 +431,7 @@ pub const Resource = struct {
                 }
             }
 
-            try result.writer(std.heap.c_allocator).writeByte(template_content[i]);
+            try result.append(std.heap.c_allocator, template_content[i]);
             i += 1;
         }
 
@@ -434,25 +442,25 @@ pub const Resource = struct {
         var result = std.ArrayList(u8).initCapacity(std.heap.c_allocator, str.len * 2) catch std.ArrayList(u8).empty;
         defer result.deinit(std.heap.c_allocator);
 
-        try result.writer(std.heap.c_allocator).writeByte('"');
+        try result.append(std.heap.c_allocator, '"');
         for (str) |ch| {
             switch (ch) {
-                '\n' => try result.writer(std.heap.c_allocator).writeAll("\\n"),
-                '\r' => try result.writer(std.heap.c_allocator).writeAll("\\r"),
-                '\t' => try result.writer(std.heap.c_allocator).writeAll("\\t"),
-                '"' => try result.writer(std.heap.c_allocator).writeAll("\\\""),
-                '\\' => try result.writer(std.heap.c_allocator).writeAll("\\\\"),
-                '$' => try result.writer(std.heap.c_allocator).writeAll("\\$"),
+                '\n' => try result.appendSlice(std.heap.c_allocator, "\\n"),
+                '\r' => try result.appendSlice(std.heap.c_allocator, "\\r"),
+                '\t' => try result.appendSlice(std.heap.c_allocator, "\\t"),
+                '"' => try result.appendSlice(std.heap.c_allocator, "\\\""),
+                '\\' => try result.appendSlice(std.heap.c_allocator, "\\\\"),
+                '$' => try result.appendSlice(std.heap.c_allocator, "\\$"),
                 else => {
                     if (ch >= 32 and ch <= 126) {
-                        try result.writer(std.heap.c_allocator).writeByte(ch);
+                        try result.append(std.heap.c_allocator, ch);
                     } else {
-                        try result.writer(std.heap.c_allocator).print("\\x{x:0>2}", .{ch});
+                        try result.print(std.heap.c_allocator, "\\x{x:0>2}", .{ch});
                     }
                 },
             }
         }
-        try result.writer(std.heap.c_allocator).writeByte('"');
+        try result.append(std.heap.c_allocator, '"');
 
         return try result.toOwnedSlice(std.heap.c_allocator);
     }
@@ -468,25 +476,25 @@ pub const Resource = struct {
             if (first) {
                 // First char must be letter or underscore
                 if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_') {
-                    try result.writer(std.heap.c_allocator).writeByte(ch);
+                    try result.append(std.heap.c_allocator, ch);
                     first = false;
                 } else {
-                    try result.writer(std.heap.c_allocator).writeByte('_');
+                    try result.append(std.heap.c_allocator, '_');
                     first = false;
                 }
             } else {
                 // Subsequent chars can be letter, digit, or underscore
                 if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_') {
-                    try result.writer(std.heap.c_allocator).writeByte(ch);
+                    try result.append(std.heap.c_allocator, ch);
                 } else {
-                    try result.writer(std.heap.c_allocator).writeByte('_');
+                    try result.append(std.heap.c_allocator, '_');
                 }
             }
         }
 
         // Ensure non-empty
         if (result.items.len == 0) {
-            try result.writer(std.heap.c_allocator).writeAll("var");
+            try result.appendSlice(std.heap.c_allocator, "var");
         }
 
         return try result.toOwnedSlice(std.heap.c_allocator);

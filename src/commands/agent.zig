@@ -5,6 +5,7 @@ const provision_cmd = @import("provision.zig");
 const provision = @import("../provision.zig");
 const base_resource = @import("../base_resource.zig");
 const node_info = @import("../node_info.zig");
+const global_io = @import("../global_io.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help                 Show help for agent
@@ -129,7 +130,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
     // Check expiration
     if (obj.get("expires_at")) |ea| {
         if (ea == .string) {
-            const now = std.time.timestamp();
+            const now = std.Io.Timestamp.now(global_io.io(), .real).toSeconds();
             const expires = parseIso8601(ea.string) catch |err| {
                 std.debug.print("[agent] invalid expires_at: {s} ({})\n", .{ ea.string, err });
                 return;
@@ -232,57 +233,57 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
     _ = obj.fetchSwapRemove("callback");
     _ = obj.fetchSwapRemove("secrets");
 
-    var result = std.json.ObjectMap.init(aa);
-    try result.put("status", .{ .string = status });
+    var result: std.json.ObjectMap = .empty;
+    try result.put(aa, "status", .{ .string = status });
     if (err_msg) |msg| {
-        try result.put("error", .{ .string = msg });
+        try result.put(aa, "error", .{ .string = msg });
     }
     if (err_detail) |detail| {
-        try result.put("error_message", .{ .string = detail });
+        try result.put(aa, "error_message", .{ .string = detail });
     }
 
     if (prov_result) |pr| {
-        try result.put("executed", .{ .integer = @intCast(pr.executed_count) });
-        try result.put("updated", .{ .integer = @intCast(pr.updated_count) });
-        try result.put("skipped", .{ .integer = @intCast(pr.skipped_count) });
-        try result.put("failed", .{ .integer = @intCast(pr.failed_count) });
-        try result.put("duration_ms", .{ .integer = pr.duration_ms });
+        try result.put(aa, "executed", .{ .integer = @intCast(pr.executed_count) });
+        try result.put(aa, "updated", .{ .integer = @intCast(pr.updated_count) });
+        try result.put(aa, "skipped", .{ .integer = @intCast(pr.skipped_count) });
+        try result.put(aa, "failed", .{ .integer = @intCast(pr.failed_count) });
+        try result.put(aa, "duration_ms", .{ .integer = pr.duration_ms });
 
         var resources_arr = std.json.Array.init(aa);
         for (pr.resource_results.items) |rr| {
-            var res_obj = std.json.ObjectMap.init(aa);
-            try res_obj.put("type", .{ .string = rr.type_name });
-            try res_obj.put("name", .{ .string = rr.name });
-            try res_obj.put("action", .{ .string = rr.action });
-            try res_obj.put("updated", .{ .bool = rr.was_updated });
+            var res_obj: std.json.ObjectMap = .empty;
+            try res_obj.put(aa, "type", .{ .string = rr.type_name });
+            try res_obj.put(aa, "name", .{ .string = rr.name });
+            try res_obj.put(aa, "action", .{ .string = rr.action });
+            try res_obj.put(aa, "updated", .{ .bool = rr.was_updated });
             if (rr.skipped) {
-                try res_obj.put("skipped", .{ .bool = true });
+                try res_obj.put(aa, "skipped", .{ .bool = true });
             }
             if (rr.skip_reason) |sr| {
-                try res_obj.put("skip_reason", .{ .string = sr });
+                try res_obj.put(aa, "skip_reason", .{ .string = sr });
             }
             if (rr.error_name) |en| {
-                try res_obj.put("error", .{ .string = en });
+                try res_obj.put(aa, "error", .{ .string = en });
             }
             if (rr.error_message) |em| {
-                try res_obj.put("error_message", .{ .string = em });
+                try res_obj.put(aa, "error_message", .{ .string = em });
             }
             if (rr.output) |o| {
-                try res_obj.put("output", .{ .string = o });
+                try res_obj.put(aa, "output", .{ .string = o });
             }
             try resources_arr.append(.{ .object = res_obj });
         }
-        try result.put("resources", .{ .array = resources_arr });
+        try result.put(aa, "resources", .{ .array = resources_arr });
     }
 
-    try obj.put("result", .{ .object = result });
+    try obj.put(aa, "result", .{ .object = result });
 
     const node = node_info.getNodeInfo(aa) catch null;
     if (node) |n| {
         const node_json = try std.fmt.allocPrint(aa, "{f}", .{std.json.fmt(n, .{})});
         const node_parsed = try std.json.parseFromSlice(std.json.Value, aa, node_json, .{});
         const node_clone = try cloneJsonValue(aa, node_parsed.value);
-        try obj.put("node", node_clone);
+        try obj.put(aa, "node", node_clone);
     }
 
     const body = try std.fmt.allocPrint(aa, "{f}", .{std.json.fmt(std.json.Value{ .object = obj }, .{})});
@@ -306,12 +307,12 @@ fn cloneJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !std.json
             break :blk .{ .array = new_arr };
         },
         .object => |obj| blk: {
-            var new_obj = std.json.ObjectMap.init(allocator);
+            var new_obj: std.json.ObjectMap = .empty;
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const key = try allocator.dupe(u8, entry.key_ptr.*);
                 const val = try cloneJsonValue(allocator, entry.value_ptr.*);
-                try new_obj.put(key, val);
+                try new_obj.put(allocator, key, val);
             }
             break :blk .{ .object = new_obj };
         },
@@ -386,7 +387,7 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
     while (true) {
         wsConnect(allocator, ws_endpoint, node_name, default_callback, tls_auth, heartbeat) catch {
             std.debug.print("[agent] reconnecting in {d}ms...\n", .{backoff_ms});
-            std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+            global_io.io().sleep(.fromNanoseconds(backoff_ms * std.time.ns_per_ms), .awake) catch {};
             backoff_ms = @min(backoff_ms * 2, MAX_BACKOFF_MS);
             continue;
         };
@@ -398,6 +399,7 @@ fn runSseMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []c
 
 fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []const u8, default_callback: ?[]const u8, tls_auth: TlsClientAuth, heartbeat: bool) !void {
     const curl = @import("../curl.zig");
+    const io = global_io.io();
     const handle = curl.curl_easy_init() orelse return error.ConnectionFailed;
     defer curl.curl_easy_cleanup(handle);
 
@@ -470,7 +472,7 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
     var msg_buf = std.ArrayList(u8).empty;
     defer msg_buf.deinit(allocator);
 
-    var last_rx: i64 = std.time.milliTimestamp();
+    var last_rx: i64 = std.Io.Timestamp.now(io, .real).toMilliseconds();
     var last_ping: i64 = last_rx;
 
     while (true) {
@@ -487,7 +489,7 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
                 std.debug.print("[agent] WebSocket recv error: {s}\n", .{std.mem.span(curl.curl_easy_strerror(recv_rc))});
                 return error.ConnectionFailed;
             }
-            last_rx = std.time.milliTimestamp();
+            last_rx = std.Io.Timestamp.now(io, .real).toMilliseconds();
 
             const m = meta orelse continue :drain;
             const flags: c_uint = @bitCast(m.flags);
@@ -513,12 +515,12 @@ fn wsConnect(allocator: std.mem.Allocator, endpoint: []const u8, node_name: []co
                 msg_buf.clearRetainingCapacity();
                 // A task can run for minutes inside handleWsMessage; don't
                 // count that time as idle or we'd tear down a live connection.
-                last_rx = std.time.milliTimestamp();
+                last_rx = std.Io.Timestamp.now(io, .real).toMilliseconds();
                 last_ping = last_rx;
             }
         }
 
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(io, .real).toMilliseconds();
         if (heartbeat and now - last_rx > WS_IDLE_TIMEOUT_MS) {
             std.debug.print("[agent] no data for {d}s, assuming dead connection\n", .{@divTrunc(now - last_rx, 1000)});
             return error.ConnectionFailed;
@@ -577,7 +579,7 @@ fn runWatchMode(allocator: std.mem.Allocator, endpoint: []const u8, node_name: [
 
     while (true) {
         pollOnce(allocator, endpoint, node_name, default_callback, tls_auth);
-        std.Thread.sleep(@as(u64, interval_s) * std.time.ns_per_s);
+        global_io.io().sleep(.fromNanoseconds(@as(u64, interval_s) * std.time.ns_per_s), .awake) catch {};
     }
 }
 
@@ -652,13 +654,13 @@ fn getDefaultNodeName(allocator: std.mem.Allocator) []const u8 {
     return node_info.getHostname(allocator) catch "unknown";
 }
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(global_io.io(), std.Io.File.stderr(), err);
         return;
     };
     defer res.deinit();
@@ -694,12 +696,13 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 }
 
 fn printHelp(reason: ?[]const u8) !void {
-    const out = std.fs.File.stdout();
+    const io = global_io.io();
+    const out = std.Io.File.stdout();
     if (reason) |msg| {
-        try out.writeAll(msg);
-        try out.writeAll("\n\n");
+        try out.writeStreamingAll(io, msg);
+        try out.writeStreamingAll(io, "\n\n");
     }
-    try out.writeAll(
+    try out.writeStreamingAll(io,
         \\agent
         \\  hola agent [OPTIONS] <endpoint>
         \\

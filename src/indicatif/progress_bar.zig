@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = @import("../global_io.zig");
 const ProgressState = @import("progress_state.zig").ProgressState;
 const ProgressStyle = @import("progress_style.zig").ProgressStyle;
 
@@ -11,7 +12,7 @@ pub const ProgressBar = struct {
     steady_tick_thread: ?std.Thread = null,
     steady_tick_running: bool = false,
     width: usize = 80,
-    buffer: std.ArrayList(u8) = .{},
+    buffer: std.ArrayList(u8) = .empty,
     last_draw_len: usize = 0,
 
     const Self = @This();
@@ -141,7 +142,7 @@ pub const ProgressBar = struct {
 
     fn steadyTickWorker(self: *Self, interval_ms: u64) void {
         while (self.steady_tick_running) {
-            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+            global_io.io().sleep(.fromNanoseconds(@intCast(interval_ms * std.time.ns_per_ms)), .awake) catch {};
             if (!self.steady_tick_running) break;
             // Use tickNoDraw when managed by MultiProgress
             if (self.draw_enabled) {
@@ -197,15 +198,16 @@ pub const ProgressBar = struct {
         if (self.state.isFinished() and self.last_draw_len == 0) return;
 
         self.buffer.clearRetainingCapacity();
-        const writer = self.buffer.writer(self.allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &self.buffer);
+        defer self.buffer = aw.toArrayList();
 
         // Format using the style template
-        try self.style.format(self.state, self.width, writer);
+        try self.style.format(self.state, self.width, &aw.writer);
 
         // Move cursor to beginning of line and clear, then write
-        std.debug.print("\r\x1b[K{s}", .{self.buffer.items});
+        std.debug.print("\r\x1b[K{s}", .{aw.written()});
 
-        self.last_draw_len = self.buffer.items.len;
+        self.last_draw_len = aw.written().len;
     }
 
     /// Print a message above the progress bar

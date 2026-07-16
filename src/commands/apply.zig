@@ -5,15 +5,17 @@ const http = @import("../http.zig");
 const apply_module = @import("../apply.zig");
 const logger = @import("../logger.zig");
 const dotfiles_paths = @import("../dotfiles_paths.zig");
+const global_io = @import("../global_io.zig");
 
 /// Check if clone destination exists and is non-empty
 fn checkCloneDestination(dest: []const u8) !void {
-    if (std.fs.openDirAbsolute(dest, .{ .iterate = true })) |dir_handle| {
+    const io = global_io.io();
+    if (std.Io.Dir.openDirAbsolute(io, dest, .{ .iterate = true })) |dir_handle| {
         var dir = dir_handle;
-        defer dir.close();
+        defer dir.close(io);
 
         var iter_dir = dir.iterate();
-        if (try iter_dir.next()) |_| {
+        if (try iter_dir.next(io)) |_| {
             std.debug.print("Warning: {s} already exists and is not empty\n", .{dest});
             std.debug.print("Please remove it first or use --dotfiles to specify a different location\n", .{});
             return error.DotfilesAlreadyExists;
@@ -110,20 +112,20 @@ const parsers = .{
     .name = clap.parsers.string,
 };
 
-pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
+pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void {
     var diag = clap.Diagnostic{};
     var res = clap.parseEx(clap.Help, &params, parsers, iter, .{
         .allocator = allocator,
         .diagnostic = &diag,
     }) catch |err| {
-        try diag.reportToFile(std.fs.File.stderr(), err);
+        try diag.reportToFile(global_io.io(), std.Io.File.stderr(), err);
         return;
     };
     defer res.deinit();
 
     if (res.args.help != 0) return printHelp(null);
 
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try global_io.getEnvOwned(allocator, "HOME");
     defer allocator.free(home);
 
     const dry_run = @field(res.args, "dry-run") != 0;
@@ -189,12 +191,13 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.ArgIterator) !void {
 }
 
 fn printHelp(reason: ?[]const u8) !void {
-    const out = std.fs.File.stdout();
+    const io = global_io.io();
+    const out = std.Io.File.stdout();
     if (reason) |msg| {
-        try out.writeAll(msg);
-        try out.writeAll("\n\n");
+        try out.writeStreamingAll(io, msg);
+        try out.writeStreamingAll(io, "\n\n");
     }
-    try out.writeAll(
+    try out.writeStreamingAll(io,
         \\apply
         \\  hola apply [OPTIONS]
         \\

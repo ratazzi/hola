@@ -55,8 +55,8 @@ pub const Resource = struct {
 // Automatically strips CIDR suffix if present
 fn parseIp(ip: []const u8) !u32 {
     const clean_ip = if (std.mem.indexOf(u8, ip, "/")) |idx| ip[0..idx] else ip;
-    const parsed = try std.net.Address.parseIp4(clean_ip, 0);
-    return parsed.in.sa.addr; // This is network byte order
+    const parsed = try std.Io.net.IpAddress.parseIp4(clean_ip, 0);
+    return @bitCast(parsed.ip4.bytes); // This is network byte order
 }
 
 // Helper to parse CIDR or Netmask

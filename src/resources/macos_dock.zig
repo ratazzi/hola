@@ -4,6 +4,7 @@ const base = @import("../base_resource.zig");
 const plist = @import("../plist.zig");
 const logger = @import("../logger.zig");
 const builtin = @import("builtin");
+const global_io = @import("../global_io.zig");
 
 extern fn zig_mrb_nil_p(val: mruby.mrb_value) c_int;
 
@@ -60,12 +61,12 @@ pub const Resource = struct {
     }
 
     fn applyConfigure(self: Resource) !bool {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        var gpa = std.heap.DebugAllocator(.{}){};
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
         // Get Dock plist path - use actual Dock plist
-        const home_dir = std.posix.getenv("HOME") orelse return error.HomeNotFound;
+        const home_dir = global_io.getEnv("HOME") orelse return error.HomeNotFound;
         const dock_plist_path = try std.fmt.allocPrint(allocator, "{s}/Library/Preferences/com.apple.dock.plist", .{home_dir});
         defer allocator.free(dock_plist_path);
 
@@ -355,9 +356,7 @@ pub const Resource = struct {
 
             // Use CFPreferences API to set values (like dockutil does)
             // This is more reliable than directly modifying plist files
-            const c = @cImport({
-                @cInclude("CoreFoundation/CoreFoundation.h");
-            });
+            const c = @import("../cf.zig").c;
 
             const domain = c.CFStringCreateWithCString(null, "com.apple.dock", c.kCFStringEncodingUTF8);
             if (domain == null) return error.OutOfMemory;
@@ -386,7 +385,7 @@ pub const Resource = struct {
             try killDockWithSignal9();
 
             // Wait for Dock to fully exit
-            std.Thread.sleep(500_000_000); // 0.5 seconds
+            global_io.io().sleep(.fromNanoseconds(500_000_000), .awake) catch {}; // 0.5 seconds
 
             // NOW set the preferences (Dock is not running, so it can't overwrite)
             logger.debug("macos_dock: synchronizing preferences", .{});
@@ -403,7 +402,7 @@ pub const Resource = struct {
             }
 
             // Dock will automatically restart after being killed
-            std.Thread.sleep(1_000_000_000); // 1 second
+            global_io.io().sleep(.fromNanoseconds(1_000_000_000), .awake) catch {}; // 1 second
 
             logger.info("macos_dock: Dock restart completed", .{});
             return true;
@@ -552,9 +551,7 @@ pub const Resource = struct {
     }
 
     fn createAppEntry(allocator: std.mem.Allocator, app_path: []const u8) !plist.Value {
-        const c = @cImport({
-            @cInclude("CoreFoundation/CoreFoundation.h");
-        });
+        const c = @import("../cf.zig").c;
 
         // Create app entry structure
         var app_dict = plist.Dictionary.init(allocator);
@@ -577,7 +574,7 @@ pub const Resource = struct {
         defer allocator.free(decoded_path);
 
         // If the decoded path does not exist on disk, skip this app.
-        std.fs.accessAbsolute(decoded_path, .{}) catch |err| switch (err) {
+        std.Io.Dir.accessAbsolute(global_io.io(), decoded_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.AppNotFound,
             else => return err,
         };
@@ -662,9 +659,7 @@ pub const Resource = struct {
     }
 
     fn readDockPrefWithCFPreferences(allocator: std.mem.Allocator, key: []const u8) !?plist.Value {
-        const c = @cImport({
-            @cInclude("CoreFoundation/CoreFoundation.h");
-        });
+        const c = @import("../cf.zig").c;
 
         // Convert key to CFString
         const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
@@ -719,9 +714,7 @@ pub const Resource = struct {
     /// the caller must force a write path to clean it up even if the AnyHost
     /// value already matches the desired state.
     fn currentHostHasShadow(key: []const u8) bool {
-        const c = @cImport({
-            @cInclude("CoreFoundation/CoreFoundation.h");
-        });
+        const c = @import("../cf.zig").c;
 
         const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
         if (key_cf == null) return false;
@@ -738,9 +731,7 @@ pub const Resource = struct {
     }
 
     fn updateDockPrefWithCFPreferences(_: std.mem.Allocator, key: []const u8, value: plist.Value) !void {
-        const c = @cImport({
-            @cInclude("CoreFoundation/CoreFoundation.h");
-        });
+        const c = @import("../cf.zig").c;
 
         // Convert key to CFString
         const key_cf = c.CFStringCreateWithCString(null, key.ptr, c.kCFStringEncodingUTF8);
@@ -796,51 +787,50 @@ pub const Resource = struct {
     fn restartDockGracefully() !void {
         // Use killall without -9 to allow Dock to terminate gracefully
         // This lets Dock save its state properly before exiting
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
+        const io = global_io.io();
 
-        var proc = std.process.Child.init(&[_][]const u8{ "killall", "Dock" }, allocator);
-        proc.stdout_behavior = .Ignore;
-        proc.stderr_behavior = .Ignore;
-        _ = try proc.spawnAndWait();
+        var proc = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{ "killall", "Dock" },
+            .stdout = .ignore,
+            .stderr = .ignore,
+        });
+        _ = proc.wait(io) catch {};
 
         // Wait a moment for Dock to restart
-        std.Thread.sleep(1_000_000_000); // 1 second
+        io.sleep(.fromNanoseconds(1_000_000_000), .awake) catch {}; // 1 second
     }
 
     fn killDockWithSignal9() !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
+        const io = global_io.io();
 
         // Use kill -9 to force kill Dock without allowing it to save state
         // Find Dock process PID first
-        var proc = std.process.Child.init(&[_][]const u8{ "pgrep", "-x", "Dock" }, allocator);
-        proc.stdout_behavior = .Pipe;
-        proc.stderr_behavior = .Ignore;
-        try proc.spawn();
+        var proc = try std.process.spawn(io, .{
+            .argv = &[_][]const u8{ "pgrep", "-x", "Dock" },
+            .stdout = .pipe,
+            .stderr = .ignore,
+        });
 
         const stdout = proc.stdout orelse {
-            _ = proc.wait() catch {};
+            _ = proc.wait(io) catch {};
             return;
         };
 
         var buf: [32]u8 = undefined;
-        const bytes_read = stdout.read(&buf) catch {
-            _ = proc.wait() catch {};
+        const bytes_read = std.posix.read(stdout.handle, &buf) catch {
+            _ = proc.wait(io) catch {};
             return;
         };
-        _ = proc.wait() catch {};
+        _ = proc.wait(io) catch {};
 
         if (bytes_read > 0) {
             // Parse PID and kill with signal 9
             const pid_str = std.mem.trim(u8, buf[0..bytes_read], " \n\r");
             if (pid_str.len > 0) {
-                var kill_proc = std.process.Child.init(&[_][]const u8{ "kill", "-9", pid_str }, allocator);
-                kill_proc.stdout_behavior = .Ignore;
-                kill_proc.stderr_behavior = .Ignore;
-                _ = kill_proc.spawnAndWait() catch {};
+                _ = std.process.run(allocator, io, .{ .argv = &[_][]const u8{ "kill", "-9", pid_str } }) catch {};
             }
         }
     }

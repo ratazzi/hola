@@ -1,11 +1,12 @@
 const std = @import("std");
+const global_io = @import("../global_io.zig");
 const ProgressBar = @import("progress_bar.zig").ProgressBar;
 
 /// MultiProgress manages multiple progress bars
 pub const MultiProgress = struct {
     allocator: std.mem.Allocator,
-    bars: std.ArrayList(*ProgressBar) = .{},
-    mutex: std.Thread.Mutex = .{},
+    bars: std.ArrayList(*ProgressBar) = .empty,
+    mutex: std.Io.Mutex = .init,
     draw_enabled: bool = true,
     last_total_lines: usize = 0,
 
@@ -27,8 +28,8 @@ pub const MultiProgress = struct {
 
     /// Add a progress bar to the multi-progress
     pub fn add(self: *Self, bar: *ProgressBar) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
 
         // Disable individual drawing for bars managed by MultiProgress
         bar.draw_enabled = false;
@@ -37,8 +38,8 @@ pub const MultiProgress = struct {
 
     /// Remove a progress bar
     pub fn remove(self: *Self, bar: *ProgressBar) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
 
         for (self.bars.items, 0..) |b, i| {
             if (b == bar) {
@@ -51,8 +52,8 @@ pub const MultiProgress = struct {
 
     /// Move a progress bar to the end of the list
     pub fn moveToEnd(self: *Self, bar: *ProgressBar) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
 
         // Find and remove the bar from its current position
         for (self.bars.items, 0..) |b, i| {
@@ -70,10 +71,10 @@ pub const MultiProgress = struct {
         if (!self.draw_enabled) return;
 
         // Build the entire output in a single buffer to ensure atomic write
-        var output_buffer = std.ArrayList(u8){};
-        defer output_buffer.deinit(self.allocator);
+        var output_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer output_aw.deinit();
 
-        const writer = output_buffer.writer(self.allocator);
+        const writer = &output_aw.writer;
 
         // Move cursor up to the start of our drawing area
         if (self.last_total_lines > 0) {
@@ -81,17 +82,17 @@ pub const MultiProgress = struct {
         }
 
         // Pre-allocate buffer for individual bar rendering
-        var bar_buffer: std.ArrayList(u8) = .{};
-        defer bar_buffer.deinit(self.allocator);
-        try bar_buffer.ensureTotalCapacity(self.allocator, 512);
+        var bar_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer bar_aw.deinit();
+        try bar_aw.ensureTotalCapacity(512);
 
         // Draw each progress bar
         var total_lines: usize = 0;
         for (self.bars.items) |bar| {
-            bar_buffer.clearRetainingCapacity();
+            bar_aw.clearRetainingCapacity();
 
-            try bar.style.format(bar.state, bar.width, bar_buffer.writer(self.allocator));
-            try writer.print("\x1b[K{s}\n", .{bar_buffer.items});
+            try bar.style.format(bar.state, bar.width, &bar_aw.writer);
+            try writer.print("\x1b[K{s}\n", .{bar_aw.written()});
 
             total_lines += 1;
         }
@@ -105,13 +106,13 @@ pub const MultiProgress = struct {
         self.last_total_lines = self.bars.items.len;
 
         // Single atomic write to terminal
-        std.debug.print("{s}", .{output_buffer.items});
+        std.debug.print("{s}", .{output_aw.written()});
     }
 
     /// Draw all progress bars
     pub fn draw(self: *Self) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
         try self.drawInternal();
     }
 
@@ -121,10 +122,10 @@ pub const MultiProgress = struct {
 
         if (self.last_total_lines > 0) {
             // Build the entire clear sequence in a single buffer
-            var output_buffer = std.ArrayList(u8){};
-            defer output_buffer.deinit(self.allocator);
+            var output_aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer output_aw.deinit();
 
-            const writer = output_buffer.writer(self.allocator);
+            const writer = &output_aw.writer;
 
             // Move cursor up
             try writer.print("\x1b[{d}F", .{self.last_total_lines});
@@ -139,7 +140,7 @@ pub const MultiProgress = struct {
             try writer.print("\x1b[{d}F", .{self.last_total_lines});
 
             // Single atomic write
-            std.debug.print("{s}", .{output_buffer.items});
+            std.debug.print("{s}", .{output_aw.written()});
         }
 
         self.last_total_lines = 0;
@@ -147,21 +148,21 @@ pub const MultiProgress = struct {
 
     /// Clear all progress bars from the terminal
     pub fn clear(self: *Self) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
         try self.clearInternal();
     }
 
     /// Print a message above all progress bars
     pub fn println(self: *Self, msg: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(global_io.io());
+        defer self.mutex.unlock(global_io.io());
 
         // Build the entire sequence (clear + message + redraw) in a single buffer
-        var output_buffer = std.ArrayList(u8){};
-        defer output_buffer.deinit(self.allocator);
+        var output_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer output_aw.deinit();
 
-        const writer = output_buffer.writer(self.allocator);
+        const writer = &output_aw.writer;
 
         // 1. Clear sequence
         if (self.last_total_lines > 0) {
@@ -181,15 +182,15 @@ pub const MultiProgress = struct {
             try writer.print("\x1b[{d}F", .{self.last_total_lines});
         }
 
-        var bar_buffer: std.ArrayList(u8) = .{};
-        defer bar_buffer.deinit(self.allocator);
-        try bar_buffer.ensureTotalCapacity(self.allocator, 512);
+        var bar_aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer bar_aw.deinit();
+        try bar_aw.ensureTotalCapacity(512);
 
         var total_lines: usize = 0;
         for (self.bars.items) |bar| {
-            bar_buffer.clearRetainingCapacity();
-            try bar.style.format(bar.state, bar.width, bar_buffer.writer(self.allocator));
-            try writer.print("\x1b[K{s}\n", .{bar_buffer.items});
+            bar_aw.clearRetainingCapacity();
+            try bar.style.format(bar.state, bar.width, &bar_aw.writer);
+            try writer.print("\x1b[K{s}\n", .{bar_aw.written()});
             total_lines += 1;
         }
 
@@ -201,7 +202,7 @@ pub const MultiProgress = struct {
         self.last_total_lines = self.bars.items.len;
 
         // Single atomic write
-        std.debug.print("{s}", .{output_buffer.items});
+        std.debug.print("{s}", .{output_aw.written()});
     }
 
     /// Join all bars (wait for them to finish)
@@ -209,18 +210,18 @@ pub const MultiProgress = struct {
         while (true) {
             var all_finished = true;
 
-            self.mutex.lock();
+            self.mutex.lockUncancelable(global_io.io());
             for (self.bars.items) |bar| {
                 if (!bar.isFinished()) {
                     all_finished = false;
                     break;
                 }
             }
-            self.mutex.unlock();
+            self.mutex.unlock(global_io.io());
 
             if (all_finished) break;
 
-            std.time.sleep(50 * std.time.ns_per_ms);
+            global_io.io().sleep(.fromNanoseconds(50 * std.time.ns_per_ms), .awake) catch {};
             self.draw() catch {};
         }
     }
