@@ -24,6 +24,7 @@ pub const CURLcode = enum(c_int) {
     CURLE_SSL_CERTPROBLEM = 58,
     CURLE_SSL_CACERT_BADFILE = 77,
     CURLE_ABORTED_BY_CALLBACK = 42,
+    CURLE_AGAIN = 81,
     _,
 };
 
@@ -116,7 +117,7 @@ pub const CURLoption = enum(c_int) {
 
 pub const CURLINFO = enum(c_int) {
     CURLINFO_RESPONSE_CODE = 0x200002,
-    CURLINFO_ACTIVESOCKET = 0x500028,
+    CURLINFO_ACTIVESOCKET = 0x50002c,
     _,
 };
 
@@ -178,6 +179,8 @@ pub const curl_ws_frame = extern struct {
 };
 
 pub const CURLWS_TEXT: c_uint = 1 << 0;
+pub const CURLWS_BINARY: c_uint = 1 << 1;
+pub const CURLWS_CONT: c_uint = 1 << 2;
 pub const CURLWS_CLOSE: c_uint = 1 << 3;
 pub const CURLWS_PING: c_uint = 1 << 4;
 pub const CURLWS_PONG: c_uint = 1 << 6;
