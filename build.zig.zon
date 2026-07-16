@@ -25,7 +25,7 @@
     .fingerprint = 0x6fa0f988704801ae, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -45,24 +45,24 @@
             .hash = "hola_deps-0.1.0-clHq_wTk5AM2_uMo-RFHPDRsVY2T7rmQAAdfV1KmkSK5",
         },
         .clap = .{
-            .url = "https://github.com/Hejsil/zig-clap/archive/c499116264c348e4a98d939917b2446cad79d5fb.tar.gz",
-            .hash = "clap-0.11.0-oBajB-TnAQC7yPLnZRT5WzHZ_4Ly4dX2OILskli74b9H",
+            .url = "https://github.com/Hejsil/zig-clap/archive/1cee79fa8a1daebc2d558e5c9e214d274fd493e8.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#cfa6311448755cf18684c09697d20b7a7622e578",
-            .hash = "vaxis-0.5.1-BWNV_IcuCQCjrYTHNe3-ArhtpwLzRfgI2mBu0yKT7IZl",
+            .url = "git+https://github.com/rockorager/libvaxis#06c8b9db2d4b83c279e985603ffabfa828dcbd35",
+            .hash = "vaxis-0.6.0-BWNV_N0GCgC-VGPXJ3sS8N2NBiUqUfkCLti-Mv7hXLNM",
         },
         .ansi_term = .{
             .url = "git+https://github.com/ziglibs/ansi_term?ref=master#47e27d707ac9569be9b0863cfa7b150600d977c9",
             .hash = "ansi_term-0.1.0-_baAywpoAABEqsPmS5Jz_CddDCrG8qdIyRIESH8D2fzd",
         },
         .toml = .{
-            .url = "git+https://github.com/sam701/zig-toml#c261f13a4f79b2330211639f498d33fadb3aad27",
-            .hash = "toml-0.3.0-bV14BSt9AQBdoP2Ofpwjxops6ddrzk0A9Vpd7ckLoYw8",
+            .url = "https://github.com/sam701/zig-toml/archive/00c5715edc45e0019cc0543ee699ee40382e5247.tar.gz",
+            .hash = "toml-0.3.0-bV14BRmKAQAWR0FT0KUKFwVJTImaFhWjSe6HfSMtNZOH",
         },
         .zeit = .{
-            .url = "git+https://github.com/rockorager/zeit#74be5a2afb346b2a6a6349abbb609e89ec7e65a6",
-            .hash = "zeit-0.6.0-5I6bk4t8AgCP0UGGHVF_khlmWZkAF5XtfQWEKCyLoptU",
+            .url = "git+https://github.com/rockorager/zeit#b1c1c2fcbc71fd7799a316bbcf0ff88d06d80ccc",
+            .hash = "zeit-0.9.0-5I6bk2m9AgBSMH8-L6rYJkwuQAyhXplnfxnvTSGzVHUR",
         },
     },
     .paths = .{

@@ -83,10 +83,10 @@ pub fn build(b: *std.Build) !void {
         const build_zig_zon = @embedFile("build.zig.zon") ++ "";
         var buffer: [10 * build_zig_zon.len]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
-        const parsed = std.zon.parse.fromSlice(
+        const parsed = std.zon.parse.fromSliceAlloc(
             struct { version: []const u8 },
             fba.allocator(),
-            build_zig_zon[0 .. :0],
+            build_zig_zon[0.. :0],
             null,
             .{ .ignore_unknown_fields = true },
         ) catch break :blk "0.0.0";
@@ -127,36 +127,35 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Add mruby header file path
-    exe.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{final_mruby_path}) });
+    exe.root_module.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{final_mruby_path}) });
 
     // Link mruby static library directly (no need to add library path since we specify full path)
-    exe.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libmruby.a", .{final_mruby_path}) });
-    exe.linkLibC();
+    exe.root_module.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libmruby.a", .{final_mruby_path}) });
+    exe.root_module.link_libc = true;
 
     // For Linux cross-compilation, provide linker symbols that mruby expects
     if (target.result.os.tag == .linux) {
-        exe.root_module.link_libc = true;
-        exe.addAssemblyFile(b.path("src/linux_linker_shims.s"));
+        exe.root_module.addAssemblyFile(b.path("src/linux_linker_shims.s"));
         // aarch64-gnu only: provide sigsetjmp symbol for OpenSSL armcap.c
         // musl provides sigsetjmp natively, so only needed for gnu
         if (target.result.cpu.arch == .aarch64 and target.result.abi == .gnu) {
-            exe.addAssemblyFile(b.path("src/linux_aarch64_shims.S"));
+            exe.root_module.addAssemblyFile(b.path("src/linux_aarch64_shims.S"));
         }
     }
 
     // Platform-specific configuration
     if (target.result.os.tag == .macos) {
         // macOS: Link Foundation framework for AppleScript support
-        exe.linkFramework("Foundation");
+        exe.root_module.linkFramework("Foundation", .{});
         // Add Objective-C bridge file for runtime calls
         // Note: .m files are compiled as Objective-C
-        exe.addCSourceFile(.{ .file = b.path("src/applescript_bridge.m"), .flags = &.{"-fobjc-arc"} });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/applescript_bridge.m"), .flags = &.{"-fobjc-arc"} });
         // Add CFPreferences C wrapper
-        exe.addCSourceFile(.{ .file = b.path("src/cfprefs_wrapper.c"), .flags = &.{} });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/cfprefs_wrapper.c"), .flags = &.{} });
     }
 
     // Add mruby helpers for array handling
-    exe.addCSourceFile(.{ .file = b.path("src/mruby_helpers.c"), .flags = &.{} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/mruby_helpers.c"), .flags = &.{} });
     configureLibGit2(exe, b, final_libgit2_path, target.result.os.tag);
 
     // This declares intent for the executable to be installed into the
@@ -192,10 +191,11 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Create test executable for the main executable's root module
+    // Note: exe_tests shares exe.root_module, which already has libgit2
+    // configured at the module level - no second configureLibGit2 call needed.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
-    configureLibGit2(exe_tests, b, final_libgit2_path, target.result.os.tag);
 
     // Run step for the test executable
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -218,33 +218,34 @@ pub fn build(b: *std.Build) !void {
 }
 
 fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: []const u8, os_tag: std.Target.Os.Tag) void {
+    const mod = step.root_module;
     // All platforms use hola_deps package with unified structure
-    step.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{libgit2_path}) });
+    mod.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{libgit2_path}) });
 
     // Add libgit2 and libcurl
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcurl.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libgit2.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcurl.a", .{libgit2_path}) });
 
     // Shared dependencies (needed by both libgit2 and libcurl)
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-posix.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssl.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcrypto.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libssh2.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libz.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-8.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpcre2-posix.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libhttp_parser.a", .{libgit2_path}) });
 
     // curl-specific dependencies
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libnghttp2.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libnghttp3.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlicommon.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlidec.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlienc.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libzstd.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcares.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libidn2.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpsl.a", .{libgit2_path}) });
-    step.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libunistring.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libnghttp2.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libnghttp3.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlicommon.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlidec.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libbrotlienc.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libzstd.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libcares.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libidn2.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libpsl.a", .{libgit2_path}) });
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib/libunistring.a", .{libgit2_path}) });
 
     // Platform-specific system libraries
     if (os_tag == .macos) {
@@ -252,12 +253,12 @@ fn configureLibGit2(step: *std.Build.Step.Compile, b: *std.Build, libgit2_path: 
         const result = b.run(&.{ "xcrun", "--show-sdk-path" });
         const sdk_path = std.mem.trim(u8, result, &std.ascii.whitespace);
 
-        step.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
-        step.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk_path}) });
-        step.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk_path}) });
+        mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
+        mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk_path}) });
+        mod.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk_path}) });
 
-        step.linkSystemLibrary("iconv");
-        step.linkFramework("CoreFoundation");
-        step.linkFramework("Security");
+        mod.linkSystemLibrary("iconv", .{});
+        mod.linkFramework("CoreFoundation", .{});
+        mod.linkFramework("Security", .{});
     }
 }
