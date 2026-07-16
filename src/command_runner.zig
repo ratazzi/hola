@@ -12,15 +12,7 @@ pub fn executeCommandWithLogging(
     cwd: ?[]const u8,
 ) !void {
     // Build a shell-style command string for display/logging.
-    var cmd_buf = std.ArrayList(u8).initCapacity(allocator, 256) catch std.ArrayList(u8).empty;
-    defer cmd_buf.deinit(allocator);
-
-    for (args, 0..) |arg, i| {
-        if (i > 0) cmd_buf.appendAssumeCapacity(' ');
-        cmd_buf.appendSliceAssumeCapacity(arg);
-    }
-
-    const cmd_str = try cmd_buf.toOwnedSlice(allocator);
+    const cmd_str = try joinArgs(allocator, args);
     defer allocator.free(cmd_str);
 
     // Show command being executed.
@@ -49,4 +41,38 @@ pub fn executeCommandWithLogging(
         },
         else => return error.CommandFailed,
     }
+}
+
+/// Join argv into a single space-separated string for display/logging.
+fn joinArgs(allocator: std.mem.Allocator, args: []const []const u8) ![]u8 {
+    var cmd_buf = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer cmd_buf.deinit(allocator);
+
+    for (args, 0..) |arg, i| {
+        if (i > 0) try cmd_buf.append(allocator, ' ');
+        try cmd_buf.appendSlice(allocator, arg);
+    }
+
+    return cmd_buf.toOwnedSlice(allocator);
+}
+
+test "joinArgs handles command strings longer than the initial capacity" {
+    const allocator = std.testing.allocator;
+
+    const long_arg = "x" ** 300;
+    const result = try joinArgs(allocator, &.{ "sudo", "apt-get", "install", "-y", long_arg });
+    defer allocator.free(result);
+
+    try std.testing.expectEqual("sudo apt-get install -y ".len + long_arg.len, result.len);
+    try std.testing.expect(std.mem.startsWith(u8, result, "sudo apt-get install -y x"));
+    try std.testing.expect(std.mem.endsWith(u8, result, "xxx"));
+}
+
+test "joinArgs joins a short argv" {
+    const allocator = std.testing.allocator;
+
+    const result = try joinArgs(allocator, &.{ "echo", "hello" });
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("echo hello", result);
 }
