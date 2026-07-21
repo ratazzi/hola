@@ -170,9 +170,7 @@ pub const Resource = struct {
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
-        if (std.fs.path.dirname(self.path)) |dir| {
-            try std.Io.Dir.cwd().createDirPath(io, dir);
-        }
+        try base.ensureParentDir(self.path);
 
         const local_exists = blk: {
             std.Io.Dir.cwd().access(io, self.path, .{}) catch |err| switch (err) {
@@ -389,9 +387,7 @@ pub const Resource = struct {
 
     fn applyTouch(self: Resource) !void {
         const io = global_io.io();
-        if (std.fs.path.dirname(self.path)) |dir| {
-            try std.Io.Dir.cwd().createDirPath(io, dir);
-        }
+        try base.ensureParentDir(self.path);
 
         const is_abs = std.fs.path.isAbsolute(self.path);
         const file = if (is_abs)
@@ -526,9 +522,7 @@ pub const Resource = struct {
         const etag_path = try self.getEtagPath(allocator);
         defer allocator.free(etag_path);
 
-        if (std.fs.path.dirname(etag_path)) |dir| {
-            try std.Io.Dir.cwd().createDirPath(io, dir);
-        }
+        try base.ensureParentDir(etag_path);
 
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = etag_path, .data = etag });
     }
@@ -562,9 +556,7 @@ pub const Resource = struct {
         const lm_path = try self.getLastModifiedPath(allocator);
         defer allocator.free(lm_path);
 
-        if (std.fs.path.dirname(lm_path)) |dir| {
-            try std.Io.Dir.cwd().createDirPath(io, dir);
-        }
+        try base.ensureParentDir(lm_path);
 
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = lm_path, .data = last_modified });
     }
@@ -646,6 +638,45 @@ fn fallbackRemoteFileFailure(buf: []u8, path: []const u8, operation: []const u8,
         @memcpy(buf[0..n], fallback[0..n]);
         break :blk buf[0..n];
     };
+}
+
+test "remote file create follows a symlinked parent directory" {
+    const allocator = std.testing.allocator;
+    const io = global_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "assets", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "source.json", .data = "{\"version\":\"test\"}" });
+
+    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(tmp_path);
+    const assets_path = try tmp.dir.realPathFileAlloc(io, "assets", allocator);
+    defer allocator.free(assets_path);
+    const assets_link = try std.fs.path.join(allocator, &.{ tmp_path, "assets-link" });
+    defer allocator.free(assets_link);
+    try std.Io.Dir.symLinkAbsolute(io, assets_path, assets_link, .{});
+
+    const destination = try std.fs.path.join(allocator, &.{ assets_link, ".manifest.json" });
+    defer allocator.free(destination);
+    const source_path = try tmp.dir.realPathFileAlloc(io, "source.json", allocator);
+    defer allocator.free(source_path);
+    const source_url = try std.fmt.allocPrint(allocator, "file://{s}", .{source_path});
+    defer allocator.free(source_url);
+
+    var resource = Resource{
+        .path = destination,
+        .source = source_url,
+        .attrs = .{},
+        .action = .create,
+        .common = base.CommonProps.init(allocator),
+    };
+    defer resource.common.deinit(allocator);
+
+    try std.testing.expect(try resource.applyCreate());
+    const content = try tmp.dir.readFileAlloc(io, "assets/.manifest.json", allocator, .unlimited);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("{\"version\":\"test\"}", content);
 }
 
 /// Ruby prelude for remote_file resource
