@@ -137,15 +137,16 @@ test "validateClientAuthFiles: both null is a no-op" {
 }
 
 test "validateClientAuthFiles: accepts readable cert and key" {
+    const io = global_io.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = "-----BEGIN CERT-----\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "-----BEGIN KEY-----\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cert.pem", .data = "-----BEGIN CERT-----\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = "-----BEGIN KEY-----\n" });
 
-    const cert_path = try tmp.dir.realpathAlloc(testing.allocator, "cert.pem");
+    const cert_path = try tmp.dir.realPathFileAlloc(io, "cert.pem", testing.allocator);
     defer testing.allocator.free(cert_path);
-    const key_path = try tmp.dir.realpathAlloc(testing.allocator, "key.pem");
+    const key_path = try tmp.dir.realPathFileAlloc(io, "key.pem", testing.allocator);
     defer testing.allocator.free(key_path);
 
     try validateClientAuthFiles(cert_path, key_path);
@@ -168,17 +169,18 @@ test "validateClientAuthFiles: rejects missing key path" {
 test "validateClientAuthFiles: rejects unreadable key (chmod 000)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     // Root bypasses POSIX file mode, so a chmod 000 file is still readable.
-    if (std.posix.getuid() == 0) return error.SkipZigTest;
+    if (std.c.getuid() == 0) return error.SkipZigTest;
 
+    const io = global_io.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "secret" });
-    const key_path = try tmp.dir.realpathAlloc(testing.allocator, "key.pem");
+    try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = "secret" });
+    const key_path = try tmp.dir.realPathFileAlloc(io, "key.pem", testing.allocator);
     defer testing.allocator.free(key_path);
 
-    try std.posix.chmod(key_path, 0o000);
-    defer std.posix.chmod(key_path, 0o600) catch {};
+    try tmp.dir.setFilePermissions(io, "key.pem", .fromMode(0o000), .{});
+    defer tmp.dir.setFilePermissions(io, "key.pem", .fromMode(0o600), .{}) catch {};
 
     try testing.expectError(error.InvalidClientAuth, validateClientAuthFiles(null, key_path));
 }
