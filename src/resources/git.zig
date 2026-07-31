@@ -22,7 +22,7 @@ pub const Resource = struct {
     depth: ?u32, // Shallow clone depth (not yet supported by our git.zig)
     enable_checkout: bool, // Whether to checkout files (default: true)
     enable_submodules: bool, // Whether to update submodules (default: false)
-    ssh_key: ?[]const u8, // Path to SSH private key for authentication
+    ssh_key: ?[:0]const u8, // Path to SSH private key for authentication (sentinel-terminated: passed to libgit2 as C string)
     ssh_wrapper: ?[]const u8, // For compatibility with Chef (ignored - use ssh_key instead)
     enable_strict_host_key_checking: bool, // Verify SSH host keys (default: true for security)
     user: ?[]const u8, // File owner after clone (e.g., "deploy", "www-data")
@@ -245,7 +245,7 @@ pub const Resource = struct {
 
     /// Context for custom credentials and certificate callbacks
     const SshContext = struct {
-        ssh_key_path: ?[]const u8,
+        ssh_key_path: ?[:0]const u8,
         enable_strict_host_key_checking: bool,
         retries: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     };
@@ -287,10 +287,9 @@ pub const Resource = struct {
             // Priority 1: If custom SSH key is explicitly provided, use it first
             if (ctx) |c_ctx| {
                 if (c_ctx.ssh_key_path) |key_path| {
-                    const private_key: [*c]const u8 = @ptrCast(key_path.ptr);
                     const public_key: [*c]const u8 = null; // libgit2 will derive from private key
                     const passphrase: [*c]const u8 = null; // No passphrase support yet
-                    return c.git_credential_ssh_key_new(out, user, public_key, private_key, passphrase);
+                    return c.git_credential_ssh_key_new(out, user, public_key, key_path.ptr, passphrase);
                 }
             }
 
@@ -1047,8 +1046,8 @@ pub fn zigAddResource(
     const depth: ?u32 = if (depth_int > 0) @intCast(depth_int) else null;
 
     const ssh_key_str = std.mem.span(mruby.mrb_str_to_cstr(mrb, ssh_key_val));
-    const ssh_key: ?[]const u8 = if (ssh_key_str.len > 0)
-        allocator.dupe(u8, ssh_key_str) catch return mruby.mrb_nil_value()
+    const ssh_key: ?[:0]const u8 = if (ssh_key_str.len > 0)
+        allocator.dupeZ(u8, ssh_key_str) catch return mruby.mrb_nil_value()
     else
         null;
     errdefer if (ssh_key) |key| allocator.free(key);
