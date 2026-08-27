@@ -153,6 +153,8 @@ pub const CURLVERSION_NOW = 10; // Current version of curl_version_info_data
 pub extern fn curl_version() [*:0]const u8;
 pub extern fn curl_version_info(age: c_int) *curl_version_info_data;
 
+pub const CURL_GLOBAL_ALL: c_long = 0x03;
+
 pub extern fn curl_global_init(flags: c_long) CURLcode;
 pub extern fn curl_global_cleanup() void;
 pub extern fn curl_easy_init() ?*CURL;
