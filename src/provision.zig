@@ -1149,6 +1149,13 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         };
         download_thread = try std.Thread.spawn(.{}, DownloadThread.run, .{&download_mgr});
     }
+    // Join the worker before earlier defers tear down download_mgr,
+    // progress_ctx and display, which its progress callbacks dereference.
+    // On the happy path the thread has already been joined and cleared below.
+    defer if (download_thread) |thread| {
+        download_mgr.cancel();
+        thread.join();
+    };
 
     // Start resource execution phase
     try display.showSectionWithLevel("Executing Resources", 3);
@@ -1343,6 +1350,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     if (download_thread) |thread| {
         try display.showInfo("Waiting for remaining downloads to complete...");
         thread.join();
+        download_thread = null; // Prevent the early-exit defer from joining again
 
         // Show final stats
         const stats = download_mgr.getStats();
