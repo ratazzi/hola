@@ -309,15 +309,22 @@ pub const Resource = struct {
                 }
             }
 
+            // ETag / Last-Modified caches are a download optimization only. A
+            // failure to persist them (e.g. an unwritable state dir) must not
+            // fail an already-successful download.
             if (self.use_etag) {
                 if (downloaded_etag) |etag| {
-                    try self.saveEtag(allocator, etag);
+                    self.saveEtag(allocator, etag) catch |err| {
+                        logger.warn("Failed to save etag cache for {s}: {}", .{ self.path, err });
+                    };
                 }
             }
 
             if (self.use_last_modified) {
                 if (downloaded_last_modified) |lm| {
-                    try self.saveLastModified(allocator, lm);
+                    self.saveLastModified(allocator, lm) catch |err| {
+                        logger.warn("Failed to save last-modified cache for {s}: {}", .{ self.path, err });
+                    };
                 }
             }
         }
