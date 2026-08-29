@@ -483,15 +483,18 @@ pub const Session = struct {
         try self.mrb.evalString(resources.file_edit.ruby_prelude);
         try self.mrb.evalString(resources.extract.ruby_prelude);
         try self.mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
+        try self.mrb.evalString(@embedFile("ruby_prelude/resources.rb"));
 
-        // `file` and `directory` are standard Rake task constructors. Keep the
-        // provision resource classes available for the explicit
-        // Hola::Resources namespace, but remove their top-level methods before
-        // a task file is evaluated.
+        // A Holafile reserves top-level methods for the task DSL. Provision
+        // scripts retain the legacy top-level resource methods, while both
+        // modes can use the explicit Hola::Resources namespace.
         if (opts.mode == .task) {
             try self.mrb.evalString(
-                \\Object.send(:remove_method, :file)
-                \\Object.send(:remove_method, :directory)
+                \\Hola::Resources::DSL_METHODS.each do |name|
+                \\  method_name = name.to_sym
+                \\  available = Object.private_instance_methods.include?(method_name) || Object.instance_methods.include?(method_name)
+                \\  Object.send(:remove_method, method_name) if available
+                \\end
             );
         }
 
@@ -1613,7 +1616,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     };
 }
 
-test "Session.open collects resources without applying" {
+test "Session.open exposes every resource through Hola::Resources" {
     const allocator = std.testing.allocator;
     json.setAllocator(allocator);
 
@@ -1626,7 +1629,22 @@ test "Session.open collects resources without applying" {
 
     const session = try Session.open(allocator, .{});
     defer session.close();
-    const script = try std.fmt.allocPrint(allocator, "file '{s}' do\n  content 'x'\nend", .{target});
+    try session.evalString(
+        \\$expected_resources = %w[
+        \\  file directory execute remote_file template link route
+        \\  macos_dock macos_defaults apt_repository systemd_unit mount
+        \\  package homebrew_package apt_package ruby_block git user group
+        \\  aws_kms file_edit extract apt_update
+        \\]
+        \\$resource_namespace_complete = $expected_resources.all? { |name| Hola::Resources.respond_to?(name.to_sym) }
+        \\$top_level_resource_compat = Object.private_instance_methods.include?(:execute)
+    );
+    const namespace_complete = session.mrb.getGlobal("$resource_namespace_complete");
+    const top_level_compat = session.mrb.getGlobal("$top_level_resource_compat");
+    try std.testing.expect(mruby.mrb_test(namespace_complete));
+    try std.testing.expect(mruby.mrb_test(top_level_compat));
+
+    const script = try std.fmt.allocPrint(allocator, "Hola::Resources.file '{s}' do\n  content 'x'\nend", .{target});
     defer allocator.free(script);
     try session.evalString(script);
 
@@ -1682,6 +1700,11 @@ test "task prelude supports common Rake task semantics" {
         \\  @values = {}
         \\  def self.[](key); @values[key]; end
         \\  def self.[]=(key, value); @values[key] = value; end
+        \\end
+        \\module Hola
+        \\  module Resources
+        \\    DSL_METHODS = []
+        \\  end
         \\end
     );
     try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
@@ -1748,6 +1771,8 @@ test "task prelude supports common Rake task semantics" {
         \\$parse_test_result = ($parse_result == [['a', []], ['a', []], ['a', ['1', '2']], ['ns:a', ['x']]])
         \\$tasklib_result = Rake::Task.task_defined?(:from_tasklib) && Rake::Task.task_defined?(:clean) && Rake::Task.task_defined?(:clobber)
         \\$file_dsl_result = Rake::Task[:'standard-file-task'].is_a?(Rake::FileTask) && Rake::Task[:'legacy-file-task'].is_a?(Rake::FileTask) && Rake::Task[:'standard-directory-task'].is_a?(Rake::FileTask)
+        \\$resource_gateway_result = (resources == Hola::Resources)
+        \\resources { $resource_gateway_result = $resource_gateway_result && (self == Hola::Resources) }
     );
 
     const result_names = [_][*:0]const u8{
@@ -1758,6 +1783,7 @@ test "task prelude supports common Rake task semantics" {
         "$parse_test_result",
         "$tasklib_result",
         "$file_dsl_result",
+        "$resource_gateway_result",
     };
     for (result_names) |name| {
         const result = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, name));
@@ -1779,8 +1805,9 @@ test "task prelude immediate wrapper converges resource declarations" {
         \\end
         \\def execute(name, &block); name; end
     );
+    try mrb_state.evalString(@embedFile("ruby_prelude/resources.rb"));
     try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
-    try mrb_state.evalString("$hola_run_immediate = true; execute('command'); $immediate_result = ($converge_calls == 1)");
+    try mrb_state.evalString("$hola_run_immediate = true; resources.execute('command'); $immediate_result = ($converge_calls == 1)");
     const result = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, "$immediate_result"));
     try std.testing.expect(mruby.mrb_test(result));
 }
@@ -1806,9 +1833,15 @@ test "task command-line assignments use the environment bridge" {
         \\$hola_run_argv = ['HOLA_TASK_TEST_ENV=present', 'check_env']
         \\Hola::Rake.main
         \\$env_bridge_result = ($hola_run_status == 0 && $env_seen == 'present')
+        \\$resource_boundary_result = Hola::Resources.respond_to?(:execute) &&
+        \\  !Object.private_instance_methods.include?(:execute) &&
+        \\  !Object.instance_methods.include?(:execute) &&
+        \\  resources == Hola::Resources
     );
     const result = session.mrb.getGlobal("$env_bridge_result");
+    const boundary_result = session.mrb.getGlobal("$resource_boundary_result");
     try std.testing.expect(mruby.mrb_test(result));
+    try std.testing.expect(mruby.mrb_test(boundary_result));
     try std.testing.expectEqual(@as(usize, 0), session.runner.resources.items.len);
 }
 

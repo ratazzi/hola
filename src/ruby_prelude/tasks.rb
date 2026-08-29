@@ -6,12 +6,7 @@ module Hola
   end
 
   module Rake
-    RESOURCE_DSL = %w[
-      execute remote_file template link route
-      macos_dock macos_defaults apt_repository systemd_unit mount
-      package homebrew_package apt_package ruby_block git user group
-      aws_kms file_edit extract apt_update
-    ]
+    RESOURCE_DSL = Hola::Resources::DSL_METHODS
 
     class TaskArguments
       attr_reader :names
@@ -505,21 +500,26 @@ module Hola
         raise Hola::ResourceError, message unless ok
       end
 
+      def install_immediate_resource!(resources_class, method_name, original)
+        resources_class.send(:alias_method, original, method_name)
+        resources_class.send(:private, original)
+        resources_class.send(:define_method, method_name) do |*args, &block|
+          result = send(original, *args, &block)
+          Hola::Rake.converge!
+          result
+        end
+      end
+
       def install_immediate_mode!
+        resources_class = class << Hola::Resources; self; end
         RESOURCE_DSL.each do |name|
           method_name = name.to_sym
-          available = Object.private_instance_methods.include?(method_name) || Object.instance_methods.include?(method_name)
-          next unless available
-          original = ("hola_original_" + name).to_sym
-          installed = Object.private_instance_methods.include?(original) || Object.instance_methods.include?(original)
+          next unless Hola::Resources.respond_to?(method_name)
+          original = ("hola_deferred_resource_" + name).to_sym
+          installed = resources_class.private_instance_methods.include?(original) ||
+            resources_class.instance_methods.include?(original)
           next if installed
-          Object.send(:alias_method, original, method_name)
-          Object.send(:define_method, method_name) do |*args, &block|
-            result = send(original, *args, &block)
-            Hola::Rake.converge!
-            result
-          end
-          Object.send(:private, method_name)
+          install_immediate_resource!(resources_class, method_name, original)
         end
       end
 
@@ -600,7 +600,12 @@ module Rake
       Hola::Rake.application.define_rule(*definition, &block)
     end
 
-    private :desc, :task, :file, :file_task, :directory, :multitask, :namespace, :default, :rule
+    def resources(&block)
+      return Hola::Resources unless block
+      Hola::Resources.instance_eval(&block)
+    end
+
+    private :desc, :task, :file, :file_task, :directory, :multitask, :namespace, :default, :rule, :resources
   end
 
   class TaskLib
@@ -614,24 +619,6 @@ module Rake
 
     def application=(value)
       Hola::Rake.application = value
-    end
-  end
-end
-
-module Hola
-  module Resources
-    class << self
-      def file(path, &block)
-        result = FileResource.new(path, &block)
-        Hola::Rake.converge!
-        result
-      end
-
-      def directory(path, &block)
-        result = DirectoryResource.new(path, &block)
-        Hola::Rake.converge!
-        result
-      end
     end
   end
 end
@@ -781,14 +768,14 @@ include Rake::DSL
 
 def sh(command_text, options = {}, &block)
   if block
-    raise ArgumentError, "sh block form is not supported; use execute with ignore_failure"
+    raise ArgumentError, "sh block form is not supported; use resources.execute with ignore_failure"
   end
   options ||= {}
   if Hola::Rake.dry_run?
     puts command_text.to_s
     return true
   end
-  execute(command_text.to_s) do
+  Hola::Resources.execute(command_text.to_s) do
     self.command(command_text.to_s)
     live_stream(true)
     cwd(options[:cwd].to_s) if options[:cwd]

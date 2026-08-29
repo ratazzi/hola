@@ -6,12 +6,14 @@ OUTPUT = "#{ROOT}/out.txt"
 
 desc "Prepare the fixture directory"
 task :prepare do
-  Hola::Resources.directory ROOT
-  Hola::Resources.file CONFIG do
-    content "configured\n"
-  end
-  Hola::Resources.file "#{ROOT}/generated.in" do
-    content "rule input\n"
+  resources do
+    directory ROOT
+    file CONFIG do
+      content "configured\n"
+    end
+    file "#{ROOT}/generated.in" do
+      content "rule input\n"
+    end
   end
   raise "resources were not applied immediately" unless File.exist?(CONFIG)
 end

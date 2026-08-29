@@ -170,10 +170,11 @@ If you know Ruby, you already know this. If you don't, you can still read it.
 
 ### Project Tasks with `hola run`
 
-Put a `Holafile` in a project to define repeatable development tasks. Hola finds it
-from the current directory or any parent directory, then runs each resource as soon
-as it is declared. `holafile.rb` is also canonical; the Rake file names remain as
-legacy fallbacks and emit a migration warning when discovered implicitly:
+Put a `Holafile` in a project to define repeatable, state-aware development tasks.
+Hola finds it from the current directory or any parent directory, then runs each
+resource as soon as it is declared. `holafile.rb` is also canonical; the Rake file
+names remain as legacy fallbacks and emit a migration warning when discovered
+implicitly:
 
 ```ruby
 directory ".cache"
@@ -214,9 +215,30 @@ arguments, task enhancement and re-enabling, `Rake::Task[]`, `file`, `directory`
 suffix rules, `Dir.glob`, `FileList`, `rake/clean`, local `require`/
 `require_relative`, `FileUtils`, and streaming `sh` output. In task mode, `file`
 and `directory` always have their standard Rake meanings; `file_task` remains as
-a compatibility alias for `file`. Hola's provision resources are available
-explicitly as `Hola::Resources.file` and `Hola::Resources.directory` when a task
-needs immediate resource convergence.
+a compatibility alias for `file`. Configuration resources enter through the
+explicit `resources` gateway and converge immediately when declared inside a task:
+
+```ruby
+task :configure do
+  resources do
+    directory "build"
+    file "build/version.txt" do
+      content VERSION
+    end
+  end
+end
+
+task :compile do
+  resources.execute "compile" do
+    command "zig build"
+  end
+end
+```
+
+The gateway delegates to the complete `Hola::Resources.*` API, so extensions have
+one stable namespace without forcing every call site to repeat the long prefix.
+Provision scripts retain their existing top-level resource DSL and may also use the
+namespace.
 
 This is an mruby runtime, not system Ruby. Regular expressions, native gems,
 backticks, `exit`, and the block form of `sh` are unavailable. Use `raise` or

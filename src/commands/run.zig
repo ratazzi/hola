@@ -308,8 +308,9 @@ fn printHelp() !void {
         \\  hola build                 # implicit task fallback
         \\
         \\Compatibility notes:
-        \\  file and directory use standard Rake semantics in task mode. Hola's
-        \\  provision variants are Hola::Resources.file and .directory.
+        \\  Top-level file and directory use standard Rake semantics. Enter the
+        \\  resource DSL with resources.<name> or a resources do ... end block.
+        \\  The stable underlying API is Hola::Resources.<name>.
         \\  file_task remains available as a compatibility alias for file.
         \\  Dir.glob, FileList, suffix rules, local require/require_relative, and
         \\  rake/clean are supported. Regexp, native gems, backticks, exit, and the

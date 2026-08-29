@@ -25,7 +25,7 @@ task :prepare => DEMO_DIR
 
 desc "Create the input file when it is missing"
 file INPUT => DEMO_DIR do
-  Hola::Resources.file INPUT do
+  resources.file INPUT do
     content "hello from hola rake\n"
   end
 end
@@ -37,7 +37,7 @@ end
 
 desc "Create the input used by the suffix rule"
 file RULE_INPUT => DEMO_DIR do
-  Hola::Resources.file RULE_INPUT do
+  resources.file RULE_INPUT do
     content "suffix rule input\n"
   end
 end

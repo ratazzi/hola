@@ -114,14 +114,14 @@ class TestCase
 end
 
 def test(name, &block)
-  ruby_block "test: #{name}" do
+  Hola::Resources.ruby_block "test: #{name}" do
     block_proc = proc { TestCase.new(name, &block) }
     self.block(&block_proc)
   end
 end
 
 def skip_test(name, reason = "skipped")
-  ruby_block "test: #{name}" do
+  Hola::Resources.ruby_block "test: #{name}" do
     block do
       Hola::Test.test_count += 1
       puts "○ #{name} (#{reason})"
@@ -150,7 +150,7 @@ def systemd?
 end
 
 def test_summary
-  ruby_block "test summary" do
+  Hola::Resources.ruby_block "test summary" do
     block { Hola::Test.summary }
   end
 end
