@@ -5,6 +5,7 @@ const ansi = @import("ansi_term");
 const ansi_constants = @import("ansi_constants.zig");
 const ANSI = ansi_constants.ANSI;
 const http = @import("http.zig");
+const output_channel = @import("output_channel.zig");
 
 const AnsiStyle = ansi.style.Style;
 const AnsiColor = ansi.style.Color;
@@ -43,6 +44,7 @@ pub const ModernProvisionDisplay = struct {
     updated_count: usize = 0,
     skipped_count: usize = 0,
     failed_count: usize = 0,
+    run_failed: bool = false,
     timer_spinner: ?*indicatif.ProgressBar = null,
     timer_message: ?[]u8 = null,
     start_time: i128 = 0,
@@ -130,6 +132,19 @@ pub const ModernProvisionDisplay = struct {
         self.total_resources = total;
     }
 
+    fn formatCounter(self: *Self, buffer: []u8) []const u8 {
+        if (self.total_resources == 0) {
+            return std.fmt.bufPrint(buffer, "[{d}]", .{self.executed_count}) catch "[?]";
+        }
+
+        const total_digits = std.math.log10_int(self.total_resources) + 1;
+        const current_digits = std.math.log10_int(self.executed_count) + 1;
+        const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
+        var padding_buffer: [32]u8 = undefined;
+        @memset(padding_buffer[0..padding], ' ');
+        return std.fmt.bufPrint(buffer, "[{s}{d}/{d}]", .{ padding_buffer[0..padding], self.executed_count, self.total_resources }) catch "[?]";
+    }
+
     /// Start the timer spinner
     pub fn startTimer(self: *Self, start_time: i128) !void {
         self.start_time = start_time;
@@ -190,14 +205,28 @@ pub const ModernProvisionDisplay = struct {
             self.allocator.free(old_msg);
         }
 
-        const base_msg = try std.fmt.allocPrint(
-            self.allocator,
-            "✓ Completed in {d}.{d:0>3}s - {d} updated, {d} skipped",
-            .{ elapsed_s, @as(u64, @intCast(elapsed_ms_part)), self.updated_count, self.skipped_count },
-        );
+        const succeeded = !self.run_failed and self.failed_count == 0;
+        const base_msg = if (succeeded)
+            try std.fmt.allocPrint(
+                self.allocator,
+                "✓ Completed in {d}.{d:0>3}s - {d} updated, {d} skipped",
+                .{ elapsed_s, @as(u64, @intCast(elapsed_ms_part)), self.updated_count, self.skipped_count },
+            )
+        else if (self.failed_count > 0)
+            try std.fmt.allocPrint(
+                self.allocator,
+                "✗ Completed in {d}.{d:0>3}s - {d} updated, {d} skipped, {d} failed",
+                .{ elapsed_s, @as(u64, @intCast(elapsed_ms_part)), self.updated_count, self.skipped_count, self.failed_count },
+            )
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "✗ Completed in {d}.{d:0>3}s - task failed",
+                .{ elapsed_s, @as(u64, @intCast(elapsed_ms_part)) },
+            );
         defer self.allocator.free(base_msg);
 
-        const colored_msg = try self.makeColoredMessage(.Green, true, base_msg);
+        const colored_msg = try self.makeColoredMessage(if (succeeded) .Green else .Red, true, base_msg);
         try self.download_finished_messages.append(self.allocator, colored_msg);
 
         if (self.timer_spinner) |spinner| {
@@ -217,6 +246,16 @@ pub const ModernProvisionDisplay = struct {
 
     /// Show section header with custom level (2 = ##, 3 = ###, 4 = ####)
     pub fn showSectionWithLevel(self: *Self, header: []const u8, level: u8) !void {
+        try self.showSectionInternal(header, level, true);
+    }
+
+    /// Show a task header without interpreting task names as provision section
+    /// categories (for example, a task named "download").
+    pub fn showTaskSection(self: *Self, name: []const u8) !void {
+        try self.showSectionInternal(name, 2, false);
+    }
+
+    fn showSectionInternal(self: *Self, header: []const u8, level: u8, deduplicate: bool) !void {
         // Use markdown-style prefixes but optimized for terminal
         // Level 2: ## with bold
         // Level 3: ### without bold
@@ -239,8 +278,8 @@ pub const ModernProvisionDisplay = struct {
         }
 
         // Check if this section already exists
-        const is_download_section = std.mem.indexOf(u8, header, "Download") != null;
-        const is_resource_section = std.mem.indexOf(u8, header, "Executing") != null or std.mem.indexOf(u8, header, "Resource") != null;
+        const is_download_section = deduplicate and std.mem.indexOf(u8, header, "Download") != null;
+        const is_resource_section = deduplicate and (std.mem.indexOf(u8, header, "Executing") != null or std.mem.indexOf(u8, header, "Resource") != null);
 
         if (is_download_section and self.download_section_spinner != null) {
             // Section already exists, don't create duplicate
@@ -252,7 +291,7 @@ pub const ModernProvisionDisplay = struct {
         }
 
         // Add an empty line before section (except for the first section)
-        if (self.download_section_spinner != null or self.resource_section_spinner != null) {
+        if (self.section_messages.items.len > 0) {
             const empty_spinner = try self.mp.addSpinner();
             const empty_msg = try self.allocator.dupe(u8, "");
             const empty_style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{msg}");
@@ -295,6 +334,23 @@ pub const ModernProvisionDisplay = struct {
         if (!self.show_progress) {
             std.debug.print("\x1b[34mℹ\x1b[0m {s}\n", .{message});
         }
+    }
+
+    pub fn printLine(self: *Self, text: []const u8) !void {
+        if (!self.show_progress) {
+            std.debug.print("{s}\n", .{text});
+            return;
+        }
+        try self.mp.println(text);
+    }
+
+    pub fn printCommandLine(self: *Self, stream: output_channel.Stream, line: []const u8) !void {
+        const message = switch (stream) {
+            .stdout => try std.fmt.allocPrint(self.allocator, "   {s}", .{line}),
+            .stderr => try std.fmt.allocPrint(self.allocator, "{s}   {s}{s}", .{ ANSI.RED, line, ANSI.RESET }),
+        };
+        defer self.allocator.free(message);
+        try self.printLine(message);
     }
 
     /// Pre-create download spinners so they always occupy the top rows
@@ -500,15 +556,8 @@ pub const ModernProvisionDisplay = struct {
         defer if (skip_reason != null) self.allocator.free(suffix);
 
         if (!self.show_progress) {
-            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
-            const current_digits = std.math.log10_int(self.executed_count) + 1;
-            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
-            var i: usize = 0;
-            var padding_str: [16]u8 = undefined;
-            while (i < padding) : (i += 1) {
-                padding_str[i] = ' ';
-            }
-            std.debug.print("{s}\x1b[32m✓ [{s}{d}/{d}]  {s}[{s}] action {s}{s}\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action, suffix });
+            var counter_buffer: [64]u8 = undefined;
+            std.debug.print("{s}\x1b[32m✓ {s}  {s}[{s}] action {s}{s}\x1b[0m\n", .{ INDENT_RESOURCE, self.formatCounter(&counter_buffer), resource_type, resource_name, action, suffix });
             return;
         }
 
@@ -542,16 +591,9 @@ pub const ModernProvisionDisplay = struct {
         self.skipped_count += 1;
 
         if (!self.show_progress) {
-            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
-            const current_digits = std.math.log10_int(self.executed_count) + 1;
-            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
-            var i: usize = 0;
-            var padding_str: [16]u8 = undefined;
-            while (i < padding) : (i += 1) {
-                padding_str[i] = ' ';
-            }
             const reason = skip_reason orelse "up to date";
-            std.debug.print("{s}\x1b[90m○ [{s}{d}/{d}]  {s}[{s}] action {s} ({s})\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, action, reason });
+            var counter_buffer: [64]u8 = undefined;
+            std.debug.print("{s}\x1b[90m○ {s}  {s}[{s}] action {s} ({s})\x1b[0m\n", .{ INDENT_RESOURCE, self.formatCounter(&counter_buffer), resource_type, resource_name, action, reason });
             return;
         }
 
@@ -586,15 +628,8 @@ pub const ModernProvisionDisplay = struct {
         self.failed_count += 1;
 
         if (!self.show_progress) {
-            const total_digits = if (self.total_resources > 0) std.math.log10_int(self.total_resources) + 1 else 1;
-            const current_digits = std.math.log10_int(self.executed_count) + 1;
-            const padding = if (total_digits > current_digits) total_digits - current_digits else 0;
-            var i: usize = 0;
-            var padding_str: [16]u8 = undefined;
-            while (i < padding) : (i += 1) {
-                padding_str[i] = ' ';
-            }
-            std.debug.print("{s}\x1b[31m✗ [{s}{d}/{d}]  {s}[{s}]: {s}\x1b[0m\n", .{ INDENT_RESOURCE, padding_str[0..padding], self.executed_count, self.total_resources, resource_type, resource_name, error_msg });
+            var counter_buffer: [64]u8 = undefined;
+            std.debug.print("{s}\x1b[31m✗ {s}  {s}[{s}]: {s}\x1b[0m\n", .{ INDENT_RESOURCE, self.formatCounter(&counter_buffer), resource_type, resource_name, error_msg });
             return;
         }
 
@@ -646,12 +681,28 @@ pub const ModernProvisionDisplay = struct {
             if (self.failed_count > 0) {
                 std.debug.print("Failed: \x1b[31m{d}\x1b[0m resources\n", .{self.failed_count});
             }
-            std.debug.print("\x1b[32m✓\x1b[0m Provisioning completed successfully!\n", .{});
+            if (self.failed_count == 0) {
+                std.debug.print("\x1b[32m✓\x1b[0m Provisioning completed successfully!\n", .{});
+            } else {
+                std.debug.print("\x1b[31m✗\x1b[0m Provisioning completed with {d} failed resources.\n", .{self.failed_count});
+            }
         }
     }
 
     /// Show final summary with duration
     pub fn showSummaryWithDuration(self: *Self, duration_s: i64, duration_ms_part: i64) !void {
+        try self.showSummaryWithDurationLabel("Provisioning", duration_s, duration_ms_part);
+    }
+
+    pub fn showTaskSummaryWithDuration(self: *Self, duration_s: i64, duration_ms_part: i64) !void {
+        try self.showSummaryWithDurationLabel("Task run", duration_s, duration_ms_part);
+    }
+
+    pub fn markRunFailed(self: *Self) void {
+        self.run_failed = true;
+    }
+
+    fn showSummaryWithDurationLabel(self: *Self, label: []const u8, duration_s: i64, duration_ms_part: i64) !void {
         _ = duration_s;
         _ = duration_ms_part;
 
@@ -671,7 +722,13 @@ pub const ModernProvisionDisplay = struct {
             const elapsed_s = @divTrunc(elapsed_ms, 1000);
             const elapsed_ms_part = @rem(elapsed_ms, 1000);
             std.debug.print("Duration: \x1b[36m{d}.{d:0>3}s\x1b[0m\n", .{ elapsed_s, @abs(elapsed_ms_part) });
-            std.debug.print("\x1b[32m✓\x1b[0m Provisioning completed successfully!\n", .{});
+            if (!self.run_failed and self.failed_count == 0) {
+                std.debug.print("\x1b[32m✓\x1b[0m {s} completed successfully!\n", .{label});
+            } else if (self.failed_count > 0) {
+                std.debug.print("\x1b[31m✗\x1b[0m {s} completed with {d} failed resources.\n", .{ label, self.failed_count });
+            } else {
+                std.debug.print("\x1b[31m✗\x1b[0m {s} failed.\n", .{label});
+            }
         } else {
             // Finish the timer spinner with final message
             try self.finishTimer();
@@ -727,26 +784,9 @@ pub const ModernProvisionDisplay = struct {
     }
 
     fn buildResourceMessage(self: *Self, resource_type: []const u8, resource_name: []const u8, suffix: []const u8) ![]u8 {
-        const total_digits = if (self.total_resources > 0)
-            std.math.log10_int(self.total_resources) + 1
-        else
-            1;
-        const current_digits = std.math.log10_int(self.executed_count) + 1;
-        const padding = if (total_digits > current_digits)
-            total_digits - current_digits
-        else
-            0;
-
-        var padding_str: [16]u8 = undefined;
-        var i: usize = 0;
-        while (i < padding) : (i += 1) {
-            padding_str[i] = ' ';
-        }
-
-        return std.fmt.allocPrint(self.allocator, "[{s}{d}/{d}]  {s}[{s}]{s}", .{
-            padding_str[0..padding],
-            self.executed_count,
-            self.total_resources,
+        var counter_buffer: [64]u8 = undefined;
+        return std.fmt.allocPrint(self.allocator, "{s}  {s}[{s}]{s}", .{
+            self.formatCounter(&counter_buffer),
             resource_type,
             resource_name,
             suffix,
@@ -770,3 +810,22 @@ pub const ModernProvisionDisplay = struct {
         return result;
     }
 };
+
+test "formatCounter supports known and unknown totals" {
+    var display = try ModernProvisionDisplay.init(std.testing.allocator, false);
+    defer display.deinit();
+    var buffer: [64]u8 = undefined;
+
+    display.executed_count = 3;
+    display.setTotalResources(0);
+    try std.testing.expectEqualStrings("[3]", display.formatCounter(&buffer));
+
+    display.setTotalResources(9);
+    try std.testing.expectEqualStrings("[3/9]", display.formatCounter(&buffer));
+
+    display.setTotalResources(10);
+    try std.testing.expectEqualStrings("[ 3/10]", display.formatCounter(&buffer));
+
+    display.setTotalResources(100);
+    try std.testing.expectEqualStrings("[  3/100]", display.formatCounter(&buffer));
+}

@@ -146,17 +146,14 @@ pub const CommonProps = struct {
                 return "skipped due to only_if"; // command failed (non-zero exit)
             }
         } else if (self.only_if_block) |block| {
-            // Use funcall instead of yield to properly handle exceptions
-            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
-            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
-
-            // Check for exceptions during call
-            const exc = mruby.mrb_get_exception(mrb);
-            if (mruby.mrb_test(exc)) {
-                recordProvisionException(mrb, exc, "only_if block raised");
-                mruby.mrb_print_error(mrb);
-                return error.MRubyException;
-            }
+            const result = switch (mruby.callProtected(mrb, block, "call", &.{})) {
+                .ok => |value| value,
+                .raised => |exc| {
+                    recordProvisionException(mrb, exc, "only_if block raised");
+                    mruby.zig_mrb_print_exc(mrb, exc);
+                    return error.MRubyException;
+                },
+            };
 
             if (!mruby.mrb_test(result)) {
                 return "skipped due to only_if"; // only_if returned falsy
@@ -172,17 +169,14 @@ pub const CommonProps = struct {
                 return "skipped due to not_if"; // command succeeded (exit 0)
             }
         } else if (self.not_if_block) |block| {
-            // Use funcall instead of yield to properly handle exceptions
-            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
-            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
-
-            // Check for exceptions during call
-            const exc = mruby.mrb_get_exception(mrb);
-            if (mruby.mrb_test(exc)) {
-                recordProvisionException(mrb, exc, "not_if block raised");
-                mruby.mrb_print_error(mrb);
-                return error.MRubyException;
-            }
+            const result = switch (mruby.callProtected(mrb, block, "call", &.{})) {
+                .ok => |value| value,
+                .raised => |exc| {
+                    recordProvisionException(mrb, exc, "not_if block raised");
+                    mruby.zig_mrb_print_exc(mrb, exc);
+                    return error.MRubyException;
+                },
+            };
 
             if (mruby.mrb_test(result)) {
                 return "skipped due to not_if"; // not_if returned truthy

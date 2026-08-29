@@ -98,6 +98,10 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         try commands.provision.run(allocator, iter);
         return;
     }
+    if (std.mem.eql(u8, command, "run")) {
+        try commands.run.run(allocator, iter);
+        return;
+    }
     if (std.mem.eql(u8, command, "apply")) {
         try commands.apply.run(allocator, iter);
         return;
@@ -111,14 +115,20 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
         return;
     }
 
-    try printMainHelp(command);
+    commands.run.runImplicit(allocator, command, iter) catch |err| switch (err) {
+        error.NoRakefile => {
+            try printMainHelp(command);
+            std.process.exit(1);
+        },
+        error.TaskFailed => std.process.exit(1),
+    };
 }
 
 fn printMainHelp(unknown: ?[]const u8) !void {
     const gpa = std.heap.page_allocator;
 
     if (unknown) |cmd| {
-        const error_msg = try std.fmt.allocPrint(gpa, "Unknown command \"{s}\"", .{cmd});
+        const error_msg = try std.fmt.allocPrint(gpa, "Unknown command or task \"{s}\"", .{cmd});
         defer gpa.free(error_msg);
         help_formatter.HelpFormatter.printError(error_msg);
         help_formatter.HelpFormatter.newline();
@@ -149,6 +159,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .command = "dock", .description = "Show current macOS Dock configuration" },
         .{ .command = "applescript", .description = "Execute AppleScript via macOS system API" },
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
+        .{ .command = "run", .description = "Run Rake-compatible project tasks" },
         .{ .command = "node-info", .description = "Display complete node information (like Chef Ohai)" },
         .{ .command = "apply", .description = "Execute full bootstrap sequence" },
         .{ .command = "agent", .description = "Connect to SSE endpoint and run provision on events" },
@@ -166,6 +177,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .prefix = "AppleScript:", .command = "applescript \"1 + 1\"" },
         .{ .prefix = "AppleScript file:", .command = "applescript --file script.applescript" },
         .{ .prefix = "Infrastructure:", .command = "provision provision.rb" },
+        .{ .prefix = "Project task:", .command = "run build" },
         .{ .prefix = "Node information:", .command = "node-info" },
         .{ .prefix = "Full bootstrap:", .command = "apply --github user/dotfiles" },
         .{ .prefix = "Dry run:", .command = "apply --dry-run" },

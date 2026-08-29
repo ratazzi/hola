@@ -71,6 +71,7 @@ pub const AsyncExecutor = struct {
 
         // Wait for thread to complete
         thread.join();
+        if (global_poll_callback) |callback| callback() catch {};
 
         // Check result
         ctx.mutex.lockUncancelable(global_io.io());
@@ -156,6 +157,8 @@ pub const AsyncExecutor = struct {
 
         // Wait for thread to complete
         thread.join();
+        const final_callback = poll_callback orelse global_poll_callback;
+        if (final_callback) |callback| callback() catch {};
 
         // Check result
         ctx.mutex.lockUncancelable(global_io.io());

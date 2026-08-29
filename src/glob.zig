@@ -26,6 +26,12 @@ fn matchRecursive(pattern: []const u8, text: []const u8) bool {
         if (pattern_idx + 1 < pattern.len and pattern[pattern_idx] == '*' and pattern[pattern_idx + 1] == '*') {
             pattern_idx += 2;
 
+            // A globstar followed by a separator may also match zero
+            // directories ("**/*.rb" matches "Rakefile.rb").
+            if (pattern_idx < pattern.len and pattern[pattern_idx] == '/') {
+                if (matchRecursive(pattern[pattern_idx + 1 ..], text[text_idx..])) return true;
+            }
+
             // ** at the end matches everything
             if (pattern_idx >= pattern.len) {
                 return true;
@@ -137,6 +143,56 @@ fn matchRecursive(pattern: []const u8, text: []const u8) bool {
     return pattern_idx >= pattern.len and text_idx >= text.len;
 }
 
+pub fn expand(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8) !std.ArrayList([]const u8) {
+    var matches = std.ArrayList([]const u8).empty;
+    errdefer freeMatches(allocator, &matches);
+
+    const wildcard_index = std.mem.indexOfAny(u8, pattern, "*?[") orelse {
+        std.Io.Dir.cwd().access(io, pattern, .{}) catch return matches;
+        try matches.append(allocator, try allocator.dupe(u8, pattern));
+        return matches;
+    };
+
+    const root_slice = if (std.mem.lastIndexOfScalar(u8, pattern[0..wildcard_index], '/')) |separator|
+        if (separator == 0) "/" else pattern[0..separator]
+    else
+        ".";
+
+    var root = if (std.fs.path.isAbsolute(root_slice))
+        std.Io.Dir.openDirAbsolute(io, root_slice, .{ .iterate = true }) catch return matches
+    else
+        std.Io.Dir.cwd().openDir(io, root_slice, .{ .iterate = true }) catch return matches;
+    defer root.close(io);
+
+    var walker = try root.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        const candidate = if (std.mem.eql(u8, root_slice, "."))
+            try allocator.dupe(u8, entry.path)
+        else
+            try std.fs.path.join(allocator, &.{ root_slice, entry.path });
+        if (match(pattern, candidate)) {
+            try matches.append(allocator, candidate);
+        } else {
+            allocator.free(candidate);
+        }
+    }
+
+    const Sort = struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.lessThan(u8, left, right);
+        }
+    };
+    std.mem.sort([]const u8, matches.items, {}, Sort.lessThan);
+    return matches;
+}
+
+pub fn freeMatches(allocator: std.mem.Allocator, matches: *std.ArrayList([]const u8)) void {
+    for (matches.items) |item| allocator.free(item);
+    matches.deinit(allocator);
+    matches.* = .empty;
+}
+
 test "glob matching" {
     try std.testing.expect(match("*.txt", "file.txt"));
     try std.testing.expect(match("*.txt", "test.txt"));
@@ -144,6 +200,7 @@ test "glob matching" {
     try std.testing.expect(!match("*.txt", "dir/file.txt"));
 
     try std.testing.expect(match("**/*.txt", "dir/file.txt"));
+    try std.testing.expect(match("**/*.txt", "file.txt"));
     try std.testing.expect(match("**/*.txt", "a/b/c/file.txt"));
     try std.testing.expect(match("**", "any/path/here"));
 
@@ -164,4 +221,26 @@ test "glob matching" {
     try std.testing.expect(match(".git*", ".git"));
     try std.testing.expect(match(".git*", ".gitignore"));
     try std.testing.expect(match(".git*", ".github"));
+}
+
+test "glob expansion walks recursively and returns sorted matches" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "nested", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root.rb", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "nested/child.rb", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "nested/child.txt", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const pattern = try std.fmt.allocPrint(allocator, "{s}/**/*.rb", .{root});
+    defer allocator.free(pattern);
+
+    var matches = try expand(allocator, io, pattern);
+    defer freeMatches(allocator, &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, matches.items[0], "/nested/child.rb"));
+    try std.testing.expect(std.mem.endsWith(u8, matches.items[1], "/root.rb"));
 }

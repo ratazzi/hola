@@ -3,6 +3,7 @@ const clap = @import("clap");
 const provision = @import("../provision.zig");
 const http = @import("../http.zig");
 const global_io = @import("../global_io.zig");
+const common = @import("common.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
@@ -28,58 +29,7 @@ const parsers = .{
 /// Download a remote script to a temp file, run provision, then clean up.
 /// Accepts both local paths and HTTP(S) URLs.
 /// params_json: optional JSON string to inject as data_bag (agent mode).
-const TlsClientAuth = struct {
-    cert: ?[]const u8 = null,
-    key: ?[]const u8 = null,
-};
-
-const PROVISION_FETCH_TIMEOUT_S: u32 = 300;
-
-/// Fetch JSON content from a URL, using optional mTLS credentials.
-/// Returns the response body as an owned slice that the caller must free.
-fn fetchJsonFromUrl(allocator: std.mem.Allocator, url: []const u8, tls_auth: TlsClientAuth) ![]const u8 {
-    _ = std.Uri.parse(url) catch |err| {
-        std.debug.print("Error: Invalid URL: {}\n", .{err});
-        return error.FetchFailed;
-    };
-
-    var url_buf: [512]u8 = undefined;
-    const display_url = http.maskUrlPassword(url, &url_buf);
-
-    std.debug.print("[fetch] Fetching JSON from {s}\n", .{display_url});
-
-    const cfg = http.Config{
-        .max_timeout_s = PROVISION_FETCH_TIMEOUT_S,
-        .client_cert = tls_auth.cert,
-        .client_key = tls_auth.key,
-    };
-    var client = http.Client.init(allocator, cfg) catch |err| {
-        std.debug.print("\nError: Failed to initialize HTTP client: {}\n", .{err});
-        return error.FetchFailed;
-    };
-    defer client.deinit();
-
-    const response = client.get(url, null) catch |err| {
-        std.debug.print("\nError: Failed to fetch JSON from URL: {}\n", .{err});
-        if (http.getLastError()) |detail| {
-            var detail_buf: [1024]u8 = undefined;
-            std.debug.print("  {s}\n", .{http.redactPassword(url, detail, &detail_buf)});
-        }
-        std.debug.print("URL: {s}\n", .{display_url});
-        return error.FetchFailed;
-    };
-    defer {
-        var mut_resp = response;
-        mut_resp.deinit();
-    }
-
-    if (response.status < 200 or response.status >= 300) {
-        std.debug.print("\nError: HTTP {d} when fetching JSON from {s}\n", .{ response.status, display_url });
-        return error.FetchFailed;
-    }
-
-    return allocator.dupe(u8, response.body) catch return error.FetchFailed;
-}
+pub const TlsClientAuth = common.TlsClientAuth;
 
 pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, use_pretty_output: bool, params_json: ?[]const u8, secrets_json: ?[]const u8, tls_auth: TlsClientAuth) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
@@ -115,7 +65,7 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, u
         temp_file_path = temp_file;
 
         const cfg = http.Config{
-            .max_timeout_s = PROVISION_FETCH_TIMEOUT_S,
+            .max_timeout_s = common.PROVISION_FETCH_TIMEOUT_S,
             .client_cert = tls_auth.cert,
             .client_key = tls_auth.key,
         };
@@ -188,70 +138,19 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
 
     const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
 
-    var use_pretty_output = std.Io.File.stdout().isTty(global_io.io()) catch false;
-    if (res.args.output) |output_mode| {
-        if (std.mem.eql(u8, output_mode, "plain")) {
-            use_pretty_output = false;
-        } else if (std.mem.eql(u8, output_mode, "pretty")) {
-            use_pretty_output = true;
-        } else {
-            std.debug.print("Invalid output mode: {s}\n", .{output_mode});
-            std.debug.print("Valid modes: pretty, plain\n", .{});
-            return error.InvalidOutputMode;
-        }
-    }
-
-    // Validate mutual exclusivity
-    if (res.args.@"data-bag" != null and res.args.@"data-bag-url" != null) {
-        std.debug.print("Error: --data-bag and --data-bag-url are mutually exclusive\n", .{});
-        return error.InvalidArguments;
-    }
-    if (res.args.@"secrets-bag" != null and res.args.@"secrets-bag-url" != null) {
-        std.debug.print("Error: --secrets-bag and --secrets-bag-url are mutually exclusive\n", .{});
-        return error.InvalidArguments;
-    }
-
+    const use_pretty_output = try common.parseOutputMode(res.args.output);
     const logger = @import("../logger.zig");
-    const tls_auth = TlsClientAuth{
-        .cert = res.args.@"client-cert",
-        .key = res.args.@"client-key",
-    };
-    // Fail fast (with a specific reason) if cert/key aren't readable by us;
-    // libcurl would otherwise report only a generic "unable to set private
-    // key file" without distinguishing permission vs not-found. Message is
-    // already printed inside the helper.
-    http.validateClientAuthFiles(tls_auth.cert, tls_auth.key) catch std.process.exit(1);
+    var bags = try common.resolveBags(allocator, .{
+        .data_bag = res.args.@"data-bag",
+        .data_bag_url = res.args.@"data-bag-url",
+        .secrets_bag = res.args.@"secrets-bag",
+        .secrets_bag_url = res.args.@"secrets-bag-url",
+        .client_cert = res.args.@"client-cert",
+        .client_key = res.args.@"client-key",
+    });
+    defer bags.deinit();
 
-    // Resolve data_bag: from URL or inline JSON
-    var fetched_data_bag: ?[]const u8 = null;
-    defer if (fetched_data_bag) |p| allocator.free(p);
-    if (res.args.@"data-bag-url") |url| {
-        fetched_data_bag = fetchJsonFromUrl(allocator, url, tls_auth) catch {
-            std.debug.print("Failed to fetch data_bag from URL\n", .{});
-            if (logger.getLogPath()) |log_path| {
-                std.debug.print("Log file: {s}\n", .{log_path});
-            }
-            return error.FetchFailed;
-        };
-    }
-
-    // Resolve secrets_bag: from URL or inline JSON
-    var fetched_secrets_bag: ?[]const u8 = null;
-    defer if (fetched_secrets_bag) |s| allocator.free(s);
-    if (res.args.@"secrets-bag-url") |url| {
-        fetched_secrets_bag = fetchJsonFromUrl(allocator, url, tls_auth) catch {
-            std.debug.print("Failed to fetch secrets_bag from URL\n", .{});
-            if (logger.getLogPath()) |log_path| {
-                std.debug.print("Log file: {s}\n", .{log_path});
-            }
-            return error.FetchFailed;
-        };
-    }
-
-    const effective_data_bag = fetched_data_bag orelse res.args.@"data-bag";
-    const effective_secrets_bag = fetched_secrets_bag orelse res.args.@"secrets-bag";
-
-    var result = runScript(allocator, script_path_or_url, use_pretty_output, effective_data_bag, effective_secrets_bag, tls_auth) catch |err| {
+    var result = runScript(allocator, script_path_or_url, use_pretty_output, bags.data_bag, bags.secrets_bag, bags.tls_auth) catch |err| {
         if (err == error.MRubyException) {
             if (logger.getLogPath()) |log_path| {
                 std.debug.print("\nLog file: {s}\n", .{log_path});

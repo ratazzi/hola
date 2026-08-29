@@ -18,6 +18,8 @@ const builtin = @import("builtin");
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
 const AsyncExecutor = @import("async_executor.zig").AsyncExecutor;
+const output_channel = @import("output_channel.zig");
+const glob = @import("glob.zig");
 
 pub const Options = struct {
     script_path: []const u8,
@@ -47,36 +49,317 @@ pub const ProvisionResult = struct {
     resource_results: std.ArrayList(ResourceResult),
 
     pub fn deinit(self: *ProvisionResult, allocator: std.mem.Allocator) void {
-        for (self.resource_results.items) |rr| {
-            allocator.free(rr.type_name);
-            allocator.free(rr.name);
-            allocator.free(rr.action);
-            if (rr.skip_reason) |sr| allocator.free(sr);
-            if (rr.error_name) |en| allocator.free(en);
-            if (rr.error_message) |em| allocator.free(em);
-            if (rr.output) |o| allocator.free(o);
-        }
-        self.resource_results.deinit(allocator);
+        freeResourceResults(allocator, &self.resource_results);
     }
 };
 
-const ProvisionRunner = struct {
+fn freeResourceResults(allocator: std.mem.Allocator, results: *std.ArrayList(ResourceResult)) void {
+    for (results.items) |rr| {
+        allocator.free(rr.type_name);
+        allocator.free(rr.name);
+        allocator.free(rr.action);
+        if (rr.skip_reason) |sr| allocator.free(sr);
+        if (rr.error_name) |en| allocator.free(en);
+        if (rr.error_message) |em| allocator.free(em);
+        if (rr.output) |o| allocator.free(o);
+    }
+    results.deinit(allocator);
+    results.* = .empty;
+}
+
+pub const SessionOptions = struct {
+    params_json: ?[]const u8 = null,
+    secrets_json: ?[]const u8 = null,
+    mode: SessionMode = .provision,
+};
+
+pub const SessionMode = enum {
+    provision,
+    task,
+};
+
+pub const ProvisionRunner = struct {
     allocator: std.mem.Allocator,
     resources: std.ArrayList(resources.ResourceWithMetadata),
     display: ?*modern_display.ModernProvisionDisplay = null,
+    download_mgr: ?*http.download.Manager = null,
+    resource_results: std.ArrayList(ResourceResult) = .empty,
+    delayed_notifications: std.ArrayList(PendingNotification) = .empty,
+    converged_index: usize = 0,
+    converging: bool = false,
+    last_failed_index: ?usize = null,
+    start_time: i128 = 0,
+    output: output_channel.LineChannel,
 
     fn init(allocator: std.mem.Allocator) ProvisionRunner {
         return .{
             .allocator = allocator,
             .resources = std.ArrayList(resources.ResourceWithMetadata).empty,
+            .output = output_channel.LineChannel.init(allocator),
         };
     }
 
     fn deinit(self: *ProvisionRunner) void {
+        freeResourceResults(self.allocator, &self.resource_results);
+        for (self.delayed_notifications.items) |pending| {
+            self.allocator.free(pending.source_id);
+        }
+        self.delayed_notifications.deinit(self.allocator);
+        self.output.deinit();
         for (self.resources.items) |*res| {
             res.deinit(self.allocator);
         }
         self.resources.deinit(self.allocator);
+    }
+
+    pub fn attachDisplay(self: *ProvisionRunner, display: *modern_display.ModernProvisionDisplay) void {
+        self.display = display;
+        output_channel.setCurrent(&self.output);
+        AsyncExecutor.setPollCallback(pollDisplayUpdate);
+    }
+
+    pub fn detachDisplay(self: *ProvisionRunner) void {
+        AsyncExecutor.setPollCallback(null);
+        output_channel.setCurrent(null);
+        self.display = null;
+    }
+
+    pub fn takeResults(self: *ProvisionRunner) std.ArrayList(ResourceResult) {
+        const results = self.resource_results;
+        self.resource_results = .empty;
+        return results;
+    }
+
+    const ResultFields = struct {
+        action: []const u8 = "",
+        was_updated: bool = false,
+        skipped: bool = false,
+        skip_reason: ?[]const u8 = null,
+        error_name: ?[]const u8 = null,
+        error_message: ?[]const u8 = null,
+        output: ?[]const u8 = null,
+    };
+
+    fn recordResult(self: *ProvisionRunner, id: resources.ResourceId, fields: ResultFields) !void {
+        const type_name = try self.allocator.dupe(u8, id.type_name);
+        errdefer self.allocator.free(type_name);
+        const name = try self.allocator.dupe(u8, id.name);
+        errdefer self.allocator.free(name);
+        const action = try self.allocator.dupe(u8, fields.action);
+        errdefer self.allocator.free(action);
+        const skip_reason = if (fields.skip_reason) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (skip_reason) |value| self.allocator.free(value);
+        const error_name = if (fields.error_name) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (error_name) |value| self.allocator.free(value);
+        const error_message = if (fields.error_message) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (error_message) |value| self.allocator.free(value);
+        const output = if (fields.output) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (output) |value| self.allocator.free(value);
+
+        try self.resource_results.append(self.allocator, .{
+            .type_name = type_name,
+            .name = name,
+            .action = action,
+            .was_updated = fields.was_updated,
+            .skipped = fields.skipped,
+            .skip_reason = skip_reason,
+            .error_name = error_name,
+            .error_message = error_message,
+            .output = output,
+        });
+    }
+
+    fn waitForDownload(self: *ProvisionRunner, index: usize) !void {
+        const download_mgr = self.download_mgr orelse return;
+        const display = self.display orelse return error.DisplayNotAttached;
+        const res = &self.resources.items[index];
+        if (res.resource != .remote_file) return;
+
+        const resource_id = try std.fmt.allocPrint(self.allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name });
+        defer self.allocator.free(resource_id);
+
+        const task = download_mgr.getTask(resource_id) orelse return;
+        const initial_status = task.status.load(.acquire);
+        if (initial_status == .queued or initial_status == .downloading) {
+            var max_wait_iterations: usize = 3000;
+            while (max_wait_iterations > 0) : (max_wait_iterations -= 1) {
+                const status = task.status.load(.acquire);
+                if (status != .queued and status != .downloading) break;
+
+                try display.update();
+                std.Thread.yield() catch {};
+                global_io.io().sleep(.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+            }
+        }
+
+        if (task.status.load(.acquire) == .failed) {
+            const err_msg_owned = task.getError(self.allocator);
+            defer if (err_msg_owned) |msg| self.allocator.free(msg);
+            const err_msg = err_msg_owned orelse "Unknown error";
+            const msg = try std.fmt.allocPrint(self.allocator, "Download failed for {s}: {s}", .{ resource_id, err_msg });
+            defer self.allocator.free(msg);
+            base.recordProvisionErrorDetailSlice(msg);
+            return error.DownloadFailed;
+        }
+    }
+
+    fn applyOne(self: *ProvisionRunner, index: usize, immediate: *std.ArrayList(PendingNotification)) !void {
+        const display = self.display orelse return error.DisplayNotAttached;
+        base.clearProvisionErrorDetail();
+        self.last_failed_index = null;
+
+        try display.startResource(self.resources.items[index].id.type_name, self.resources.items[index].id.name);
+        try display.update();
+        self.waitForDownload(index) catch |err| {
+            const res = &self.resources.items[index];
+            const detail_msg = base.getProvisionErrorDetail();
+            const error_display = detail_msg orelse @errorName(err);
+            try display.resourceError(res.id.type_name, res.id.name, error_display);
+            try display.update();
+            try self.recordResult(res.id, .{
+                .error_name = @errorName(err),
+                .error_message = detail_msg,
+            });
+            self.last_failed_index = index;
+            return err;
+        };
+
+        const result = self.resources.items[index].resource.apply() catch |err| {
+            const res = &self.resources.items[index];
+            const detail_msg = base.getProvisionErrorDetail();
+            const error_display = detail_msg orelse @errorName(err);
+            try display.resourceError(res.id.type_name, res.id.name, error_display);
+            try display.update();
+            try self.recordResult(res.id, .{
+                .error_name = @errorName(err),
+                .error_message = detail_msg,
+            });
+
+            if (res.resource.shouldIgnoreFailure()) return;
+            self.last_failed_index = index;
+            return err;
+        };
+        defer if (result.output) |output| std.heap.c_allocator.free(output);
+
+        // Applying a ruby_block may append resources and reallocate the list.
+        // Always reacquire the pointer after apply() before reading metadata.
+        const res = &self.resources.items[index];
+        res.was_updated = result.was_updated;
+
+        if (result.was_updated) {
+            try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason);
+            try display.update();
+            try self.recordResult(res.id, .{
+                .action = result.action,
+                .was_updated = true,
+                .skip_reason = result.skip_reason,
+                .output = result.output,
+            });
+
+            if (result.skip_reason == null or !std.mem.eql(u8, result.skip_reason.?, "up to date")) {
+                for (res.notifications.items) |notification| {
+                    const source_id = try res.id.toString(self.allocator);
+                    const pending = PendingNotification{
+                        .notification = notification,
+                        .source_id = source_id,
+                    };
+                    if (notification.timing == .immediate) {
+                        immediate.append(self.allocator, pending) catch |err| {
+                            self.allocator.free(source_id);
+                            return err;
+                        };
+                    } else {
+                        self.delayed_notifications.append(self.allocator, pending) catch |err| {
+                            self.allocator.free(source_id);
+                            return err;
+                        };
+                    }
+                }
+            }
+            return;
+        }
+
+        try display.resourceSkipped(res.id.type_name, res.id.name, result.action, result.skip_reason);
+        try display.update();
+        try self.recordResult(res.id, .{
+            .action = result.action,
+            .skipped = true,
+            .skip_reason = result.skip_reason,
+        });
+    }
+
+    pub fn convergeFrom(self: *ProvisionRunner, from_index: usize) !void {
+        const display = self.display orelse return error.DisplayNotAttached;
+        const start_index = @max(from_index, self.converged_index);
+        if (start_index >= self.resources.items.len) return;
+
+        self.converging = true;
+        defer self.converging = false;
+
+        // Convert subscriptions on newly declared resources to reverse notifications.
+        var subscriber_index = start_index;
+        while (subscriber_index < self.resources.items.len) : (subscriber_index += 1) {
+            const common = self.resources.items[subscriber_index].resource.getCommonProps();
+            for (common.subscriptions.items) |subscription| {
+                const source_id = base.notification.ResourceId.parse(self.allocator, subscription.target_resource_id) catch continue;
+                defer source_id.deinit(self.allocator);
+
+                for (self.resources.items) |*source_res| {
+                    if (!std.mem.eql(u8, source_res.id.type_name, source_id.type_name) or
+                        !std.mem.eql(u8, source_res.id.name, source_id.name)) continue;
+
+                    const subscriber_id = try self.resources.items[subscriber_index].id.toString(self.allocator);
+                    const action_name = self.allocator.dupe(u8, subscription.action.action_name) catch |err| {
+                        self.allocator.free(subscriber_id);
+                        return err;
+                    };
+                    source_res.resource.getCommonProps().notifications.append(self.allocator, .{
+                        .target_resource_id = subscriber_id,
+                        .action = .{ .action_name = action_name },
+                        .timing = subscription.timing,
+                    }) catch |err| {
+                        self.allocator.free(subscriber_id);
+                        self.allocator.free(action_name);
+                        return err;
+                    };
+                    break;
+                }
+            }
+        }
+
+        var immediate_notifications = std.ArrayList(PendingNotification).empty;
+        defer {
+            for (immediate_notifications.items) |pending| self.allocator.free(pending.source_id);
+            immediate_notifications.deinit(self.allocator);
+        }
+
+        var index = start_index;
+        while (index < self.resources.items.len) : (index += 1) {
+            // Advance before apply so a failed resource is never retried by a
+            // later incremental converge call.
+            self.converged_index = index + 1;
+            try self.applyOne(index, &immediate_notifications);
+        }
+
+        if (immediate_notifications.items.len > 0) {
+            try display.showSectionWithLevel("Processing Immediate Notifications", 3);
+            for (immediate_notifications.items) |pending| {
+                try processNotification(self.allocator, pending, display);
+            }
+        }
+    }
+
+    pub fn flushDelayed(self: *ProvisionRunner) !void {
+        if (self.delayed_notifications.items.len == 0) return;
+        const display = self.display orelse return error.DisplayNotAttached;
+        try display.showSectionWithLevel("Processing Delayed Notifications", 3);
+        for (self.delayed_notifications.items) |pending| {
+            try processNotification(self.allocator, pending, display);
+        }
+        for (self.delayed_notifications.items) |pending| {
+            self.allocator.free(pending.source_id);
+        }
+        self.delayed_notifications.clearRetainingCapacity();
     }
 };
 
@@ -90,6 +373,26 @@ fn requireRunner() *ProvisionRunner {
 fn pollDisplayUpdate() !void {
     if (current_runner) |runner| {
         if (runner.display) |display| {
+            var batch = try runner.output.take();
+            defer runner.allocator.free(batch.bytes);
+            var index: usize = 0;
+            while (index < batch.bytes.len) {
+                const stream: output_channel.Stream = switch (batch.bytes[index]) {
+                    @intFromEnum(output_channel.Stream.stdout) => .stdout,
+                    @intFromEnum(output_channel.Stream.stderr) => .stderr,
+                    else => break,
+                };
+                const line_start = index + 1;
+                const relative_end = std.mem.indexOfScalar(u8, batch.bytes[line_start..], '\n') orelse break;
+                const line_end = line_start + relative_end;
+                try display.printCommandLine(stream, batch.bytes[line_start..line_end]);
+                index = line_end + 1;
+            }
+            if (batch.dropped > 0) {
+                var message_buf: [128]u8 = undefined;
+                const message = try std.fmt.bufPrint(&message_buf, "   [hola] dropped {d} live output lines", .{batch.dropped});
+                try display.printLine(message);
+            }
             try display.update();
         }
     }
@@ -103,6 +406,137 @@ fn currentRunnerOrNilValue() ?*ProvisionRunner {
 const PendingNotification = struct {
     notification: resources.Notification,
     source_id: []const u8,
+};
+
+/// A reusable mruby provisioning session. The value is heap allocated so the
+/// threadlocal runner pointer remains stable while resource callbacks execute.
+pub const Session = struct {
+    allocator: std.mem.Allocator,
+    mrb: mruby.State,
+    runner: ProvisionRunner,
+
+    pub fn open(allocator: std.mem.Allocator, opts: SessionOptions) !*Session {
+        base.clearProvisionErrorDetail();
+
+        var mrb_state = try mruby.State.init();
+        const self = allocator.create(Session) catch |err| {
+            mrb_state.deinit();
+            return err;
+        };
+        self.* = .{
+            .allocator = allocator,
+            .mrb = mrb_state,
+            .runner = ProvisionRunner.init(allocator),
+        };
+        current_runner = &self.runner;
+
+        self.initialize(opts) catch |err| {
+            self.close();
+            return err;
+        };
+        return self;
+    }
+
+    fn initialize(self: *Session, opts: SessionOptions) !void {
+        const mrb_ptr = self.mrb.mrb orelse return error.MRubyNotInitialized;
+        const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
+        registerResourceBindings(mrb_ptr, zig_module);
+
+        const api_modules = [_]mruby_module.MRubyModule{
+            file_ext.mruby_module_def,
+            json.mruby_module_def,
+            http.mruby_module_def,
+            base64.mruby_module_def,
+            hola_logger.mruby_module_def,
+            node_info.mruby_module_def,
+            env_access.mruby_module_def,
+            resolv.mruby_module_def,
+        };
+        for (api_modules) |module| {
+            try mruby_module.registerModule(mrb_ptr, zig_module, self.allocator, module, &self.mrb);
+        }
+
+        file_ext.setupFileExtensions(mrb_ptr);
+        try self.mrb.evalString(@embedFile("ruby_prelude/open_struct.rb"));
+        try self.mrb.evalString(@embedFile("ruby_prelude/time_parse.rb"));
+
+        try self.mrb.evalString(resources.file.ruby_prelude);
+        try self.mrb.evalString(resources.execute.ruby_prelude);
+        try self.mrb.evalString(resources.remote_file.ruby_prelude);
+        try self.mrb.evalString(resources.template.ruby_prelude);
+        try self.mrb.evalString(resources.macos_dock.ruby_prelude);
+        try self.mrb.evalString(resources.macos_defaults.ruby_prelude);
+        try self.mrb.evalString(resources.directory.ruby_prelude);
+        try self.mrb.evalString(resources.link.ruby_prelude);
+        try self.mrb.evalString(resources.route.ruby_prelude);
+        try self.mrb.evalString(resources.apt_repository.ruby_prelude);
+        try self.mrb.evalString(resources.systemd_unit.ruby_prelude);
+        try self.mrb.evalString(resources.mount_res.ruby_prelude);
+        try self.mrb.evalString(resources.package.ruby_prelude);
+        try self.mrb.evalString(resources.homebrew_package.ruby_prelude);
+        try self.mrb.evalString(resources.apt_package.ruby_prelude);
+        try self.mrb.evalString(resources.ruby_block.ruby_prelude);
+        try self.mrb.evalString(resources.git.ruby_prelude);
+        try self.mrb.evalString(resources.user.ruby_prelude);
+        try self.mrb.evalString(resources.group.ruby_prelude);
+        try self.mrb.evalString(resources.aws_kms.ruby_prelude);
+        try self.mrb.evalString(resources.file_edit.ruby_prelude);
+        try self.mrb.evalString(resources.extract.ruby_prelude);
+        try self.mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
+
+        // `file` and `directory` are standard Rake task constructors. Keep the
+        // provision resource classes available for the explicit
+        // Hola::Resources namespace, but remove their top-level methods before
+        // a Rakefile is evaluated.
+        if (opts.mode == .task) {
+            try self.mrb.evalString(
+                \\Object.send(:remove_method, :file)
+                \\Object.send(:remove_method, :directory)
+            );
+        }
+
+        try self.mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
+        try self.mrb.evalString(@embedFile("ruby_prelude/secrets_bag.rb"));
+
+        if (opts.params_json) |params_json| try injectParams(mrb_ptr, params_json);
+        if (opts.secrets_json) |secrets_json| try injectSecrets(mrb_ptr, secrets_json);
+        if (builtin.mode == .Debug) {
+            try self.mrb.evalString(@embedFile("ruby_prelude/test_helper.rb"));
+        }
+    }
+
+    pub fn close(self: *Session) void {
+        if (self.runner.display != null) self.runner.detachDisplay();
+        if (current_runner) |runner| {
+            if (runner == &self.runner) current_runner = null;
+        }
+        // Resource teardown unregisters mruby guard values, so it must happen
+        // before the interpreter is closed.
+        self.runner.deinit();
+        self.mrb.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn evalScript(self: *Session, path: []const u8) !void {
+        self.mrb.evalFile(path) catch |err| {
+            if (err == error.MRubyException) {
+                const mrb_ptr = self.mrb.mrb orelse return error.MRubyNotInitialized;
+                const exc = mruby.mrb_get_exception(mrb_ptr);
+                if (mruby.mrb_test(exc)) {
+                    base.recordProvisionException(mrb_ptr, exc, "script raised");
+                }
+            }
+            return err;
+        };
+    }
+
+    pub fn evalString(self: *Session, code: []const u8) !void {
+        try self.mrb.evalString(code);
+    }
+
+    pub fn loadTaskPrelude(self: *Session) !void {
+        try self.mrb.evalString(@embedFile("ruby_prelude/tasks.rb"));
+    }
 };
 
 fn cloneNotificationsFromCommon(
@@ -724,8 +1158,134 @@ const ResourceBinding = struct {
     platform: ResourcePlatform = .all,
 };
 
+fn statusPair(mrb: *mruby.mrb_state, ok: bool, message: ?[]const u8) mruby.mrb_value {
+    const pair = mruby.mrb_ary_new_capa(mrb, 2);
+    mruby.mrb_ary_push(mrb, pair, if (ok) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
+    if (message) |text| {
+        mruby.mrb_ary_push(mrb, pair, mruby.mrb_str_new(mrb, text.ptr, @intCast(text.len)));
+    } else {
+        mruby.mrb_ary_push(mrb, pair, mruby.mrb_nil_value());
+    }
+    return pair;
+}
+
+export fn zig_converge(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    if (runner.display == null) return statusPair(mrb, false, "provision display is not attached");
+    if (runner.converging or runner.converged_index >= runner.resources.items.len) {
+        return statusPair(mrb, true, null);
+    }
+
+    const arena_index = mruby.zig_mrb_gc_arena_save(mrb);
+    const converge_error: ?anyerror = blk: {
+        runner.convergeFrom(runner.converged_index) catch |err| break :blk err;
+        break :blk null;
+    };
+    mruby.zig_mrb_gc_arena_restore(mrb, arena_index);
+
+    if (converge_error) |err| {
+        const detail = base.getProvisionErrorDetail() orelse @errorName(err);
+        if (runner.last_failed_index) |index| {
+            if (index < runner.resources.items.len) {
+                const id = runner.resources.items[index].id;
+                const message = std.fmt.allocPrint(runner.allocator, "{s}[{s}]: {s}", .{ id.type_name, id.name, detail }) catch {
+                    return statusPair(mrb, false, detail);
+                };
+                defer runner.allocator.free(message);
+                return statusPair(mrb, false, message);
+            }
+        }
+        return statusPair(mrb, false, detail);
+    }
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_flush_delayed(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    if (runner.display == null) return statusPair(mrb, false, "provision display is not attached");
+    runner.flushDelayed() catch |err| {
+        return statusPair(mrb, false, base.getProvisionErrorDetail() orelse @errorName(err));
+    };
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_display_section(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var name_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &name_value) != 1) {
+        return statusPair(mrb, false, "display_section expects one task name");
+    }
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    const display = runner.display orelse return statusPair(mrb, false, "provision display is not attached");
+    const name = std.mem.span(mruby.mrb_str_to_cstr(mrb, name_value));
+    display.showTaskSection(name) catch |err| return statusPair(mrb, false, @errorName(err));
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_print_line(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var text_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &text_value) != 1) {
+        return statusPair(mrb, false, "print_line expects one string");
+    }
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    const display = runner.display orelse return statusPair(mrb, false, "provision display is not attached");
+    const line = std.mem.span(mruby.mrb_str_to_cstr(mrb, text_value));
+    display.printLine(line) catch |err| return statusPair(mrb, false, @errorName(err));
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_glob(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var pattern_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &pattern_value) != 1) return mruby.mrb_ary_new_capa(mrb, 0);
+    const runner = currentRunnerOrNilValue() orelse return mruby.mrb_ary_new_capa(mrb, 0);
+    const pattern = std.mem.span(mruby.mrb_str_to_cstr(mrb, pattern_value));
+    var matches = glob.expand(runner.allocator, global_io.io(), pattern) catch return mruby.mrb_ary_new_capa(mrb, 0);
+    defer glob.freeMatches(runner.allocator, &matches);
+
+    const result = mruby.mrb_ary_new_capa(mrb, @intCast(matches.items.len));
+    for (matches.items) |path| {
+        mruby.mrb_ary_push(mrb, result, mruby.mrb_str_new(mrb, path.ptr, @intCast(path.len)));
+    }
+    return result;
+}
+
+export fn zig_load_file(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var path_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &path_value) != 1) return statusPair(mrb, false, "load_file expects one path");
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    const path = std.mem.span(mruby.mrb_str_to_cstr(mrb, path_value));
+    const source = std.Io.Dir.cwd().readFileAlloc(global_io.io(), path, runner.allocator, .unlimited) catch |err| {
+        const message = std.fmt.allocPrint(runner.allocator, "cannot load {s}: {s}", .{ path, @errorName(err) }) catch return statusPair(mrb, false, @errorName(err));
+        defer runner.allocator.free(message);
+        return statusPair(mrb, false, message);
+    };
+    defer runner.allocator.free(source);
+    const path_z = runner.allocator.dupeZ(u8, path) catch return statusPair(mrb, false, "out of memory loading Ruby file");
+    defer runner.allocator.free(path_z);
+
+    return switch (mruby.loadStringProtected(mrb, source, path_z)) {
+        .ok => statusPair(mrb, true, null),
+        .raised => |exc| blk: {
+            var summary: [1024]u8 = undefined;
+            mruby.zig_mrb_exc_summary(mrb, exc, &summary, summary.len);
+            break :blk statusPair(mrb, false, std.mem.sliceTo(&summary, 0));
+        },
+    };
+}
+
 fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass) void {
     const bindings = [_]ResourceBinding{
+        .{ .name = "converge", .handler = zig_converge, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "flush_delayed", .handler = zig_flush_delayed, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "display_section", .handler = zig_display_section, .args_spec = mruby.MRB_ARGS_REQ(1) },
+        .{ .name = "print_line", .handler = zig_print_line, .args_spec = mruby.MRB_ARGS_REQ(1) },
+        .{ .name = "glob", .handler = zig_glob, .args_spec = mruby.MRB_ARGS_REQ(1) },
+        .{ .name = "load_file", .handler = zig_load_file, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_execute", .handler = zig_add_execute_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_remote_file", .handler = zig_add_remote_file_resource, .args_spec = mruby.MRB_ARGS_REQ(12) | mruby.MRB_ARGS_OPT(15) },
@@ -815,162 +1375,22 @@ fn injectSecrets(mrb: *mruby.mrb_state, secrets_json: []const u8) !void {
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
-    // Provision error detail buffer is threadlocal; clear at entry so a prior
-    // invocation on this thread can't leak into this run.
-    base.clearProvisionErrorDetail();
+    const session = try Session.open(allocator, .{
+        .params_json = opts.params_json,
+        .secrets_json = opts.secrets_json,
+    });
+    defer session.close();
+    try session.evalScript(opts.script_path);
 
-    // Initialize the mruby interpreter before the runner so it outlives the
-    // resources. Resource teardown (CommonProps.deinit) calls
-    // mrb_gc_unregister on the mrb state for only_if/not_if guard blocks, so
-    // the state must still be alive when runner.deinit() runs. Defers execute
-    // LIFO: registering mrb.deinit() first makes runner.deinit() (and resource
-    // teardown) run before the mruby state is closed.
-    var mrb = try mruby.State.init();
-    defer mrb.deinit();
-
-    var runner = ProvisionRunner.init(allocator);
-    defer runner.deinit();
-
-    current_runner = &runner;
-    defer current_runner = null;
-
-    // Register Zig functions in mruby
-    const mrb_ptr = mrb.mrb orelse return error.MRubyNotInitialized;
-    const zig_module = mruby.mrb_define_module(mrb_ptr, "ZigBackend");
-    registerResourceBindings(mrb_ptr, zig_module);
-
-    // Register all API modules using the unified interface
-    // Register modules in dependency order: JSON must be registered before http_client
-    // because http_client's Ruby prelude calls JSON.parse in Response#json method
-    const api_modules = [_]mruby_module.MRubyModule{
-        file_ext.mruby_module_def, // File.stat and File.mtime extensions
-        json.mruby_module_def,
-        http.mruby_module_def,
-        base64.mruby_module_def,
-        hola_logger.mruby_module_def,
-        node_info.mruby_module_def,
-        env_access.mruby_module_def,
-        resolv.mruby_module_def,
-    };
-
-    for (api_modules) |module| {
-        try mruby_module.registerModule(mrb_ptr, zig_module, allocator, module, &mrb);
-    }
-
-    // Setup File class methods (must be done after registerModule loads the prelude)
-    // This registers File.stat and File.mtime as class methods
-    file_ext.setupFileExtensions(mrb_ptr);
-
-    // Load OpenStruct utility class (used by node object and other resources)
-    try mrb.evalString(@embedFile("ruby_prelude/open_struct.rb"));
-
-    // Load Time.parse polyfill (mruby ships no Regexp, no Time.parse)
-    try mrb.evalString(@embedFile("ruby_prelude/time_parse.rb"));
-
-    // Load Ruby DSL preludes for resource types
-    try mrb.evalString(resources.file.ruby_prelude);
-    try mrb.evalString(resources.execute.ruby_prelude);
-    try mrb.evalString(resources.remote_file.ruby_prelude);
-    try mrb.evalString(resources.template.ruby_prelude);
-    // Always load macOS-specific Ruby DSLs so the methods exist cross-platform.
-    // On non-macOS, the Ruby preludes themselves detect the absence of ZigBackend
-    // entrypoints and act as no-op helpers.
-    try mrb.evalString(resources.macos_dock.ruby_prelude);
-    try mrb.evalString(resources.macos_defaults.ruby_prelude);
-    try mrb.evalString(resources.directory.ruby_prelude);
-    try mrb.evalString(resources.link.ruby_prelude);
-    try mrb.evalString(resources.route.ruby_prelude);
-    // Load Linux-specific Ruby DSLs (apt_repository, systemd_unit, etc.)
-    // On non-Linux, the Ruby preludes detect absence of ZigBackend entrypoints
-    try mrb.evalString(resources.apt_repository.ruby_prelude);
-    try mrb.evalString(resources.systemd_unit.ruby_prelude);
-    try mrb.evalString(resources.mount_res.ruby_prelude);
-    // Load package resources (delegator and platform-specific)
-    try mrb.evalString(resources.package.ruby_prelude);
-    try mrb.evalString(resources.homebrew_package.ruby_prelude);
-    try mrb.evalString(resources.apt_package.ruby_prelude);
-    // Load ruby_block resource
-    try mrb.evalString(resources.ruby_block.ruby_prelude);
-    // Load git resource
-    try mrb.evalString(resources.git.ruby_prelude);
-    // Load user and group resources
-    try mrb.evalString(resources.user.ruby_prelude);
-    try mrb.evalString(resources.group.ruby_prelude);
-    // Load aws_kms resource
-    try mrb.evalString(resources.aws_kms.ruby_prelude);
-    // Load file_edit resource
-    try mrb.evalString(resources.file_edit.ruby_prelude);
-    // Load extract resource
-    try mrb.evalString(resources.extract.ruby_prelude);
-    // Load Ruby-only custom resources
-    try mrb.evalString(@embedFile("resources/apt_update_resource.rb"));
-
-    // Load data_bag support
-    try mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
-
-    // Load secrets_bag support
-    try mrb.evalString(@embedFile("ruby_prelude/secrets_bag.rb"));
-
-    // Inject params as $_hola_params if provided (agent mode)
-    if (opts.params_json) |params_json| {
-        try injectParams(mrb_ptr, params_json);
-    }
-
-    // Inject secrets as $_hola_secrets if provided
-    if (opts.secrets_json) |secrets_json| {
-        try injectSecrets(mrb_ptr, secrets_json);
-    }
-
-    // Load test helper only in debug builds
-    if (builtin.mode == .Debug) {
-        try mrb.evalString(@embedFile("ruby_prelude/test_helper.rb"));
-    }
-
-    // Load and execute user's recipe
-    // Use evalFile instead of evalString to preserve file path and line numbers in error messages.
-    // On failure, capture the mruby exception summary (ClassName + message) so
-    // the agent callback / top-level caller can surface something friendlier
-    // than the bare "MRubyException" Zig error name. mrb_print_error() inside
-    // evalFile doesn't clear mrb->exc, so we can still read it here.
-    mrb.evalFile(opts.script_path) catch |err| {
-        if (err == error.MRubyException) {
-            const exc = mruby.mrb_get_exception(mrb_ptr);
-            if (mruby.mrb_test(exc)) {
-                base.recordProvisionException(mrb_ptr, exc, "script raised");
-            }
-        }
-        return err;
-    };
-
-    // Record start time for timer
-    const start_time: i128 = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
-
-    // Initialize resource results collection
-    var resource_results = std.ArrayList(ResourceResult).empty;
-    errdefer {
-        for (resource_results.items) |rr| {
-            allocator.free(rr.type_name);
-            allocator.free(rr.name);
-            allocator.free(rr.action);
-            if (rr.skip_reason) |sr| allocator.free(sr);
-            if (rr.error_name) |en| allocator.free(en);
-            if (rr.error_message) |em| allocator.free(em);
-            if (rr.output) |o| allocator.free(o);
-        }
-        resource_results.deinit(allocator);
-    }
+    const runner = &session.runner;
+    runner.start_time = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
 
     // Initialize modern display with the specified output mode
     var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.use_pretty_output);
     defer display.deinit();
 
-    // Set global display for async executor callback
-    runner.display = &display;
-    defer runner.display = null;
-
-    // Set poll callback for async executor
-    AsyncExecutor.setPollCallback(pollDisplayUpdate);
-    defer AsyncExecutor.setPollCallback(null);
+    runner.attachDisplay(&display);
+    defer runner.detachDisplay();
 
     // Show section header
     try display.showSection("Applying Configuration");
@@ -1139,6 +1559,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
     // Start background download processing if we have tasks
     var download_thread: ?std.Thread = null;
+    defer if (download_thread) |thread| thread.join();
     if (download_mgr.tasks.items.len > 0) {
         const DownloadThread = struct {
             fn run(mgr: *http.download.Manager) void {
@@ -1149,200 +1570,22 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         };
         download_thread = try std.Thread.spawn(.{}, DownloadThread.run, .{&download_mgr});
     }
+    runner.download_mgr = &download_mgr;
+    defer runner.download_mgr = null;
 
     // Start resource execution phase
     try display.showSectionWithLevel("Executing Resources", 3);
 
     // Start the real-time timer spinner (after all download spinners are created)
-    try display.startTimer(start_time);
-
-    // Track immediate and delayed notifications
-    var immediate_notifications = std.ArrayList(PendingNotification).empty;
-    defer immediate_notifications.deinit(allocator);
-    var delayed_notifications = std.ArrayList(PendingNotification).empty;
-    defer delayed_notifications.deinit(allocator);
-
-    // Phase 0: Convert subscriptions to reverse notifications
-    // When resource A subscribes to resource B, we add a notification from B to A
-    for (runner.resources.items) |*subscriber_res| {
-        const common = subscriber_res.resource.getCommonProps();
-        for (common.subscriptions.items) |sub| {
-            // Find the source resource that this resource is subscribing to
-            const source_id_parsed = base.notification.ResourceId.parse(allocator, sub.target_resource_id) catch continue;
-            defer source_id_parsed.deinit(allocator);
-
-            // Find the source resource in our list
-            for (runner.resources.items) |*source_res| {
-                if (std.mem.eql(u8, source_res.id.type_name, source_id_parsed.type_name) and
-                    std.mem.eql(u8, source_res.id.name, source_id_parsed.name))
-                {
-                    // Add a notification from source to subscriber
-                    const subscriber_id = try subscriber_res.id.toString(allocator);
-                    const notif = base.notification.Notification{
-                        .target_resource_id = subscriber_id,
-                        .action = .{ .action_name = try allocator.dupe(u8, sub.action.action_name) },
-                        .timing = sub.timing,
-                    };
-
-                    const source_common = source_res.resource.getCommonProps();
-                    try source_common.notifications.append(allocator, notif);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Phase 1: Execute resources and collect notifications
-    for (runner.resources.items) |*res| {
-        base.clearProvisionErrorDetail();
-        try display.startResource(res.id.type_name, res.id.name);
-        try display.update();
-
-        // Wait for download task if this is a remote_file resource
-        if (res.resource == .remote_file and download_thread != null) {
-            // Find the download task for this specific remote_file resource
-            const resource_id = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ res.id.type_name, res.id.name });
-            defer allocator.free(resource_id);
-
-            if (download_mgr.getTask(resource_id)) |task| {
-                // Check current status first
-                const initial_status = task.status.load(.acquire);
-
-                // Only wait if the task is still in progress
-                if (initial_status == .queued or initial_status == .downloading) {
-                    // Wait for this specific download task to complete
-                    var max_wait_iterations: usize = 3000; // 30 seconds max wait (10ms * 3000)
-                    while (max_wait_iterations > 0) {
-                        const status = task.status.load(.acquire);
-                        if (status != .queued and status != .downloading) {
-                            break;
-                        }
-
-                        try display.update();
-                        std.Thread.yield() catch {};
-                        global_io.io().sleep(.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
-                        max_wait_iterations -= 1;
-                    }
-                }
-
-                // Check if the download failed
-                const final_status = task.status.load(.acquire);
-                if (final_status == .failed) {
-                    const err_msg_owned = task.getError(allocator);
-                    defer if (err_msg_owned) |msg| allocator.free(msg);
-                    const err_msg = err_msg_owned orelse "Unknown error";
-
-                    const msg = try std.fmt.allocPrint(allocator, "Download failed for {s}: {s}", .{ resource_id, err_msg });
-                    defer allocator.free(msg);
-                    base.recordProvisionErrorDetailSlice(msg);
-                    try display.showInfo(msg);
-                    return error.DownloadFailed;
-                }
-            }
-        }
-
-        const result = res.resource.apply() catch |err| {
-            const detail_msg = base.getProvisionErrorDetail();
-            const error_display = detail_msg orelse @errorName(err);
-            try display.resourceError(res.id.type_name, res.id.name, error_display);
-            try display.update();
-
-            try resource_results.append(allocator, .{
-                .type_name = try allocator.dupe(u8, res.id.type_name),
-                .name = try allocator.dupe(u8, res.id.name),
-                .action = try allocator.dupe(u8, ""),
-                .was_updated = false,
-                .skipped = false,
-                .skip_reason = null,
-                .error_name = try allocator.dupe(u8, @errorName(err)),
-                .error_message = if (detail_msg) |m| try allocator.dupe(u8, m) else null,
-                .output = null,
-            });
-
-            // Check if this resource has ignore_failure set
-            if (res.resource.shouldIgnoreFailure()) {
-                // Continue to next resource if ignore_failure is true
-                continue;
-            } else {
-                // Stop execution and return error
-                return err;
-            }
-        };
-        // Free resource-allocated output after duping into resource_results
-        defer if (result.output) |o| std.heap.c_allocator.free(o);
-        res.was_updated = result.was_updated;
-
-        // Update resource status with action and skip reason
-        // If skip_reason is "up to date", show it even if was_updated is false
-        if (result.was_updated) {
-            // Pass skip_reason to resourceUpdated so it can handle "up to date" case
-            try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason);
-            try display.update();
-
-            try resource_results.append(allocator, .{
-                .type_name = try allocator.dupe(u8, res.id.type_name),
-                .name = try allocator.dupe(u8, res.id.name),
-                .action = try allocator.dupe(u8, result.action),
-                .was_updated = true,
-                .skipped = false,
-                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
-                .error_name = null,
-                .output = if (result.output) |o| try allocator.dupe(u8, o) else null,
-            });
-
-            // Collect notifications from updated resources (only if actually updated, not "up to date")
-            if (result.skip_reason == null or !std.mem.eql(u8, result.skip_reason.?, "up to date")) {
-                for (res.notifications.items) |notif| {
-                    const pending = PendingNotification{
-                        .notification = notif,
-                        .source_id = try res.id.toString(allocator),
-                    };
-
-                    if (notif.timing == .immediate) {
-                        try immediate_notifications.append(allocator, pending);
-                    } else {
-                        try delayed_notifications.append(allocator, pending);
-                    }
-                }
-            }
-        } else {
-            // Resource was not updated - show skip reason (including "up to date")
-            try display.resourceSkipped(res.id.type_name, res.id.name, result.action, result.skip_reason);
-            try display.update();
-
-            try resource_results.append(allocator, .{
-                .type_name = try allocator.dupe(u8, res.id.type_name),
-                .name = try allocator.dupe(u8, res.id.name),
-                .action = try allocator.dupe(u8, result.action),
-                .was_updated = false,
-                .skipped = true,
-                .skip_reason = if (result.skip_reason) |sr| try allocator.dupe(u8, sr) else null,
-                .error_name = null,
-                .output = null,
-            });
-        }
-    }
-
-    // Phase 2: Process immediate notifications
-    if (immediate_notifications.items.len > 0) {
-        try display.showSectionWithLevel("Processing Immediate Notifications", 3);
-        for (immediate_notifications.items) |pending| {
-            try processNotification(allocator, pending, &display);
-        }
-    }
-
-    // Phase 3: Process delayed notifications at end
-    if (delayed_notifications.items.len > 0) {
-        try display.showSectionWithLevel("Processing Delayed Notifications", 3);
-        for (delayed_notifications.items) |pending| {
-            try processNotification(allocator, pending, &display);
-        }
-    }
+    try display.startTimer(runner.start_time);
+    try runner.convergeFrom(0);
+    try runner.flushDelayed();
 
     // Wait for download thread to complete
     if (download_thread) |thread| {
         try display.showInfo("Waiting for remaining downloads to complete...");
         thread.join();
+        download_thread = null;
 
         // Show final stats
         const stats = download_mgr.getStats();
@@ -1353,20 +1596,12 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
     }
 
-    // Cleanup pending notifications
-    for (immediate_notifications.items) |pending| {
-        allocator.free(pending.source_id);
-    }
-    for (delayed_notifications.items) |pending| {
-        allocator.free(pending.source_id);
-    }
-
     // Show execution summary with duration
     try display.showSummaryWithDuration(0, 0);
 
     // Compute duration
     const end_time: i128 = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
-    const elapsed_ms = @divTrunc(end_time - start_time, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(end_time - runner.start_time, std.time.ns_per_ms);
 
     return ProvisionResult{
         .executed_count = display.executed_count,
@@ -1374,8 +1609,228 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         .skipped_count = display.skipped_count,
         .failed_count = display.failed_count,
         .duration_ms = @intCast(elapsed_ms),
-        .resource_results = resource_results,
+        .resource_results = runner.takeResults(),
     };
+}
+
+test "Session.open collects resources without applying" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(global_io.io(), ".", allocator);
+    defer allocator.free(root);
+    const target = try std.fs.path.join(allocator, &.{ root, "not-applied.txt" });
+    defer allocator.free(target);
+
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    const script = try std.fmt.allocPrint(allocator, "file '{s}' do\n  content 'x'\nend", .{target});
+    defer allocator.free(script);
+    try session.evalString(script);
+
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resources.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.runner.converged_index);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(global_io.io(), target, .{}));
+}
+
+test "convergeFrom applies and records results once" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(global_io.io(), ".", allocator);
+    defer allocator.free(root);
+    const target = try std.fs.path.join(allocator, &.{ root, "applied.txt" });
+    defer allocator.free(target);
+
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    const script = try std.fmt.allocPrint(allocator, "file '{s}' do\n  content 'x'\nend", .{target});
+    defer allocator.free(script);
+    try session.evalString(script);
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    display.setTotalResources(1);
+
+    try session.runner.convergeFrom(0);
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resource_results.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.runner.converged_index);
+    try std.Io.Dir.cwd().access(global_io.io(), target, .{});
+
+    try session.runner.convergeFrom(1);
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resource_results.items.len);
+}
+
+test "task prelude supports common Rake task semantics" {
+    var mrb_state = try mruby.State.init();
+    defer mrb_state.deinit();
+    const mrb_ptr = mrb_state.mrb orelse return error.MRubyNotInitialized;
+
+    try mrb_state.evalString(
+        \\module ZigBackend
+        \\  def self.converge; [true, nil]; end
+        \\  def self.flush_delayed; [true, nil]; end
+        \\  def self.display_section(name); ($sections ||= []) << name; [true, nil]; end
+        \\end
+        \\module ENV
+        \\  @values = {}
+        \\  def self.[](key); @values[key]; end
+        \\  def self.[]=(key, value); @values[key] = value; end
+        \\end
+    );
+    try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
+    try mrb_state.evalString(
+        \\$events = []
+        \\task(:a) { $events << :a }
+        \\task(:b => :a) { $events << :b }
+        \\task(:c => [:a, :b]) { $events << :c }
+        \\task :greet, [:name] do |task, args|
+        \\  args.with_defaults(:name => 'world')
+        \\  $events << args.name
+        \\end
+        \\namespace :db do
+        \\  task :prepare do
+        \\    $events << :db_prepare
+        \\  end
+        \\  namespace :admin do
+        \\    task :reset => 'prepare' do
+        \\      $events << :admin_reset
+        \\    end
+        \\  end
+        \\  task :reset do
+        \\    $events << :reset
+        \\  end
+        \\end
+        \\task(:merged) { $events << :first }
+        \\task(:merged) { $events << :second }
+        \\file 'standard-file-task'
+        \\file_task 'legacy-file-task'
+        \\directory 'standard-directory-task'
+        \\task :cycle_a => :cycle_b
+        \\task :cycle_b => :cycle_a
+        \\class ExampleTaskLib < Rake::TaskLib
+        \\  def initialize
+        \\    task(:from_tasklib) { $events << :tasklib }
+        \\  end
+        \\end
+        \\ExampleTaskLib.new
+        \\require 'rake/clean'
+        \\Hola::Rake.application.run(['HOLA_TASK_ENV=present', 'c', 'greet[bob]', 'db:reset', 'db:admin:reset', 'from_tasklib'])
+        \\$dependency_result = ($events == [:a, :b, :c, 'bob', :reset, :db_prepare, :admin_reset, :tasklib])
+        \\$dependency_result = $dependency_result && (ENV['HOLA_TASK_ENV'] == 'present')
+        \\Rake::Task[:merged].invoke
+        \\Rake::Task[:merged].invoke
+        \\Rake::Task[:merged].reenable
+        \\Rake::Task[:merged].invoke
+        \\$enhance_result = ($events[-4, 4] == [:first, :second, :first, :second])
+        \\begin
+        \\  Rake::Task[:cycle_a].invoke
+        \\rescue => error
+        \\  $cycle_result = error.message.include?('Circular dependency detected: cycle_a => cycle_b => cycle_a')
+        \\end
+        \\begin
+        \\  Rake::Task[:missing]
+        \\rescue => error
+        \\  $missing_result = (error.message == "Don't know how to build task 'missing'")
+        \\end
+        \\$parse_result = [
+        \\  Hola::Rake.application.parse_task_string('a'),
+        \\  Hola::Rake.application.parse_task_string('a[]'),
+        \\  Hola::Rake.application.parse_task_string('a[1, 2]'),
+        \\  Hola::Rake.application.parse_task_string('ns:a[x]'),
+        \\]
+        \\$parse_test_result = ($parse_result == [['a', []], ['a', []], ['a', ['1', '2']], ['ns:a', ['x']]])
+        \\$tasklib_result = Rake::Task.task_defined?(:from_tasklib) && Rake::Task.task_defined?(:clean) && Rake::Task.task_defined?(:clobber)
+        \\$file_dsl_result = Rake::Task[:'standard-file-task'].is_a?(Rake::FileTask) && Rake::Task[:'legacy-file-task'].is_a?(Rake::FileTask) && Rake::Task[:'standard-directory-task'].is_a?(Rake::FileTask)
+    );
+
+    const result_names = [_][*:0]const u8{
+        "$dependency_result",
+        "$enhance_result",
+        "$cycle_result",
+        "$missing_result",
+        "$parse_test_result",
+        "$tasklib_result",
+        "$file_dsl_result",
+    };
+    for (result_names) |name| {
+        const result = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, name));
+        try std.testing.expect(mruby.mrb_test(result));
+    }
+}
+
+test "task prelude immediate wrapper converges resource declarations" {
+    var mrb_state = try mruby.State.init();
+    defer mrb_state.deinit();
+    const mrb_ptr = mrb_state.mrb orelse return error.MRubyNotInitialized;
+
+    try mrb_state.evalString(
+        \\$converge_calls = 0
+        \\module ZigBackend
+        \\  def self.converge; $converge_calls += 1; [true, nil]; end
+        \\  def self.flush_delayed; [true, nil]; end
+        \\  def self.display_section(name); [true, nil]; end
+        \\end
+        \\def execute(name, &block); name; end
+    );
+    try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
+    try mrb_state.evalString("$hola_run_immediate = true; execute('command'); $immediate_result = ($converge_calls == 1)");
+    const result = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, "$immediate_result"));
+    try std.testing.expect(mruby.mrb_test(result));
+}
+
+test "task command-line assignments use the environment bridge" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{ .mode = .task });
+    defer session.close();
+    defer session.evalString("ENV.delete('HOLA_TASK_TEST_ENV')") catch {};
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    session.runner.start_time = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
+    try display.startTimer(session.runner.start_time);
+
+    try session.loadTaskPrelude();
+    try session.evalString(
+        \\file 'standard-task-file'
+        \\task(:check_env) { $env_seen = ENV['HOLA_TASK_TEST_ENV'] }
+        \\$hola_run_argv = ['HOLA_TASK_TEST_ENV=present', 'check_env']
+        \\Hola::Rake.main
+        \\$env_bridge_result = ($hola_run_status == 0 && $env_seen == 'present')
+    );
+    const result = session.mrb.getGlobal("$env_bridge_result");
+    try std.testing.expect(mruby.mrb_test(result));
+    try std.testing.expectEqual(@as(usize, 0), session.runner.resources.items.len);
+}
+
+test "protected ruby_block failure returns a converge status and session remains usable" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+
+    try session.evalString("ruby_block('boom') { block { raise 'kaboom' } }; $r = ZigBackend.converge");
+    try session.evalString("$protected_failure = (!$r[0] && $r[1].include?('ruby_block[boom]') && $r[1].include?('kaboom'))");
+    const failure_result = mruby.mrb_gv_get(session.mrb.mrb.?, mruby.mrb_intern_cstr(session.mrb.mrb.?, "$protected_failure"));
+    try std.testing.expect(mruby.mrb_test(failure_result));
+
+    try session.evalString("ruby_block('ok') { block { true } }; $r2 = ZigBackend.converge; $protected_recovery = ($r2 == [true, nil])");
+    const recovery_result = mruby.mrb_gv_get(session.mrb.mrb.?, mruby.mrb_intern_cstr(session.mrb.mrb.?, "$protected_recovery"));
+    try std.testing.expect(mruby.mrb_test(recovery_result));
 }
 
 test "injectSecrets and secrets_bag reads values correctly" {

@@ -158,6 +158,11 @@ pub const MultiProgress = struct {
         self.mutex.lockUncancelable(global_io.io());
         defer self.mutex.unlock(global_io.io());
 
+        if (!self.draw_enabled) {
+            std.debug.print("{s}\n", .{msg});
+            return;
+        }
+
         // Build the entire sequence (clear + message + redraw) in a single buffer
         var output_aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer output_aw.deinit();
@@ -176,11 +181,6 @@ pub const MultiProgress = struct {
 
         // 2. Print message
         try writer.print("{s}\n", .{msg});
-
-        // 3. Redraw all bars
-        if (self.last_total_lines > 0) {
-            try writer.print("\x1b[{d}F", .{self.last_total_lines});
-        }
 
         var bar_aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer bar_aw.deinit();

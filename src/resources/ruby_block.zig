@@ -5,8 +5,6 @@ const logger = @import("../logger.zig");
 
 // External helper for checking nil values and exceptions
 extern fn zig_mrb_nil_p(val: mruby.mrb_value) c_int;
-extern fn zig_mrb_has_exception(mrb: *mruby.mrb_state) c_int;
-
 /// Ruby block resource data structure
 pub const Resource = struct {
     // Resource-specific properties
@@ -164,35 +162,27 @@ pub const Resource = struct {
                 }
             }
 
-            // Call the Ruby proc using mrb_funcall
-            // Proc.call() in Ruby translates to funcall with "call" method
-            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
-            const result = mruby.mrb_funcall_argv(mrb, proc, call_sym, 0, null);
+            switch (mruby.callProtected(mrb, proc, "call", &.{})) {
+                .ok => return true,
+                .raised => |exc| {
+                    const exc_str = mruby.mrb_inspect(mrb, exc);
+                    const err_msg_cstr = mruby.mrb_str_to_cstr(mrb, exc_str);
+                    const err_msg = std.mem.span(err_msg_cstr);
 
-            // Check if an exception occurred
-            if (zig_mrb_has_exception(mrb) != 0) {
-                // Get exception object and convert to string
-                const exc = mruby.mrb_get_exception(mrb);
-                const exc_str = mruby.mrb_inspect(mrb, exc);
-                const err_msg_cstr = mruby.mrb_str_to_cstr(mrb, exc_str);
-                const err_msg = std.mem.span(err_msg_cstr);
+                    // Log the error message
+                    logger.err("Ruby block execution failed: {s}", .{err_msg});
 
-                // Log the error message
-                logger.err("Ruby block execution failed: {s}", .{err_msg});
+                    // Capture a friendly "ruby_block raised: ClassName: message"
+                    // summary into the shared provision error-detail buffer so the
+                    // top-level apply loop / agent callback can surface it instead
+                    // of the raw Zig error name.
+                    base.recordProvisionException(mrb, exc, "ruby_block raised");
 
-                // Capture a friendly "ruby_block raised: ClassName: message"
-                // summary into the shared provision error-detail buffer so the
-                // top-level apply loop / agent callback can surface it instead
-                // of the raw Zig error name.
-                base.recordProvisionException(mrb, exc, "ruby_block raised");
-
-                // Also print to stderr for consistency
-                mruby.mrb_print_error(mrb);
-                return error.RubyBlockFailed;
+                    // Also print to stderr for consistency
+                    mruby.zig_mrb_print_exc(mrb, exc);
+                    return error.RubyBlockFailed;
+                },
             }
-
-            _ = result;
-            return true; // Block was executed
         }
         return false; // No block to execute
     }
