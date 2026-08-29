@@ -8,7 +8,8 @@ const mruby = @import("../mruby.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help                   Show help for run
-    \\-f, --rakefile <PATH>        Use PATH as the Rakefile
+    \\-f, --holafile <PATH>        Use PATH as the Holafile
+    \\    --rakefile <PATH>        Legacy alias for --holafile
     \\-T, --tasks                  List described tasks
     \\-P, --prerequisites          Show task prerequisites
     \\-n, --dry-run                Show tasks without executing actions
@@ -32,13 +33,24 @@ const parsers = .{
     .task = clap.parsers.string,
 };
 
-pub const RAKEFILE_NAMES = [_][]const u8{ "Rakefile", "rakefile", "Rakefile.rb", "rakefile.rb" };
-pub const RunError = error{ NoRakefile, TaskFailed };
+pub const TASKFILE_NAMES = [_]struct {
+    name: []const u8,
+    legacy: bool,
+}{
+    .{ .name = "Holafile", .legacy = false },
+    .{ .name = "holafile.rb", .legacy = false },
+    .{ .name = "Rakefile", .legacy = true },
+    .{ .name = "rakefile", .legacy = true },
+    .{ .name = "Rakefile.rb", .legacy = true },
+    .{ .name = "rakefile.rb", .legacy = true },
+};
+pub const RunError = error{ NoTaskFile, TaskFailed };
 
 pub const Located = struct {
     allocator: std.mem.Allocator,
     dir: []const u8,
     path: []const u8,
+    legacy: bool,
 
     pub fn deinit(self: *Located) void {
         self.allocator.free(self.dir);
@@ -48,7 +60,7 @@ pub const Located = struct {
 };
 
 const RunArgs = struct {
-    rakefile: ?[]const u8,
+    task_file: ?[]const u8,
     list_tasks: bool,
     list_prerequisites: bool,
     dry_run: bool,
@@ -77,8 +89,8 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
     if (parsed.args.help != 0) return printHelp();
     const args = fromParsed(parsed);
     const exit_code = runWithArgs(allocator, args, null) catch |err| switch (err) {
-        error.NoRakefile => blk: {
-            printNoRakefile();
+        error.NoTaskFile => blk: {
+            printNoTaskFile();
             break :blk @as(u8, 1);
         },
         else => return err,
@@ -102,7 +114,7 @@ pub fn runImplicit(allocator: std.mem.Allocator, first_task: []const u8, iter: *
         return;
     }
     const exit_code = runWithArgs(allocator, fromParsed(parsed), first_task) catch |err| switch (err) {
-        error.NoRakefile => return error.NoRakefile,
+        error.NoTaskFile => return error.NoTaskFile,
         else => {
             std.debug.print("hola run failed: {}\n", .{err});
             return error.TaskFailed;
@@ -113,7 +125,7 @@ pub fn runImplicit(allocator: std.mem.Allocator, first_task: []const u8, iter: *
 
 fn fromParsed(parsed: anytype) RunArgs {
     return .{
-        .rakefile = parsed.args.rakefile,
+        .task_file = parsed.args.holafile orelse parsed.args.rakefile,
         .list_tasks = parsed.args.tasks != 0,
         .list_prerequisites = parsed.args.prerequisites != 0,
         .dry_run = parsed.args.@"dry-run" != 0,
@@ -145,8 +157,8 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
     const original_cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
     defer allocator.free(original_cwd);
 
-    var located = if (args.rakefile) |rakefile| blk: {
-        const canonical_path = try std.Io.Dir.cwd().realPathFileAlloc(io, rakefile, allocator);
+    var located = if (args.task_file) |task_file| blk: {
+        const canonical_path = try std.Io.Dir.cwd().realPathFileAlloc(io, task_file, allocator);
         defer allocator.free(canonical_path);
         const path = try allocator.dupe(u8, canonical_path);
         errdefer allocator.free(path);
@@ -155,9 +167,14 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
             .allocator = allocator,
             .dir = try allocator.dupe(u8, parent),
             .path = path,
+            .legacy = false,
         };
-    } else (try findRakefile(allocator, io, original_cwd)) orelse return error.NoRakefile;
+    } else (try findTaskFile(allocator, io, original_cwd)) orelse return error.NoTaskFile;
     defer located.deinit();
+
+    if (args.task_file == null and located.legacy) {
+        printLegacyTaskFileWarning(std.fs.path.basename(located.path));
+    }
 
     try std.Io.Threaded.chdir(located.dir);
     if (!std.mem.eql(u8, original_cwd, located.dir)) {
@@ -181,7 +198,7 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
 
     const argv = mrubyArgv(mrb, allocator, leading_task, args.tasks);
     session.mrb.setGlobal("$hola_run_argv", argv);
-    session.mrb.setGlobal("$hola_rakefile", mruby.mrb_str_new(mrb, located.path.ptr, @intCast(located.path.len)));
+    session.mrb.setGlobal("$hola_taskfile", mruby.mrb_str_new(mrb, located.path.ptr, @intCast(located.path.len)));
 
     var display: ?modern_display.ModernProvisionDisplay = null;
     if (!args.list_tasks and !args.list_prerequisites) {
@@ -197,7 +214,7 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
     };
 
     session.evalScript(located.path) catch {
-        std.debug.print("rake aborted!\nFailed to load {s}\n", .{located.path});
+        std.debug.print("hola aborted!\nFailed to load {s}\n", .{located.path});
         return 1;
     };
     session.evalString("Hola::Rake.main") catch return 1;
@@ -224,18 +241,23 @@ fn mrubyArgv(mrb: *mruby.mrb_state, allocator: std.mem.Allocator, leading_task: 
     return argv;
 }
 
-pub fn findRakefile(allocator: std.mem.Allocator, io: std.Io, start_dir: []const u8) !?Located {
+pub fn findTaskFile(allocator: std.mem.Allocator, io: std.Io, start_dir: []const u8) !?Located {
     var current = try allocator.dupe(u8, start_dir);
     errdefer allocator.free(current);
 
     while (true) {
-        for (RAKEFILE_NAMES) |name| {
-            const candidate = try std.fs.path.join(allocator, &.{ current, name });
+        for (TASKFILE_NAMES) |task_file| {
+            const candidate = try std.fs.path.join(allocator, &.{ current, task_file.name });
             std.Io.Dir.cwd().access(io, candidate, .{}) catch {
                 allocator.free(candidate);
                 continue;
             };
-            return .{ .allocator = allocator, .dir = current, .path = candidate };
+            return .{
+                .allocator = allocator,
+                .dir = current,
+                .path = candidate,
+                .legacy = task_file.legacy,
+            };
         }
 
         const parent = std.fs.path.dirname(current) orelse break;
@@ -248,8 +270,12 @@ pub fn findRakefile(allocator: std.mem.Allocator, io: std.Io, start_dir: []const
     return null;
 }
 
-fn printNoRakefile() void {
-    std.debug.print("No Rakefile found (looking for: Rakefile, rakefile, Rakefile.rb, rakefile.rb)\n", .{});
+fn printNoTaskFile() void {
+    std.debug.print("No Holafile found (looking for: Holafile, holafile.rb; legacy: Rakefile, rakefile, Rakefile.rb, rakefile.rb)\n", .{});
+}
+
+fn printLegacyTaskFileWarning(name: []const u8) void {
+    std.debug.print("warning: using legacy {s}; rename it to Holafile (Hola's task DSL is Rake-inspired, not Rake-compatible)\n", .{name});
 }
 
 fn printHelp() !void {
@@ -257,11 +283,12 @@ fn printHelp() !void {
         \\run
         \\  hola run [OPTIONS] [TASK[ARGS] ...]
         \\
-        \\Run Rake-compatible tasks backed by hola resources and embedded mruby.
+        \\Run Rake-inspired tasks backed by hola resources and embedded mruby.
         \\
         \\Options:
         \\  -h, --help           Show this help
-        \\  -f, --rakefile PATH  Use an explicit Rakefile
+        \\  -f, --holafile PATH  Use an explicit Holafile
+        \\      --rakefile PATH  Legacy alias for --holafile
         \\  -T, --tasks          List tasks with descriptions
         \\  -P, --prerequisites  Show task prerequisites
         \\  -n, --dry-run        Trace tasks without executing their actions
@@ -291,18 +318,51 @@ fn printHelp() !void {
     );
 }
 
-test "findRakefile searches parent directories in precedence order" {
+test "findTaskFile prefers Holafile while searching parent directories" {
     const allocator = std.testing.allocator;
     const io = global_io.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "project", .default_dir);
     try tmp.dir.createDir(io, "project/nested", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/Holafile", .data = "task :default" });
     try tmp.dir.writeFile(io, .{ .sub_path = "project/Rakefile", .data = "task :default" });
     const nested = try tmp.dir.realPathFileAlloc(io, "project/nested", allocator);
     defer allocator.free(nested);
 
-    var located = (try findRakefile(allocator, io, nested)) orelse return error.TestExpectedRakefile;
+    var located = (try findTaskFile(allocator, io, nested)) orelse return error.TestExpectedHolafile;
     defer located.deinit();
-    try std.testing.expect(std.mem.endsWith(u8, located.path, "/project/Rakefile"));
+    try std.testing.expect(std.mem.endsWith(u8, located.path, "/project/Holafile"));
+    try std.testing.expect(!located.legacy);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "project/nested/Rakefile", .data = "task :default" });
+    var nearest = (try findTaskFile(allocator, io, nested)) orelse return error.TestExpectedRakefile;
+    defer nearest.deinit();
+    try std.testing.expect(std.mem.endsWith(u8, nearest.path, "/project/nested/Rakefile"));
+    try std.testing.expect(nearest.legacy);
+}
+
+test "findTaskFile supports canonical and legacy fallback names" {
+    const allocator = std.testing.allocator;
+    const io = global_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "canonical", .default_dir);
+    try tmp.dir.createDir(io, "legacy", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "canonical/holafile.rb", .data = "task :default" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "legacy/Rakefile.rb", .data = "task :default" });
+
+    const canonical_dir = try tmp.dir.realPathFileAlloc(io, "canonical", allocator);
+    defer allocator.free(canonical_dir);
+    var canonical = (try findTaskFile(allocator, io, canonical_dir)) orelse return error.TestExpectedHolafile;
+    defer canonical.deinit();
+    try std.testing.expect(std.mem.endsWith(u8, canonical.path, "/canonical/holafile.rb"));
+    try std.testing.expect(!canonical.legacy);
+
+    const legacy_dir = try tmp.dir.realPathFileAlloc(io, "legacy", allocator);
+    defer allocator.free(legacy_dir);
+    var legacy = (try findTaskFile(allocator, io, legacy_dir)) orelse return error.TestExpectedRakefile;
+    defer legacy.deinit();
+    try std.testing.expect(std.mem.endsWith(u8, legacy.path, "/legacy/Rakefile.rb"));
+    try std.testing.expect(legacy.legacy);
 }

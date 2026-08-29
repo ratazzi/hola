@@ -170,9 +170,10 @@ If you know Ruby, you already know this. If you don't, you can still read it.
 
 ### Project Tasks with `hola run`
 
-Put a `Rakefile` in a project to define repeatable development tasks. Hola finds it
+Put a `Holafile` in a project to define repeatable development tasks. Hola finds it
 from the current directory or any parent directory, then runs each resource as soon
-as it is declared:
+as it is declared. `holafile.rb` is also canonical; the Rake file names remain as
+legacy fallbacks and emit a migration warning when discovered implicitly:
 
 ```ruby
 directory ".cache"
@@ -207,7 +208,8 @@ hola run -n build                # Dry run
 hola run --trace build           # Trace task invocation
 ```
 
-The embedded task runtime covers the common Rake surface: dependencies, namespaces,
+The embedded mruby task runtime is inspired by Rake rather than compatible with it.
+It covers the common task surface: dependencies, namespaces,
 arguments, task enhancement and re-enabling, `Rake::Task[]`, `file`, `directory`, string
 suffix rules, `Dir.glob`, `FileList`, `rake/clean`, local `require`/
 `require_relative`, `FileUtils`, and streaming `sh` output. In task mode, `file`
@@ -240,7 +242,7 @@ task.
 ```bash
 hola apply             # Run Brewfile + mise.toml + symlinks
 hola provision         # Run provision.rb (advanced)
-hola run [task]        # Run Rake-compatible project tasks
+hola run [task]        # Run Rake-inspired project tasks
 hola <task>            # Shorthand for a project task
 ```
 

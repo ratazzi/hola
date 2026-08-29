@@ -487,7 +487,7 @@ pub const Session = struct {
         // `file` and `directory` are standard Rake task constructors. Keep the
         // provision resource classes available for the explicit
         // Hola::Resources namespace, but remove their top-level methods before
-        // a Rakefile is evaluated.
+        // a task file is evaluated.
         if (opts.mode == .task) {
             try self.mrb.evalString(
                 \\Object.send(:remove_method, :file)

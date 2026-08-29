@@ -14,7 +14,7 @@ GENERATED = "#{DEMO_DIR}/generated.txt"
 RULE_INPUT = "#{DEMO_DIR}/rule.in"
 RULE_OUTPUT = "#{DEMO_DIR}/rule.out"
 
-desc "Remove files created by this Rakefile"
+desc "Remove files created by this Holafile"
 require "rake/clean"
 CLEAN << DEMO_DIR
 

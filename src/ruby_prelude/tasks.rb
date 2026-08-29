@@ -542,7 +542,7 @@ module Hola
           flush_delayed!
           $hola_run_status = 0
         rescue Exception => error
-          puts "rake aborted!"
+          puts "hola aborted!"
           puts error.message
           if error.backtrace
             error.backtrace[0, 8].each { |line| puts line }
@@ -840,7 +840,7 @@ def require(name)
 end
 
 def require_relative(name)
-  current_file = $hola_load_stack.last || $hola_rakefile
+  current_file = $hola_load_stack.last || $hola_taskfile
   base = current_file ? File.dirname(current_file) : Dir.pwd
   hola_load_ruby_file(File.join(base, name.to_s), true)
 end

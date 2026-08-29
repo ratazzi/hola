@@ -116,7 +116,7 @@ fn dispatchCommand(command: []const u8, allocator: std.mem.Allocator, iter: *std
     }
 
     commands.run.runImplicit(allocator, command, iter) catch |err| switch (err) {
-        error.NoRakefile => {
+        error.NoTaskFile => {
             try printMainHelp(command);
             std.process.exit(1);
         },
@@ -159,7 +159,7 @@ fn printMainHelp(unknown: ?[]const u8) !void {
         .{ .command = "dock", .description = "Show current macOS Dock configuration" },
         .{ .command = "applescript", .description = "Execute AppleScript via macOS system API" },
         .{ .command = "provision", .description = "Run infrastructure-as-code scripts" },
-        .{ .command = "run", .description = "Run Rake-compatible project tasks" },
+        .{ .command = "run", .description = "Run Rake-inspired project tasks" },
         .{ .command = "node-info", .description = "Display complete node information (like Chef Ohai)" },
         .{ .command = "apply", .description = "Execute full bootstrap sequence" },
         .{ .command = "agent", .description = "Connect to SSE endpoint and run provision on events" },
