@@ -168,6 +168,60 @@ No YAML hell. No cryptic property lists. Just readable code.
 
 If you know Ruby, you already know this. If you don't, you can still read it.
 
+### Project Tasks with `hola run`
+
+Put a `Rakefile` in a project to define repeatable development tasks. Hola finds it
+from the current directory or any parent directory, then runs each resource as soon
+as it is declared:
+
+```ruby
+directory ".cache"
+
+file ".cache/config" => ".cache" do
+  File.open(".cache/config", "wb") { |file| file.write("ready\n") }
+end
+
+desc "Build the project"
+task :build => ".cache/config" do
+  sh "zig build"
+end
+
+namespace :db do
+  task :migrate, [:environment] do |_task, args|
+    args.with_defaults :environment => "development"
+    sh "./bin/migrate #{args.environment}"
+  end
+end
+
+task :default => :build
+```
+
+```bash
+hola run                         # Run the default task
+hola run build                   # Run an explicit task
+hola build                       # Shorthand when it does not collide with a built-in
+hola run "db:migrate[staging]"   # Pass task arguments
+hola run -T                      # List described tasks
+hola run -P                      # Show prerequisites
+hola run -n build                # Dry run
+hola run --trace build           # Trace task invocation
+```
+
+The embedded task runtime covers the common Rake surface: dependencies, namespaces,
+arguments, task enhancement and re-enabling, `Rake::Task[]`, `file`, `directory`, string
+suffix rules, `Dir.glob`, `FileList`, `rake/clean`, local `require`/
+`require_relative`, `FileUtils`, and streaming `sh` output. In task mode, `file`
+and `directory` always have their standard Rake meanings; `file_task` remains as
+a compatibility alias for `file`. Hola's provision resources are available
+explicitly as `Hola::Resources.file` and `Hola::Resources.directory` when a task
+needs immediate resource convergence.
+
+This is an mruby runtime, not system Ruby. Regular expressions, native gems,
+backticks, `exit`, and the block form of `sh` are unavailable. Use `raise` or
+`abort` to stop a task. Delayed notifications are flushed after all requested
+tasks; subscriptions cannot target resources that are only declared by a later
+task.
+
 ---
 
 ## Performance
@@ -186,6 +240,8 @@ If you know Ruby, you already know this. If you don't, you can still read it.
 ```bash
 hola apply             # Run Brewfile + mise.toml + symlinks
 hola provision         # Run provision.rb (advanced)
+hola run [task]        # Run Rake-compatible project tasks
+hola <task>            # Shorthand for a project task
 ```
 
 ---
