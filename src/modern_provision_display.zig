@@ -247,16 +247,19 @@ pub const ModernProvisionDisplay = struct {
         const succeeded = self.didSucceed();
         const summary = try self.formatSummaryMessage(label, elapsed_s, @intCast(elapsed_ms_part));
         defer self.allocator.free(summary);
-        const base_msg = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ if (succeeded) "✓" else "✗", summary });
-        defer self.allocator.free(base_msg);
-
-        const colored_msg = try self.makeColoredMessage(if (succeeded) .Green else .Red, true, base_msg);
-        try self.download_finished_messages.append(self.allocator, colored_msg);
+        const status_color = if (succeeded) ANSI.BRIGHT_GREEN else ANSI.RED;
+        const message = try std.fmt.allocPrint(self.allocator, "{s}{s}{s} {s}", .{
+            status_color,
+            if (succeeded) "✓" else "✗",
+            ANSI.RESET,
+            summary,
+        });
+        try self.download_finished_messages.append(self.allocator, message);
 
         if (self.timer_spinner) |spinner| {
             const finished_style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{msg}");
             spinner.setStyle(finished_style);
-            spinner.setMessage(colored_msg);
+            spinner.setMessage(message);
             spinner.state.finish();
         }
 
@@ -363,7 +366,7 @@ pub const ModernProvisionDisplay = struct {
         if (std.mem.startsWith(u8, line, "diff --git ") or std.mem.startsWith(u8, line, "index ")) return ANSI.DIM;
         if (std.mem.startsWith(u8, line, "--- ") or std.mem.startsWith(u8, line, "-")) return ANSI.RED;
         if (std.mem.startsWith(u8, line, "+++ ") or std.mem.startsWith(u8, line, "+")) return ANSI.GREEN;
-        if (std.mem.startsWith(u8, line, "@@")) return ANSI.CYAN;
+        if (std.mem.startsWith(u8, line, "@@")) return ANSI.MAGENTA;
         if (std.mem.startsWith(u8, line, "\\ No newline at end of file")) return ANSI.YELLOW;
         return "";
     }
@@ -828,16 +831,10 @@ pub const ModernProvisionDisplay = struct {
     ) !void {
         self.updated_count += 1;
 
-        const suffix: []const u8 = if (skip_reason) |reason|
-            try std.fmt.allocPrint(self.allocator, " ({s})", .{reason})
-        else
-            "";
-        defer if (skip_reason != null) self.allocator.free(suffix);
-
         if (!self.isCompact()) {
             if (self.normal_resource_line_open) {
                 const status = skip_reason orelse "updated";
-                std.debug.print(" {s}({s}){s}\n", .{ self.normalStyle(ANSI.GREEN), status, self.normalStyle(ANSI.RESET) });
+                std.debug.print(" {s}({s}){s}\n", .{ self.normalStyle(ANSI.BRIGHT_GREEN), status, self.normalStyle(ANSI.RESET) });
                 self.normal_resource_line_open = false;
             }
             if (output) |detail| {
@@ -855,12 +852,18 @@ pub const ModernProvisionDisplay = struct {
 
             const base = try self.buildResourceMessage(resource_type, resource_name, "");
             defer self.allocator.free(base);
-            const message = try std.fmt.allocPrint(self.allocator, "{s} action {s}{s}", .{ base, action, suffix });
-            defer self.allocator.free(message);
-            // Add indentation and checkmark icon before the message
-            const base_with_checkmark = try std.fmt.allocPrint(self.allocator, "{s}✓ {s}", .{ INDENT_RESOURCE, message });
-            defer self.allocator.free(base_with_checkmark);
-            const msg = try self.makeColoredMessage(.Green, true, base_with_checkmark);
+            const msg = if (skip_reason) |reason|
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}{s}✓{s} {s} {s}action {s} ({s}){s}",
+                    .{ INDENT_RESOURCE, ANSI.BRIGHT_GREEN, ANSI.RESET, base, ANSI.BRIGHT_GREEN, action, reason, ANSI.RESET },
+                )
+            else
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}{s}✓{s} {s} {s}action {s}{s}",
+                    .{ INDENT_RESOURCE, ANSI.BRIGHT_GREEN, ANSI.RESET, base, ANSI.BRIGHT_GREEN, action, ANSI.RESET },
+                );
             try self.download_finished_messages.append(self.allocator, msg);
 
             const finished_style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{msg}");
@@ -880,7 +883,7 @@ pub const ModernProvisionDisplay = struct {
         if (!self.isCompact()) {
             const reason = skip_reason orelse "up to date";
             if (self.normal_resource_line_open) {
-                std.debug.print(" {s}({s}){s}\n", .{ self.normalStyle(ANSI.CYAN), reason, self.normalStyle(ANSI.RESET) });
+                std.debug.print(" {s}({s}){s}\n", .{ self.normalStyle(ANSI.DIM), reason, self.normalStyle(ANSI.RESET) });
                 self.normal_resource_line_open = false;
             }
             return;
@@ -894,17 +897,16 @@ pub const ModernProvisionDisplay = struct {
             const base = try self.buildResourceMessage(resource_type, resource_name, "");
             defer self.allocator.free(base);
             const reason = skip_reason orelse "up to date";
-            const message = try std.fmt.allocPrint(self.allocator, "{s} action {s} ({s})", .{ base, action, reason });
-            defer self.allocator.free(message);
-            // Add indentation and skip icon (hollow circle) before the message
-            // Use gray color (ANSI Bright Black, code 90) for modern terminals
-            const base_with_icon = try std.fmt.allocPrint(self.allocator, "{s}\x1b[90m○ {s}\x1b[0m", .{ INDENT_RESOURCE, message });
-            // Don't free base_with_icon here - it's stored in download_finished_messages
-            try self.download_finished_messages.append(self.allocator, base_with_icon);
+            const message = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}{s}○{s} {s} action {s} {s}({s}){s}",
+                .{ INDENT_RESOURCE, ANSI.DIM, ANSI.RESET, base, action, ANSI.DIM, reason, ANSI.RESET },
+            );
+            try self.download_finished_messages.append(self.allocator, message);
 
             const finished_style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{msg}");
             spinner.setStyle(finished_style);
-            spinner.setMessage(base_with_icon);
+            spinner.setMessage(message);
             spinner.state.finish();
 
             self.resource_spinner = null;
@@ -1001,15 +1003,15 @@ pub const ModernProvisionDisplay = struct {
         if (!self.isCompact()) {
             self.finishNormalResourceLine();
             printNormalIndent(1);
-            std.debug.print("{s}- notify {s} -> {s} ({s}){s}\n", .{ self.normalStyle(ANSI.CYAN), source_id, target, action, self.normalStyle(ANSI.RESET) });
+            std.debug.print("- notify {s} -> {s} ({s})\n", .{ source_id, target, action });
             self.normal_at_gap = false;
             return;
         }
 
         const message = try std.fmt.allocPrint(
             self.allocator,
-            "{s}  - notify {s} -> {s} ({s}){s}",
-            .{ ANSI.CYAN, source_id, target, action, ANSI.RESET },
+            "  - notify {s} -> {s} ({s})",
+            .{ source_id, target, action },
         );
         try self.addCompactOwnedLine(message);
     }
@@ -1024,15 +1026,17 @@ pub const ModernProvisionDisplay = struct {
         if (!self.isCompact()) {
             self.finishNormalResourceLine();
             const succeeded = !self.run_failed and self.failed_count == 0;
-            std.debug.print("\n{s}Provisioning {s}, {d}/{d} resources updated", .{
-                self.normalStyle(if (succeeded) ANSI.GREEN else ANSI.RED),
+            std.debug.print("\n{s}{s}{s} Provisioning {s}, {d}/{d} resources updated", .{
+                self.normalStyle(if (succeeded) ANSI.BRIGHT_GREEN else ANSI.RED),
+                if (succeeded) "✓" else "✗",
+                self.normalStyle(ANSI.RESET),
                 if (succeeded) "complete" else "failed",
                 self.updated_count,
                 self.executed_count,
             });
             if (self.failed_count > 0) std.debug.print(", {d} failed", .{self.failed_count});
             if (self.handled_failure_count > 0) std.debug.print(", {d} handled failure{s}", .{ self.handled_failure_count, if (self.handled_failure_count == 1) "" else "s" });
-            std.debug.print("{s}\n", .{self.normalStyle(ANSI.RESET)});
+            std.debug.print("\n", .{});
         }
     }
 
@@ -1076,10 +1080,11 @@ pub const ModernProvisionDisplay = struct {
             const elapsed_ms_part = @rem(elapsed_ms, 1000);
             const summary = try self.formatSummaryMessage(label, elapsed_s, @intCast(@abs(elapsed_ms_part)));
             defer self.allocator.free(summary);
-            std.debug.print("\n{s}{s}{s}\n", .{
-                self.normalStyle(if (self.didSucceed()) ANSI.GREEN else ANSI.RED),
-                summary,
+            std.debug.print("\n{s}{s}{s} {s}\n", .{
+                self.normalStyle(if (self.didSucceed()) ANSI.BRIGHT_GREEN else ANSI.RED),
+                if (self.didSucceed()) "✓" else "✗",
                 self.normalStyle(ANSI.RESET),
+                summary,
             });
         } else {
             try self.addCompactGap();
@@ -1201,7 +1206,7 @@ test "unified diff lines use semantic terminal colors" {
     try std.testing.expectEqualStrings(ANSI.RED, ModernProvisionDisplay.diffLineStyle("-old"));
     try std.testing.expectEqualStrings(ANSI.GREEN, ModernProvisionDisplay.diffLineStyle("+++ b/config"));
     try std.testing.expectEqualStrings(ANSI.GREEN, ModernProvisionDisplay.diffLineStyle("+new"));
-    try std.testing.expectEqualStrings(ANSI.CYAN, ModernProvisionDisplay.diffLineStyle("@@ -1 +1 @@"));
+    try std.testing.expectEqualStrings(ANSI.MAGENTA, ModernProvisionDisplay.diffLineStyle("@@ -1 +1 @@"));
     try std.testing.expectEqualStrings("", ModernProvisionDisplay.diffLineStyle(" unchanged"));
 }
 
@@ -1225,6 +1230,7 @@ test "notification heading stays attached to its compact list" {
         display.download_finished_messages.items[0],
         "  - notify file[/tmp/config] -> execute[reload] (run)",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, display.download_finished_messages.items[0], ANSI.CYAN) == null);
 
     try display.showNotificationSection("Delayed notifications");
     try std.testing.expectEqual(@as(usize, 3), display.section_messages.items.len);
@@ -1237,6 +1243,7 @@ test "compact output collapses successful command details" {
     var display = try ModernProvisionDisplay.init(allocator, .compact);
     defer display.deinit();
 
+    display.setTotalResources(1);
     try display.startResource("execute", "build step", "run", 0, &.{});
     try display.showCommand("printf 'successful output\\n'");
     try std.testing.expect(std.mem.indexOf(u8, display.resource_message.?, "$ printf") != null);
@@ -1246,9 +1253,28 @@ test "compact output collapses successful command details" {
 
     try std.testing.expectEqual(@as(usize, 1), display.download_finished_messages.items.len);
     const final_line = display.download_finished_messages.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, final_line, "execute[build step] action run") != null);
+    try std.testing.expectEqualStrings(
+        ANSI.BRIGHT_GREEN ++ "✓" ++ ANSI.RESET ++ " [1/1]  execute[build step] " ++ ANSI.BRIGHT_GREEN ++ "action run" ++ ANSI.RESET,
+        final_line,
+    );
     try std.testing.expect(std.mem.indexOf(u8, final_line, "printf") == null);
     try std.testing.expect(std.mem.indexOf(u8, final_line, "successful output") == null);
+}
+
+test "compact skipped resource colors only its status markers" {
+    const allocator = std.testing.allocator;
+    var display = try ModernProvisionDisplay.init(allocator, .compact);
+    defer display.deinit();
+
+    display.setTotalResources(1);
+    try display.startResource("file", "/tmp/unchanged", "create", 0, &.{});
+    try display.resourceSkipped("file", "/tmp/unchanged", "create", "up to date");
+
+    try std.testing.expectEqual(@as(usize, 1), display.download_finished_messages.items.len);
+    try std.testing.expectEqualStrings(
+        ANSI.DIM ++ "○" ++ ANSI.RESET ++ " [1/1]  file[/tmp/unchanged] action create " ++ ANSI.DIM ++ "(up to date)" ++ ANSI.RESET,
+        display.download_finished_messages.items[0],
+    );
 }
 
 test "compact output expands failed command diagnostics" {

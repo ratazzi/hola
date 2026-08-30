@@ -5,6 +5,7 @@ pub const ANSI = struct {
     pub const DIM = "\x1b[2m";
     pub const RED = "\x1b[31m";
     pub const GREEN = "\x1b[32m";
+    pub const BRIGHT_GREEN = "\x1b[92m";
     pub const YELLOW = "\x1b[33m";
     pub const BLUE = "\x1b[34m";
     pub const MAGENTA = "\x1b[35m";
