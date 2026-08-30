@@ -224,11 +224,13 @@ module Hola
         @last_description = nil
         @rules = []
         @rule_stack = []
+        @phase_tasks = {}
       end
 
       def clear
         @tasks.clear
         @rules.clear
+        @phase_tasks.clear
         @last_description = nil
       end
 
@@ -267,6 +269,20 @@ module Hola
           :action => block,
         }
         nil
+      end
+
+      def define_phase_task(name, source = nil)
+        full_name = name.to_s
+        return @tasks[full_name] if @phase_tasks[full_name]
+        raise "Task '#{full_name}' is already defined and cannot also be a phase" if @tasks[full_name]
+
+        scope = full_name.split(":")[0...-1]
+        description = source ? "Run phase from #{source}" : "Run phase #{full_name}"
+        task = Task.new(self, full_name, [], [], description, scope)
+        task.enhance { Hola::Rake.converge_phase!(full_name) }
+        @tasks[full_name] = task
+        @phase_tasks[full_name] = true
+        task
       end
 
       def in_namespace(name)
@@ -493,6 +509,13 @@ module Hola
         return if dry_run?
         ok, message = ZigBackend.converge
         raise Hola::ResourceError, message unless ok
+      end
+
+      def converge_phase!(name)
+        return if dry_run?
+        ok, message = ZigBackend.converge_phase(name.to_s)
+        raise Hola::ResourceError, message unless ok
+        flush_delayed!
       end
 
       def flush_delayed!
@@ -841,8 +864,49 @@ def require_relative(name)
   hola_load_ruby_file(File.join(base, name.to_s), true)
 end
 
+def hola_with_top_level_resource_dsl
+  installed = []
+  Hola::Resources::DSL_METHODS.each do |name|
+    method_name = name.to_sym
+    original = ("hola_resource_" + name).to_sym
+    available = Object.private_instance_methods.include?(original) || Object.instance_methods.include?(original)
+    next unless available
+    Object.send(:alias_method, method_name, original)
+    Object.send(:private, method_name)
+    installed << method_name
+  end
+  begin
+    yield
+  ensure
+    installed.reverse_each do |method_name|
+      begin
+        Object.send(:remove_method, method_name)
+      rescue NameError
+      end
+    end
+  end
+end
+
 def import(*files)
   files.flatten.each { |path| hola_load_ruby_file(path, false) }
+end
+
+def import_phases(path, options = {})
+  options ||= {}
+  namespace = options[:as] || options["as"]
+  source = File.expand_path(path.to_s)
+  phases = []
+  listener = proc do |name|
+    Hola::Rake.application.define_phase_task(name, source)
+    phases << name unless phases.include?(name)
+  end
+
+  Hola::Phases.with_import(namespace, listener) do
+    hola_with_top_level_resource_dsl do
+      hola_load_ruby_file(source, false)
+    end
+  end
+  phases
 end
 
 Hola::Rake.install_immediate_mode!

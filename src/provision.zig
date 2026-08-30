@@ -24,6 +24,7 @@ const glob = @import("glob.zig");
 pub const Options = struct {
     script_path: []const u8,
     output_mode: modern_display.OutputMode = .normal,
+    phase: ?[]const u8 = null,
     params_json: ?[]const u8 = null, // JSON string for data_bag injection
     secrets_json: ?[]const u8 = null, // JSON string for secrets_bag injection
 };
@@ -31,6 +32,7 @@ pub const Options = struct {
 pub const ResourceResult = struct {
     type_name: []const u8,
     name: []const u8,
+    phase: ?[]const u8 = null,
     action: []const u8,
     was_updated: bool,
     skipped: bool,
@@ -57,6 +59,7 @@ fn freeResourceResults(allocator: std.mem.Allocator, results: *std.ArrayList(Res
     for (results.items) |rr| {
         allocator.free(rr.type_name);
         allocator.free(rr.name);
+        if (rr.phase) |phase| allocator.free(phase);
         allocator.free(rr.action);
         if (rr.skip_reason) |sr| allocator.free(sr);
         if (rr.error_name) |en| allocator.free(en);
@@ -78,6 +81,20 @@ pub const SessionMode = enum {
     task,
 };
 
+pub const ResourceSelection = union(enum) {
+    all,
+    unphased,
+    phase: []const u8,
+
+    fn matches(self: ResourceSelection, resource_phase: ?[]const u8) bool {
+        return switch (self) {
+            .all => true,
+            .unphased => resource_phase == null,
+            .phase => |selected| if (resource_phase) |declared| std.mem.eql(u8, selected, declared) else false,
+        };
+    }
+};
+
 pub const ProvisionRunner = struct {
     allocator: std.mem.Allocator,
     resources: std.ArrayList(resources.ResourceWithMetadata),
@@ -89,6 +106,8 @@ pub const ProvisionRunner = struct {
     converging: bool = false,
     last_failed_index: ?usize = null,
     current_resource_index: ?usize = null,
+    current_declaration_phase: ?[]const u8 = null,
+    phase_names: std.ArrayList([]const u8) = .empty,
     declaration_display_path: std.ArrayList(resources.DisplayScope) = .empty,
     start_time: i128 = 0,
     output: output_channel.LineChannel,
@@ -109,6 +128,9 @@ pub const ProvisionRunner = struct {
         self.delayed_notifications.deinit(self.allocator);
         for (self.declaration_display_path.items) |scope| scope.deinit(self.allocator);
         self.declaration_display_path.deinit(self.allocator);
+        if (self.current_declaration_phase) |phase| self.allocator.free(phase);
+        for (self.phase_names.items) |phase| self.allocator.free(phase);
+        self.phase_names.deinit(self.allocator);
         self.output.deinit();
         for (self.resources.items) |*res| {
             res.deinit(self.allocator);
@@ -134,6 +156,37 @@ pub const ProvisionRunner = struct {
         return results;
     }
 
+    pub fn setDeclarationPhase(self: *ProvisionRunner, phase: ?[]const u8) !void {
+        const next = if (phase) |name| try self.allocator.dupe(u8, name) else null;
+        errdefer if (next) |name| self.allocator.free(name);
+
+        if (phase) |name| {
+            if (!self.hasPhase(name)) {
+                const registered = try self.allocator.dupe(u8, name);
+                errdefer self.allocator.free(registered);
+                try self.phase_names.append(self.allocator, registered);
+            }
+        }
+
+        if (self.current_declaration_phase) |current| self.allocator.free(current);
+        self.current_declaration_phase = next;
+    }
+
+    pub fn hasPhase(self: *const ProvisionRunner, name: []const u8) bool {
+        for (self.phase_names.items) |phase| {
+            if (std.mem.eql(u8, phase, name)) return true;
+        }
+        return false;
+    }
+
+    pub fn countResources(self: *const ProvisionRunner, selection: ResourceSelection) usize {
+        var count: usize = 0;
+        for (self.resources.items) |resource| {
+            if (selection.matches(resource.phase)) count += 1;
+        }
+        return count;
+    }
+
     const ResultFields = struct {
         action: []const u8 = "",
         was_updated: bool = false,
@@ -144,11 +197,13 @@ pub const ProvisionRunner = struct {
         output: ?[]const u8 = null,
     };
 
-    fn recordResult(self: *ProvisionRunner, id: resources.ResourceId, fields: ResultFields) !void {
+    fn recordResult(self: *ProvisionRunner, id: resources.ResourceId, phase_value: ?[]const u8, fields: ResultFields) !void {
         const type_name = try self.allocator.dupe(u8, id.type_name);
         errdefer self.allocator.free(type_name);
         const name = try self.allocator.dupe(u8, id.name);
         errdefer self.allocator.free(name);
+        const phase = if (phase_value) |value| try self.allocator.dupe(u8, value) else null;
+        errdefer if (phase) |value| self.allocator.free(value);
         const action = try self.allocator.dupe(u8, fields.action);
         errdefer self.allocator.free(action);
         const skip_reason = if (fields.skip_reason) |value| try self.allocator.dupe(u8, value) else null;
@@ -163,6 +218,7 @@ pub const ProvisionRunner = struct {
         try self.resource_results.append(self.allocator, .{
             .type_name = type_name,
             .name = name,
+            .phase = phase,
             .action = action,
             .was_updated = fields.was_updated,
             .skipped = fields.skipped,
@@ -243,7 +299,7 @@ pub const ProvisionRunner = struct {
                 .backtrace = base.getProvisionErrorTrace(),
             });
             try display.update();
-            try self.recordResult(res.id, .{
+            try self.recordResult(res.id, res.phase, .{
                 .error_name = @errorName(err),
                 .error_message = detail_msg,
             });
@@ -254,6 +310,11 @@ pub const ProvisionRunner = struct {
             self.last_failed_index = index;
             return err;
         };
+
+        const previous_phase = if (self.current_declaration_phase) |phase| try self.allocator.dupe(u8, phase) else null;
+        defer if (previous_phase) |phase| self.allocator.free(phase);
+        try self.setDeclarationPhase(starting_resource.phase);
+        defer self.setDeclarationPhase(previous_phase) catch {};
 
         self.current_resource_index = index;
         defer self.current_resource_index = null;
@@ -276,7 +337,7 @@ pub const ProvisionRunner = struct {
                 .backtrace = base.getProvisionErrorTrace(),
             });
             try display.update();
-            try self.recordResult(res.id, .{
+            try self.recordResult(res.id, res.phase, .{
                 .error_name = @errorName(err),
                 .error_message = detail_msg,
             });
@@ -298,7 +359,7 @@ pub const ProvisionRunner = struct {
         if (result.was_updated) {
             try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason, result.output);
             try display.update();
-            try self.recordResult(res.id, .{
+            try self.recordResult(res.id, res.phase, .{
                 .action = result.action,
                 .was_updated = true,
                 .skip_reason = result.skip_reason,
@@ -330,24 +391,19 @@ pub const ProvisionRunner = struct {
 
         try display.resourceSkipped(res.id.type_name, res.id.name, result.action, result.skip_reason);
         try display.update();
-        try self.recordResult(res.id, .{
+        try self.recordResult(res.id, res.phase, .{
             .action = result.action,
             .skipped = true,
             .skip_reason = result.skip_reason,
         });
     }
 
-    pub fn convergeFrom(self: *ProvisionRunner, from_index: usize) !void {
-        const display = self.display orelse return error.DisplayNotAttached;
-        const start_index = @max(from_index, self.converged_index);
-        if (start_index >= self.resources.items.len) return;
-
-        self.converging = true;
-        defer self.converging = false;
-
-        // Convert subscriptions on newly declared resources to reverse notifications.
-        var subscriber_index = start_index;
+    fn resolveSubscriptions(self: *ProvisionRunner) !void {
+        var subscriber_index: usize = 0;
         while (subscriber_index < self.resources.items.len) : (subscriber_index += 1) {
+            if (self.resources.items[subscriber_index].subscriptions_resolved) continue;
+            self.resources.items[subscriber_index].subscriptions_resolved = true;
+
             const common = self.resources.items[subscriber_index].resource.getCommonProps();
             for (common.subscriptions.items) |subscription| {
                 const source_id = base.notification.ResourceId.parse(self.allocator, subscription.target_resource_id) catch continue;
@@ -375,6 +431,15 @@ pub const ProvisionRunner = struct {
                 }
             }
         }
+    }
+
+    fn convergeSelection(self: *ProvisionRunner, from_index: usize, selection: ResourceSelection, advance_watermark: bool) !void {
+        const display = self.display orelse return error.DisplayNotAttached;
+        if (from_index >= self.resources.items.len) return;
+
+        self.converging = true;
+        defer self.converging = false;
+        try self.resolveSubscriptions();
 
         var immediate_notifications = std.ArrayList(PendingNotification).empty;
         defer {
@@ -382,11 +447,14 @@ pub const ProvisionRunner = struct {
             immediate_notifications.deinit(self.allocator);
         }
 
-        var index = start_index;
+        var index = from_index;
         while (index < self.resources.items.len) : (index += 1) {
-            // Advance before apply so a failed resource is never retried by a
-            // later incremental converge call.
-            self.converged_index = index + 1;
+            if (advance_watermark) self.converged_index = index + 1;
+            if (self.resources.items[index].converged or !selection.matches(self.resources.items[index].phase)) continue;
+
+            // Mark before apply so a failed resource is never retried by a
+            // later incremental or phase-specific converge call.
+            self.resources.items[index].converged = true;
             try self.applyOne(index, &immediate_notifications);
         }
 
@@ -396,6 +464,19 @@ pub const ProvisionRunner = struct {
                 try processNotification(self.allocator, pending, display);
             }
         }
+    }
+
+    pub fn convergeFrom(self: *ProvisionRunner, from_index: usize) !void {
+        try self.convergeSelection(@max(from_index, self.converged_index), .all, true);
+    }
+
+    pub fn convergeUnphasedFrom(self: *ProvisionRunner, from_index: usize) !void {
+        try self.convergeSelection(@max(from_index, self.converged_index), .unphased, true);
+    }
+
+    pub fn convergePhase(self: *ProvisionRunner, name: []const u8) !void {
+        if (!self.hasPhase(name)) return error.UnknownPhase;
+        try self.convergeSelection(0, .{ .phase = name }, false);
     }
 
     pub fn flushDelayed(self: *ProvisionRunner) !void {
@@ -726,7 +807,18 @@ fn addResourceWithMetadata(
             return mruby.mrb_nil_value();
         };
 
+        const phase = if (runner.current_declaration_phase) |name|
+            allocator.dupe(u8, name) catch {
+                deinitNotifications(allocator, &notifications);
+                id.deinit(allocator);
+                wrapped.deinit(allocator);
+                return mruby.mrb_nil_value();
+            }
+        else
+            null;
+
         const display_path = cloneCurrentDisplayPath(runner) catch {
+            if (phase) |name| allocator.free(name);
             deinitNotifications(allocator, &notifications);
             id.deinit(allocator);
             wrapped.deinit(allocator);
@@ -738,6 +830,7 @@ fn addResourceWithMetadata(
             .resource = wrapped,
             .id = id,
             .notifications = notifications,
+            .phase = phase,
             .display_depth = currentDisplayDepth(runner),
             .display_path = display_path,
         };
@@ -1307,6 +1400,21 @@ fn statusPair(mrb: *mruby.mrb_state, ok: bool, message: ?[]const u8) mruby.mrb_v
     return pair;
 }
 
+fn convergeErrorStatus(mrb: *mruby.mrb_state, runner: *ProvisionRunner, err: anyerror) mruby.mrb_value {
+    const detail = base.getProvisionErrorDetail() orelse base.userFacingError(err);
+    if (runner.last_failed_index) |index| {
+        if (index < runner.resources.items.len) {
+            const id = runner.resources.items[index].id;
+            const message = std.fmt.allocPrint(runner.allocator, "{s}[{s}]: {s}", .{ id.type_name, id.name, detail }) catch {
+                return statusPair(mrb, false, detail);
+            };
+            defer runner.allocator.free(message);
+            return statusPair(mrb, false, message);
+        }
+    }
+    return statusPair(mrb, false, detail);
+}
+
 export fn zig_converge(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
     _ = self_value;
     const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
@@ -1317,26 +1425,64 @@ export fn zig_converge(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callc
 
     const arena_index = mruby.zig_mrb_gc_arena_save(mrb);
     const converge_error: ?anyerror = blk: {
-        runner.convergeFrom(runner.converged_index) catch |err| break :blk err;
+        runner.convergeUnphasedFrom(runner.converged_index) catch |err| break :blk err;
         break :blk null;
     };
     mruby.zig_mrb_gc_arena_restore(mrb, arena_index);
 
-    if (converge_error) |err| {
-        const detail = base.getProvisionErrorDetail() orelse base.userFacingError(err);
-        if (runner.last_failed_index) |index| {
-            if (index < runner.resources.items.len) {
-                const id = runner.resources.items[index].id;
-                const message = std.fmt.allocPrint(runner.allocator, "{s}[{s}]: {s}", .{ id.type_name, id.name, detail }) catch {
-                    return statusPair(mrb, false, detail);
-                };
-                defer runner.allocator.free(message);
-                return statusPair(mrb, false, message);
-            }
-        }
-        return statusPair(mrb, false, detail);
-    }
+    if (converge_error) |err| return convergeErrorStatus(mrb, runner, err);
     return statusPair(mrb, true, null);
+}
+
+export fn zig_converge_phase(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var name_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &name_value) != 1) return statusPair(mrb, false, "converge_phase expects one phase name");
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    if (runner.display == null) return statusPair(mrb, false, "provision display is not attached");
+    if (runner.converging) return statusPair(mrb, true, null);
+
+    const name = std.mem.span(mruby.mrb_str_to_cstr(mrb, name_value));
+    if (!runner.hasPhase(name)) {
+        const message = std.fmt.allocPrint(runner.allocator, "unknown phase '{s}'", .{name}) catch return statusPair(mrb, false, "unknown phase");
+        defer runner.allocator.free(message);
+        return statusPair(mrb, false, message);
+    }
+
+    const arena_index = mruby.zig_mrb_gc_arena_save(mrb);
+    const converge_error: ?anyerror = blk: {
+        runner.convergePhase(name) catch |err| break :blk err;
+        break :blk null;
+    };
+    mruby.zig_mrb_gc_arena_restore(mrb, arena_index);
+
+    if (converge_error) |err| return convergeErrorStatus(mrb, runner, err);
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_select_phase(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var name_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "S", &name_value) != 1) return statusPair(mrb, false, "phase expects one name");
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    const name = std.mem.span(mruby.mrb_str_to_cstr(mrb, name_value));
+    if (name.len == 0) return statusPair(mrb, false, "phase name cannot be empty");
+    runner.setDeclarationPhase(name) catch return statusPair(mrb, false, "out of memory selecting phase");
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_clear_phase(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    runner.setDeclarationPhase(null) catch return statusPair(mrb, false, "out of memory clearing phase");
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_current_phase(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return mruby.mrb_nil_value();
+    const phase = runner.current_declaration_phase orelse return mruby.mrb_nil_value();
+    return mruby.mrb_str_new(mrb, phase.ptr, @intCast(phase.len));
 }
 
 export fn zig_flush_delayed(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
@@ -1477,7 +1623,11 @@ export fn zig_load_file(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) call
 fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass) void {
     const bindings = [_]ResourceBinding{
         .{ .name = "converge", .handler = zig_converge, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "converge_phase", .handler = zig_converge_phase, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "flush_delayed", .handler = zig_flush_delayed, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "select_phase", .handler = zig_select_phase, .args_spec = mruby.MRB_ARGS_REQ(1) },
+        .{ .name = "clear_phase", .handler = zig_clear_phase, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "current_phase", .handler = zig_current_phase, .args_spec = mruby.MRB_ARGS_NONE() },
         .{ .name = "failure_checkpoint", .handler = zig_failure_checkpoint, .args_spec = mruby.MRB_ARGS_NONE() },
         .{ .name = "handle_failures_since", .handler = zig_handle_failures_since, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "display_section", .handler = zig_display_section, .args_spec = mruby.MRB_ARGS_REQ(1) },
@@ -1583,6 +1733,18 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     try session.evalScript(opts.script_path);
 
     const runner = &session.runner;
+    const selection: ResourceSelection = if (opts.phase) |phase| blk: {
+        if (!runner.hasPhase(phase)) {
+            std.debug.print("Unknown phase '{s}'.", .{phase});
+            if (runner.phase_names.items.len > 0) {
+                std.debug.print(" Available phases:", .{});
+                for (runner.phase_names.items) |name| std.debug.print(" {s}", .{name});
+            }
+            std.debug.print("\n", .{});
+            return error.UnknownPhase;
+        }
+        break :blk .{ .phase = phase };
+    } else .all;
     runner.start_time = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
 
     // Initialize modern display with the specified output mode
@@ -1593,10 +1755,16 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     defer runner.detachDisplay();
 
     // Show section header
-    try display.showSection("Applying configuration");
+    if (opts.phase) |phase| {
+        const heading = try std.fmt.allocPrint(allocator, "Applying phase: {s}", .{phase});
+        defer allocator.free(heading);
+        try display.showSection(heading);
+    } else {
+        try display.showSection("Applying configuration");
+    }
 
     // Set total number of resources for progress display
-    display.setTotalResources(runner.resources.items.len);
+    display.setTotalResources(runner.countResources(selection));
 
     // Phase 0: Start parallel downloads for remote files
     // Initialize download manager with the specified output mode
@@ -1667,6 +1835,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     // Collect all remote_file resources for parallel download
     // Only pre-download simple files (no conditions like only_if/not_if, and action is :create)
     for (runner.resources.items) |*res| {
+        if (!selection.matches(res.phase)) continue;
         if (res.resource == .remote_file) {
             const remote_res = &res.resource.remote_file;
 
@@ -1781,7 +1950,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
 
     // Start the real-time timer spinner (after all download spinners are created)
     try display.startTimer(runner.start_time);
-    try runner.convergeFrom(0);
+    if (opts.phase) |phase| {
+        try runner.convergePhase(phase);
+    } else {
+        try runner.convergeFrom(0);
+    }
     try runner.flushDelayed();
 
     // Wait for download thread to complete
@@ -1888,6 +2061,193 @@ test "composite resource display scope unwinds after a Ruby exception" {
     const sibling = session.runner.resources.items[0];
     try std.testing.expectEqual(@as(usize, 0), sibling.display_depth);
     try std.testing.expectEqual(@as(usize, 0), sibling.display_path.len);
+}
+
+test "phase marker tags following resources and block form restores declaration state" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+
+    try session.evalString(
+        \\execute('unphased') { action :nothing }
+        \\phase :prepare
+        \\execute('prepare-one') { action :nothing }
+        \\phase :deploy do
+        \\  execute('deploy-one') { action :nothing }
+        \\end
+        \\execute('prepare-two') { action :nothing }
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), session.runner.resources.items.len);
+    try std.testing.expect(session.runner.resources.items[0].phase == null);
+    try std.testing.expectEqualStrings("prepare", session.runner.resources.items[1].phase.?);
+    try std.testing.expectEqualStrings("deploy", session.runner.resources.items[2].phase.?);
+    try std.testing.expectEqualStrings("prepare", session.runner.resources.items[3].phase.?);
+    try std.testing.expectEqual(@as(usize, 2), session.runner.phase_names.items.len);
+    try std.testing.expectEqualStrings("prepare", session.runner.phase_names.items[0]);
+    try std.testing.expectEqualStrings("deploy", session.runner.phase_names.items[1]);
+}
+
+test "dynamic resources inherit the executing phase and nested phase blocks restore it" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+
+    try session.evalString(
+        \\phase :prepare
+        \\ruby_block 'declare phase children' do
+        \\  block do
+        \\    execute('prepare-before') { action :nothing }
+        \\    phase :nested do
+        \\      execute('nested-child') { action :nothing }
+        \\    end
+        \\    execute('prepare-after') { action :nothing }
+        \\  end
+        \\end
+        \\phase :deploy
+        \\execute('deploy-resource') { action :nothing }
+    );
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    try session.runner.convergePhase("prepare");
+
+    try std.testing.expectEqual(@as(usize, 5), session.runner.resources.items.len);
+    try std.testing.expectEqualStrings("prepare", session.runner.resources.items[2].phase.?);
+    try std.testing.expectEqualStrings("nested", session.runner.resources.items[3].phase.?);
+    try std.testing.expectEqualStrings("prepare", session.runner.resources.items[4].phase.?);
+    try std.testing.expect(session.runner.resources.items[2].converged);
+    try std.testing.expect(!session.runner.resources.items[3].converged);
+    try std.testing.expect(session.runner.resources.items[4].converged);
+}
+
+test "unphased and named phase resources converge independently" {
+    const allocator = std.testing.allocator;
+    const io = global_io.io();
+    json.setAllocator(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const shared_path = try std.fs.path.join(allocator, &.{ root, "shared.txt" });
+    defer allocator.free(shared_path);
+    const prepare_path = try std.fs.path.join(allocator, &.{ root, "prepare.txt" });
+    defer allocator.free(prepare_path);
+    const deploy_path = try std.fs.path.join(allocator, &.{ root, "deploy.txt" });
+    defer allocator.free(deploy_path);
+
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    const script = try std.fmt.allocPrint(allocator,
+        \\file '{s}' do
+        \\  content 'shared'
+        \\end
+        \\phase :prepare
+        \\file '{s}' do
+        \\  content 'prepare'
+        \\end
+        \\phase :deploy
+        \\file '{s}' do
+        \\  content 'deploy'
+        \\end
+    , .{ shared_path, prepare_path, deploy_path });
+    defer allocator.free(script);
+    try session.evalString(script);
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    display.setTotalResources(3);
+
+    try session.runner.convergeUnphasedFrom(0);
+    try std.Io.Dir.cwd().access(io, shared_path, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, prepare_path, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, deploy_path, .{}));
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resource_results.items.len);
+
+    try session.runner.convergePhase("prepare");
+    try std.Io.Dir.cwd().access(io, prepare_path, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, deploy_path, .{}));
+    try std.testing.expectEqual(@as(usize, 2), session.runner.resource_results.items.len);
+    try std.testing.expectEqualStrings("prepare", session.runner.resource_results.items[1].phase.?);
+
+    try session.runner.convergePhase("prepare");
+    try std.testing.expectEqual(@as(usize, 2), session.runner.resource_results.items.len);
+    try session.runner.convergePhase("deploy");
+    try std.Io.Dir.cwd().access(io, deploy_path, .{});
+    try std.testing.expectEqual(@as(usize, 3), session.runner.resource_results.items.len);
+    try std.testing.expectError(error.UnknownPhase, session.runner.convergePhase("missing"));
+}
+
+test "Holafile imports phases as tasks without leaking the resource DSL" {
+    const allocator = std.testing.allocator;
+    const io = global_io.io();
+    json.setAllocator(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(root);
+    const recipe_path = try std.fs.path.join(allocator, &.{ root, "deploy.rb" });
+    defer allocator.free(recipe_path);
+    const prepare_path = try std.fs.path.join(allocator, &.{ root, "prepared.txt" });
+    defer allocator.free(prepare_path);
+    const deploy_path = try std.fs.path.join(allocator, &.{ root, "deployed.txt" });
+    defer allocator.free(deploy_path);
+
+    const recipe = try std.fmt.allocPrint(allocator,
+        \\phase :prepare
+        \\file '{s}' do
+        \\  content 'prepared'
+        \\end
+        \\phase :deploy
+        \\file '{s}' do
+        \\  content 'deployed'
+        \\end
+    , .{ prepare_path, deploy_path });
+    defer allocator.free(recipe);
+    try tmp.dir.writeFile(io, .{ .sub_path = "deploy.rb", .data = recipe });
+
+    const session = try Session.open(allocator, .{ .mode = .task });
+    defer session.close();
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    session.runner.start_time = std.Io.Timestamp.now(io, .real).toNanoseconds();
+    try display.startTimer(session.runner.start_time);
+    try session.loadTaskPrelude();
+
+    const holafile = try std.fmt.allocPrint(allocator,
+        \\$imported_phases = import_phases('{s}', :as => :app)
+        \\file 'still-a-rake-file-task'
+        \\task :workflow => 'app:prepare'
+        \\$hola_run_argv = ['workflow']
+        \\Hola::Rake.main
+        \\$phase_import_ok = $imported_phases == ['app:prepare', 'app:deploy'] &&
+        \\  Rake::Task.task_defined?('app:prepare') &&
+        \\  Rake::Task.task_defined?('app:deploy') &&
+        \\  Rake::Task[:'still-a-rake-file-task'].is_a?(Rake::FileTask)
+    , .{recipe_path});
+    defer allocator.free(holafile);
+    try session.evalString(holafile);
+
+    try std.testing.expect(mruby.mrb_test(session.mrb.getGlobal("$phase_import_ok")));
+    try std.testing.expect(session.runner.current_declaration_phase == null);
+    try std.testing.expectEqual(@as(usize, 2), session.runner.resources.items.len);
+    try std.testing.expectEqualStrings("app:prepare", session.runner.resources.items[0].phase.?);
+    try std.testing.expectEqualStrings("app:deploy", session.runner.resources.items[1].phase.?);
+    try std.Io.Dir.cwd().access(io, prepare_path, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, deploy_path, .{}));
+
+    try session.evalString("Rake::Task['app:deploy'].invoke");
+    try std.Io.Dir.cwd().access(io, deploy_path, .{});
 }
 
 test "resources declared while applying inherit the parent display depth" {

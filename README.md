@@ -246,6 +246,56 @@ one stable namespace without forcing every call site to repeat the long prefix.
 Provision scripts retain their existing top-level resource DSL and may also use the
 namespace.
 
+#### Reusable provisioning phases
+
+A provisioning recipe may split its flat resource stream with `phase` markers.
+The marker changes the declaration context for the resources that follow it; it
+does not add another Ruby block or another output indentation level:
+
+```ruby
+# scripts/deploy.rb
+phase :prepare
+
+git "/srv/app/releases/next" do
+  repository "https://example.com/app.git"
+end
+
+execute "build application"
+
+phase :deploy
+
+link "/srv/app/current" do
+  to "/srv/app/releases/next"
+end
+
+execute "restart application"
+```
+
+The same recipe supports a complete unattended run or a single operator-selected
+stage:
+
+```bash
+hola provision scripts/deploy.rb
+hola provision --phase prepare scripts/deploy.rb
+hola provision --phase deploy scripts/deploy.rb
+```
+
+A Holafile can import those phases as namespaced tasks. No duplicate mise tasks or
+wrapper scripts are required:
+
+```ruby
+import_phases "scripts/deploy.rb", :as => :app
+
+task :release => ["app:prepare", "app:deploy"]
+task :default => :release
+```
+
+`hola run app:prepare` executes one phase, while `hola run release` composes both.
+Imported phases also appear in `hola run -T`. Recipes without a `phase` marker keep
+the existing flat provisioning behavior and the Chef-compatible top-level resource
+style. Agent tasks may provide an optional `"phase"` field; resource callback
+results include their phase name.
+
 This is an mruby runtime, not system Ruby. Regular expressions, native gems,
 backticks, `exit`, and the block form of `sh` are unavailable. Use `raise` or
 `abort` to stop a task. Delayed notifications are flushed after all requested

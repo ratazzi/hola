@@ -304,6 +304,7 @@ fn printHelp() !void {
         \\Examples:
         \\  hola run
         \\  hola run build
+        \\  hola run app:prepare        # Phase imported by the Holafile
         \\  hola run "db:migrate[production]"
         \\  hola build                 # implicit task fallback
         \\
@@ -311,6 +312,7 @@ fn printHelp() !void {
         \\  Top-level file and directory use standard Rake semantics. Enter the
         \\  resource DSL with resources.<name> or a resources do ... end block.
         \\  The stable underlying API is Hola::Resources.<name>.
+        \\  import_phases "recipe.rb", :as => :app exposes recipe phases as tasks.
         \\  file_task remains available as a compatibility alias for file.
         \\  Dir.glob, FileList, suffix rules, local require/require_relative, and
         \\  rake/clean are supported. Regexp, native gems, backticks, exit, and the

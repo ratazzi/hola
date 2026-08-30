@@ -47,4 +47,74 @@ module Hola
       DSL_METHODS << name
     end
   end
+
+  module Phases
+    @namespace = nil
+    @listener = nil
+
+    class << self
+      def current
+        ZigBackend.current_phase
+      end
+
+      def select(name)
+        value = name.to_s
+        raise ArgumentError, "phase name cannot be empty" if value.empty?
+        qualified = @namespace && !@namespace.empty? ? "#{@namespace}:#{value}" : value
+        set_raw(qualified)
+        @listener.call(qualified) if @listener
+        qualified
+      end
+
+      def restore(name)
+        set_raw(name)
+      end
+
+      def with_import(namespace = nil, listener = nil)
+        previous_current = current
+        previous_namespace = @namespace
+        previous_listener = @listener
+        prefix = []
+        prefix << previous_namespace if previous_namespace && !previous_namespace.empty?
+        prefix << namespace.to_s if namespace && !namespace.to_s.empty?
+        @namespace = prefix.join(":")
+        @listener = listener
+        set_raw(nil)
+        begin
+          yield
+        ensure
+          @namespace = previous_namespace
+          @listener = previous_listener
+          set_raw(previous_current)
+        end
+      end
+
+      private
+
+      def set_raw(name)
+        ok, message = name ? ZigBackend.select_phase(name.to_s) : ZigBackend.clear_phase
+        raise message unless ok
+      end
+    end
+  end
 end
+
+module Hola
+  module PhaseDSL
+    def phase(name, &block)
+      previous = Hola::Phases.current
+      selected = Hola::Phases.select(name)
+      return selected unless block
+      begin
+        block.call
+      ensure
+        Hola::Phases.restore(previous)
+      end
+      selected
+    end
+
+    private :phase
+  end
+end
+
+Object.send(:include, Hola::PhaseDSL)

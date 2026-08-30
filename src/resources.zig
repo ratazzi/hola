@@ -108,6 +108,9 @@ pub const ResourceWithMetadata = struct {
     resource: Resource,
     id: ResourceId,
     notifications: std.ArrayList(Notification),
+    phase: ?[]const u8 = null,
+    converged: bool = false,
+    subscriptions_resolved: bool = false,
     was_updated: bool = false, // Track if resource was changed
     display_depth: usize = 0,
     display_path: []DisplayScope = &.{},
@@ -119,6 +122,7 @@ pub const ResourceWithMetadata = struct {
             notif.deinit(allocator);
         }
         self.notifications.deinit(allocator);
+        if (self.phase) |phase| allocator.free(phase);
         for (self.display_path) |scope| scope.deinit(allocator);
         if (self.display_path.len > 0) allocator.free(self.display_path);
     }

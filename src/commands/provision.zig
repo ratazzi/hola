@@ -10,6 +10,7 @@ const base_resource = @import("../base_resource.zig");
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
     \\-o, --output <MODE>   Output mode: normal (default) or compact
+    \\    --phase <NAME>     Execute only the named phase
     \\    --data-bag <JSON>        JSON string to inject as data_bag
     \\    --data-bag-url <URL>     Fetch data_bag JSON from URL
     \\    --secrets-bag <JSON>     JSON string to inject as secrets_bag
@@ -23,6 +24,7 @@ const params = clap.parseParamsComptime(
 const parsers = .{
     .path = clap.parsers.string,
     .MODE = clap.parsers.string,
+    .NAME = clap.parsers.string,
     .JSON = clap.parsers.string,
     .PATH = clap.parsers.string,
     .URL = clap.parsers.string,
@@ -33,7 +35,7 @@ const parsers = .{
 /// params_json: optional JSON string to inject as data_bag (agent mode).
 pub const TlsClientAuth = common.TlsClientAuth;
 
-pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, output_mode: modern_display.OutputMode, params_json: ?[]const u8, secrets_json: ?[]const u8, tls_auth: TlsClientAuth) !provision.ProvisionResult {
+pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, output_mode: modern_display.OutputMode, params_json: ?[]const u8, secrets_json: ?[]const u8, tls_auth: TlsClientAuth, phase: ?[]const u8) !provision.ProvisionResult {
     const is_url = std.mem.startsWith(u8, script_path_or_url, "http://") or
         std.mem.startsWith(u8, script_path_or_url, "https://");
 
@@ -120,6 +122,7 @@ pub fn runScript(allocator: std.mem.Allocator, script_path_or_url: []const u8, o
     return try provision.run(allocator, .{
         .script_path = script_path,
         .output_mode = output_mode,
+        .phase = phase,
         .params_json = params_json,
         .secrets_json = secrets_json,
     });
@@ -152,7 +155,8 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
     });
     defer bags.deinit();
 
-    var result = runScript(allocator, script_path_or_url, output_mode, bags.data_bag, bags.secrets_bag, bags.tls_auth) catch |err| {
+    var result = runScript(allocator, script_path_or_url, output_mode, bags.data_bag, bags.secrets_bag, bags.tls_auth, res.args.phase) catch |err| {
+        if (err == error.UnknownPhase) std.process.exit(1);
         if (err == error.MRubyException) {
             if (logger.getLogPath()) |log_path| {
                 std.debug.print("\nLog file: {s}\n", .{log_path});
@@ -184,6 +188,7 @@ fn printHelp(reason: ?[]const u8) !void {
         \\
         \\Options:
         \\  -o, --output MODE          Output mode: normal (default) or compact
+        \\      --phase NAME           Execute only the named phase
         \\      --data-bag JSON        JSON string to inject as data_bag
         \\      --data-bag-url URL     Fetch data_bag JSON from URL
         \\      --secrets-bag JSON     JSON string to inject as secrets_bag
@@ -211,6 +216,7 @@ fn printHelp(reason: ?[]const u8) !void {
         \\
         \\  # With output mode
         \\  hola provision --output compact provision.rb
+        \\  hola provision --phase deploy scripts/deploy.rb
         \\
         \\Ruby DSL:
         \\  file \"/tmp/config\" do
