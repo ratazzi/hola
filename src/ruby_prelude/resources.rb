@@ -11,6 +11,18 @@ module Hola
     @receiver = Object.new
 
     class << self
+      # Give Ruby-only composite resources a stable parent row in normal output.
+      # Every resource declared inside the block inherits this display path.
+      def with_resource_scope(type, name, action = :run)
+        ok, message = ZigBackend.begin_resource_scope(type.to_s, name.to_s, action.to_s)
+        raise message unless ok
+        begin
+          yield
+        ensure
+          ZigBackend.end_resource_scope
+        end
+      end
+
       def register(method_name, original_name)
         resources_class = class << self; self; end
         resources_class.send(:define_method, method_name) do |*args, &block|

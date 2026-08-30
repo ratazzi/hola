@@ -14,7 +14,7 @@ const params = clap.parseParamsComptime(
     \\-P, --prerequisites          Show task prerequisites
     \\-n, --dry-run                Show tasks without executing actions
     \\-t, --trace                  Trace task invocation and execution
-    \\-o, --output <MODE>          Output mode: pretty or plain
+    \\-o, --output <MODE>          Output mode: normal (default) or compact
     \\    --data-bag <JSON>        JSON string to inject as data_bag
     \\    --data-bag-url <URL>     Fetch data_bag JSON from URL
     \\    --secrets-bag <JSON>     JSON string to inject as secrets_bag
@@ -143,7 +143,7 @@ fn fromParsed(parsed: anytype) RunArgs {
 
 fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]const u8) !u8 {
     const io = global_io.io();
-    const use_pretty_output = try common.parseOutputMode(args.output);
+    const output_mode = try common.parseOutputMode(args.output);
     var bags = try common.resolveBags(allocator, .{
         .data_bag = args.data_bag,
         .data_bag_url = args.data_bag_url,
@@ -192,7 +192,7 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
     session.mrb.setGlobal("$hola_run_prerequisites", if (args.list_prerequisites) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
     session.mrb.setGlobal("$hola_run_dry", if (args.dry_run) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
     session.mrb.setGlobal("$hola_run_trace", if (args.trace) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
-    session.mrb.setGlobal("$hola_run_pretty", if (use_pretty_output) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
+    session.mrb.setGlobal("$hola_run_pretty", if (output_mode == .compact) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
     session.mrb.setGlobal("$hola_run_capture_output", if (!args.list_tasks and !args.list_prerequisites) mruby.zig_mrb_true_value() else mruby.zig_mrb_false_value());
     try session.loadTaskPrelude();
 
@@ -202,7 +202,7 @@ fn runWithArgs(allocator: std.mem.Allocator, args: RunArgs, leading_task: ?[]con
 
     var display: ?modern_display.ModernProvisionDisplay = null;
     if (!args.list_tasks and !args.list_prerequisites) {
-        display = try modern_display.ModernProvisionDisplay.init(allocator, use_pretty_output);
+        display = try modern_display.ModernProvisionDisplay.init(allocator, output_mode);
         session.runner.attachDisplay(&display.?);
         display.?.setTotalResources(0);
         session.runner.start_time = std.Io.Timestamp.now(io, .real).toNanoseconds();
@@ -293,7 +293,7 @@ fn printHelp() !void {
         \\  -P, --prerequisites  Show task prerequisites
         \\  -n, --dry-run        Trace tasks without executing their actions
         \\  -t, --trace          Trace task invocation and execution
-        \\  -o, --output MODE    Output mode: pretty or plain
+        \\  -o, --output MODE    Output mode: normal (default) or compact
         \\      --data-bag JSON        Inject data_bag JSON
         \\      --data-bag-url URL     Fetch data_bag JSON
         \\      --secrets-bag JSON     Inject secrets_bag JSON

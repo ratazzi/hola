@@ -89,7 +89,10 @@ pub const Resource = struct {
 
     fn applyCreate(self: Resource) !bool {
         // Read template file
-        const template_content = try readTemplateFile(self.source);
+        const template_content = readTemplateFile(self.source) catch |err| {
+            base.recordProvisionErrorDetail("template source templates/{s}: {s}", .{ self.source, base.userFacingError(err) });
+            return err;
+        };
         defer std.heap.c_allocator.free(template_content);
 
         // Render template using mruby

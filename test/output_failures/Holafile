@@ -1,0 +1,109 @@
+ROOT = "/tmp/hola-output-failures/task"
+READ_ONLY_DIR = "#{ROOT}/read-only"
+PARENT_FILE = "#{ROOT}/parent-is-a-file"
+
+desc "Run the complete handled-error diagnostic flow"
+task :diagnostics do
+  rm_rf ROOT
+
+  resources.directory ROOT do
+    recursive true
+    mode "0755"
+  end
+
+  resources.file PARENT_FILE do
+    content "this path is intentionally a regular file\n"
+  end
+
+  resources.directory READ_ONLY_DIR do
+    recursive true
+    mode "0555"
+  end
+
+  resources.execute "non-zero command with captured output" do
+    command "printf 'compile started\\n'; printf 'main.c:42:7: error: expected semicolon\\n' >&2; exit 7"
+    live_stream true
+    ignore_failure true
+  end
+
+  resources.execute "missing command" do
+    command "/definitely/missing/hola-command --version"
+    ignore_failure true
+  end
+
+  resources.execute "timed out command" do
+    command "printf 'starting slow step\\n'; sleep 3"
+    live_stream true
+    timeout 1
+    ignore_failure true
+  end
+
+  resources.execute "missing parent working directory" do
+    command "pwd"
+    cwd "#{ROOT}/missing-parent/worktree"
+    ignore_failure true
+  end
+
+  resources.template "#{ROOT}/rendered.conf" do
+    source "definitely-missing-template.erb"
+    variables "environment" => "test"
+    ignore_failure true
+  end
+
+  resources.file "#{PARENT_FILE}/child.txt" do
+    content "cannot be created\n"
+    ignore_failure true
+  end
+
+  resources.file "#{READ_ONLY_DIR}/cannot-write.txt" do
+    content "cannot be written\n"
+    ignore_failure true
+  end
+
+  # Restore permissions so the fixture can always be removed by the next run.
+  resources.directory READ_ONLY_DIR do
+    mode "0755"
+  end
+
+  resources.ruby_block "raise from authoring code" do
+    block do
+      raise "simulated Ruby failure from Holafile"
+    end
+    ignore_failure true
+  end
+
+  Hola::Resources.with_resource_scope "build_bundle", "demo application", :create do
+    Hola::Resources.execute "nested compilation failure" do
+      command "printf 'nested stdout\\n'; printf 'nested stderr\\n' >&2; exit 23"
+      live_stream true
+      ignore_failure true
+    end
+  end
+
+  begin
+    sh "printf 'rescued failure\\n' >&2; exit 11"
+  rescue Hola::ResourceError => error
+    puts "rescued by task: #{error.message}"
+  end
+
+  resources.execute "guarded command" do
+    command "exit 99"
+    only_if { false }
+  end
+
+  resources.file PARENT_FILE do
+    content "this path is intentionally a regular file\n"
+  end
+end
+
+desc "Abort on an unhandled nested resource failure"
+task :abort do
+  Hola::Resources.with_resource_scope "build_bundle", "fatal demo application", :create do
+    Hola::Resources.execute "fatal nested packaging step" do
+      command "printf 'packaging started\\n'; printf 'package input is missing\\n' >&2; exit 29"
+      live_stream true
+    end
+  end
+end
+
+task :default => :diagnostics

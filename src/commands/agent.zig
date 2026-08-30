@@ -201,7 +201,7 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
 
     // Only pass mTLS credentials if script URL matches agent endpoint origin
     const use_tls_for_download = originMatches(url, endpoint);
-    var prov_result = provision_cmd.runScript(allocator, url, false, params_json, secrets_json, .{
+    var prov_result = provision_cmd.runScript(allocator, url, .normal, params_json, secrets_json, .{
         .cert = if (use_tls_for_download) tls_auth.cert else null,
         .key = if (use_tls_for_download) tls_auth.key else null,
     }) catch |err| {

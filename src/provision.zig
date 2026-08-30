@@ -23,7 +23,7 @@ const glob = @import("glob.zig");
 
 pub const Options = struct {
     script_path: []const u8,
-    use_pretty_output: bool = true, // Default to pretty output
+    output_mode: modern_display.OutputMode = .normal,
     params_json: ?[]const u8 = null, // JSON string for data_bag injection
     secrets_json: ?[]const u8 = null, // JSON string for secrets_bag injection
 };
@@ -88,6 +88,8 @@ pub const ProvisionRunner = struct {
     converged_index: usize = 0,
     converging: bool = false,
     last_failed_index: ?usize = null,
+    current_resource_index: ?usize = null,
+    declaration_display_path: std.ArrayList(resources.DisplayScope) = .empty,
     start_time: i128 = 0,
     output: output_channel.LineChannel,
 
@@ -105,6 +107,8 @@ pub const ProvisionRunner = struct {
             self.allocator.free(pending.source_id);
         }
         self.delayed_notifications.deinit(self.allocator);
+        for (self.declaration_display_path.items) |scope| scope.deinit(self.allocator);
+        self.declaration_display_path.deinit(self.allocator);
         self.output.deinit();
         for (self.resources.items) |*res| {
             res.deinit(self.allocator);
@@ -208,34 +212,79 @@ pub const ProvisionRunner = struct {
         base.clearProvisionErrorDetail();
         self.last_failed_index = null;
 
-        try display.startResource(self.resources.items[index].id.type_name, self.resources.items[index].id.name);
+        const starting_resource = &self.resources.items[index];
+        try display.startResource(
+            starting_resource.id.type_name,
+            starting_resource.id.name,
+            starting_resource.resource.getActionName(),
+            starting_resource.display_depth,
+            starting_resource.display_path,
+        );
+        if (starting_resource.resource.getCommand()) |command| {
+            try display.showCommand(command);
+        }
         try display.update();
         self.waitForDownload(index) catch |err| {
             const res = &self.resources.items[index];
             const detail_msg = base.getProvisionErrorDetail();
-            const error_display = detail_msg orelse @errorName(err);
-            try display.resourceError(res.id.type_name, res.id.name, error_display);
+            const error_display = detail_msg orelse base.userFacingError(err);
+            const diagnostic = base.getCommandDiagnostic();
+            const failure_checkpoint = display.failureCheckpoint();
+            try display.resourceError(.{
+                .resource_type = res.id.type_name,
+                .resource_name = res.id.name,
+                .action = res.resource.getActionName(),
+                .depth = res.display_depth,
+                .error_name = base.userFacingError(err),
+                .message = error_display,
+                .command = res.resource.getCommand(),
+                .stdout = if (diagnostic) |value| value.stdout else null,
+                .stderr = if (diagnostic) |value| value.stderr else null,
+                .backtrace = base.getProvisionErrorTrace(),
+            });
             try display.update();
             try self.recordResult(res.id, .{
                 .error_name = @errorName(err),
                 .error_message = detail_msg,
             });
+            if (res.resource.shouldIgnoreFailure()) {
+                display.handleFailuresSince(failure_checkpoint);
+                return;
+            }
             self.last_failed_index = index;
             return err;
         };
 
+        self.current_resource_index = index;
+        defer self.current_resource_index = null;
         const result = self.resources.items[index].resource.apply() catch |err| {
             const res = &self.resources.items[index];
             const detail_msg = base.getProvisionErrorDetail();
-            const error_display = detail_msg orelse @errorName(err);
-            try display.resourceError(res.id.type_name, res.id.name, error_display);
+            const error_display = detail_msg orelse base.userFacingError(err);
+            const diagnostic = base.getCommandDiagnostic();
+            const failure_checkpoint = display.failureCheckpoint();
+            try display.resourceError(.{
+                .resource_type = res.id.type_name,
+                .resource_name = res.id.name,
+                .action = res.resource.getActionName(),
+                .depth = res.display_depth,
+                .error_name = base.userFacingError(err),
+                .message = error_display,
+                .command = res.resource.getCommand(),
+                .stdout = if (diagnostic) |value| value.stdout else null,
+                .stderr = if (diagnostic) |value| value.stderr else null,
+                .backtrace = base.getProvisionErrorTrace(),
+            });
             try display.update();
             try self.recordResult(res.id, .{
                 .error_name = @errorName(err),
                 .error_message = detail_msg,
             });
 
-            if (res.resource.shouldIgnoreFailure()) return;
+            if (res.resource.shouldIgnoreFailure()) {
+                display.handleFailuresSince(failure_checkpoint);
+                return;
+            }
             self.last_failed_index = index;
             return err;
         };
@@ -247,7 +296,7 @@ pub const ProvisionRunner = struct {
         res.was_updated = result.was_updated;
 
         if (result.was_updated) {
-            try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason);
+            try display.resourceUpdated(res.id.type_name, res.id.name, result.action, result.skip_reason, result.output);
             try display.update();
             try self.recordResult(res.id, .{
                 .action = result.action,
@@ -342,7 +391,7 @@ pub const ProvisionRunner = struct {
         }
 
         if (immediate_notifications.items.len > 0) {
-            try display.showSectionWithLevel("Processing Immediate Notifications", 3);
+            try display.showNotificationSection("Immediate notifications");
             for (immediate_notifications.items) |pending| {
                 try processNotification(self.allocator, pending, display);
             }
@@ -352,7 +401,7 @@ pub const ProvisionRunner = struct {
     pub fn flushDelayed(self: *ProvisionRunner) !void {
         if (self.delayed_notifications.items.len == 0) return;
         const display = self.display orelse return error.DisplayNotAttached;
-        try display.showSectionWithLevel("Processing Delayed Notifications", 3);
+        try display.showNotificationSection("Delayed notifications");
         for (self.delayed_notifications.items) |pending| {
             try processNotification(self.allocator, pending, display);
         }
@@ -388,7 +437,7 @@ fn pollDisplayUpdate() !void {
                 try display.printCommandLine(stream, batch.bytes[line_start..line_end]);
                 index = line_end + 1;
             }
-            if (batch.dropped > 0) {
+            if (batch.dropped > 0 and !display.isCompact()) {
                 var message_buf: [128]u8 = undefined;
                 const message = try std.fmt.bufPrint(&message_buf, "   [hola] dropped {d} live output lines", .{batch.dropped});
                 try display.printLine(message);
@@ -547,18 +596,33 @@ fn cloneNotificationsFromCommon(
     common: *const base.CommonProps,
 ) !std.ArrayList(resources.Notification) {
     var notifications = std.ArrayList(resources.Notification).empty;
+    errdefer {
+        for (notifications.items) |notif| notif.deinit(allocator);
+        notifications.deinit(allocator);
+    }
     for (common.notifications.items) |notif| {
         const target_id = try allocator.dupe(u8, notif.target_resource_id);
-        const action_name = try allocator.dupe(u8, notif.action.action_name);
+        const action_name = allocator.dupe(u8, notif.action.action_name) catch |err| {
+            allocator.free(target_id);
+            return err;
+        };
 
         const notif_copy = resources.Notification{
             .target_resource_id = target_id,
             .action = .{ .action_name = action_name },
             .timing = notif.timing,
         };
-        try notifications.append(allocator, notif_copy);
+        notifications.append(allocator, notif_copy) catch |err| {
+            notif_copy.deinit(allocator);
+            return err;
+        };
     }
     return notifications;
+}
+
+fn deinitNotifications(allocator: std.mem.Allocator, notifications: *std.ArrayList(resources.Notification)) void {
+    for (notifications.items) |notif| notif.deinit(allocator);
+    notifications.deinit(allocator);
 }
 
 fn makeResourceId(
@@ -566,10 +630,58 @@ fn makeResourceId(
     type_name: []const u8,
     name: []const u8,
 ) !resources.ResourceId {
-    return resources.ResourceId{
-        .type_name = try allocator.dupe(u8, type_name),
+    const owned_type_name = try allocator.dupe(u8, type_name);
+    errdefer allocator.free(owned_type_name);
+    return .{
+        .type_name = owned_type_name,
         .name = try allocator.dupe(u8, name),
     };
+}
+
+fn cloneDisplayScope(allocator: std.mem.Allocator, scope: resources.DisplayScope) !resources.DisplayScope {
+    const type_name = try allocator.dupe(u8, scope.type_name);
+    errdefer allocator.free(type_name);
+    const name = try allocator.dupe(u8, scope.name);
+    errdefer allocator.free(name);
+    return .{
+        .type_name = type_name,
+        .name = name,
+        .action = try allocator.dupe(u8, scope.action),
+    };
+}
+
+fn currentDisplayDepth(runner: *const ProvisionRunner) usize {
+    const parent_depth = if (runner.current_resource_index) |index|
+        runner.resources.items[index].display_depth + 1
+    else
+        0;
+    return parent_depth + runner.declaration_display_path.items.len;
+}
+
+fn cloneCurrentDisplayPath(runner: *const ProvisionRunner) ![]resources.DisplayScope {
+    const allocator = runner.allocator;
+    const inherited = if (runner.current_resource_index) |index|
+        runner.resources.items[index].display_path
+    else
+        &.{};
+    const total = inherited.len + runner.declaration_display_path.items.len;
+    if (total == 0) return &.{};
+
+    const result = try allocator.alloc(resources.DisplayScope, total);
+    var initialized: usize = 0;
+    errdefer {
+        for (result[0..initialized]) |scope| scope.deinit(allocator);
+        allocator.free(result);
+    }
+    for (inherited) |scope| {
+        result[initialized] = try cloneDisplayScope(allocator, scope);
+        initialized += 1;
+    }
+    for (runner.declaration_display_path.items) |scope| {
+        result[initialized] = try cloneDisplayScope(allocator, scope);
+        initialized += 1;
+    }
+    return result;
 }
 
 fn addResourceWithMetadata(
@@ -596,21 +708,44 @@ fn addResourceWithMetadata(
 
     // Process all resources in tmp_resources (some resources like systemd_unit create multiple)
     for (tmp_resources.items) |res| {
+        // Ownership of each temporary resource is transferred either to the
+        // runner or to this error path; the temporary list only owns its buffer.
+        const wrapped = wrap(res);
+
         // Build ResourceId
-        const id = build_id(allocator, &res) catch return mruby.mrb_nil_value();
+        const id = build_id(allocator, &res) catch {
+            wrapped.deinit(allocator);
+            return mruby.mrb_nil_value();
+        };
 
         // Copy notifications from common props into metadata
         const common_ref = get_common_props(&res);
-        const notifications = cloneNotificationsFromCommon(allocator, common_ref) catch return mruby.mrb_nil_value();
-
-        // Wrap into unified Resource enum
-        const res_with_meta = resources.ResourceWithMetadata{
-            .resource = wrap(res),
-            .id = id,
-            .notifications = notifications,
+        var notifications = cloneNotificationsFromCommon(allocator, common_ref) catch {
+            id.deinit(allocator);
+            wrapped.deinit(allocator);
+            return mruby.mrb_nil_value();
         };
 
-        runner.resources.append(allocator, res_with_meta) catch return mruby.mrb_nil_value();
+        const display_path = cloneCurrentDisplayPath(runner) catch {
+            deinitNotifications(allocator, &notifications);
+            id.deinit(allocator);
+            wrapped.deinit(allocator);
+            return mruby.mrb_nil_value();
+        };
+
+        // Wrap into unified Resource enum
+        var res_with_meta = resources.ResourceWithMetadata{
+            .resource = wrapped,
+            .id = id,
+            .notifications = notifications,
+            .display_depth = currentDisplayDepth(runner),
+            .display_path = display_path,
+        };
+
+        runner.resources.append(allocator, res_with_meta) catch {
+            res_with_meta.deinit(allocator);
+            return mruby.mrb_nil_value();
+        };
     }
 
     return result;
@@ -1188,7 +1323,7 @@ export fn zig_converge(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callc
     mruby.zig_mrb_gc_arena_restore(mrb, arena_index);
 
     if (converge_error) |err| {
-        const detail = base.getProvisionErrorDetail() orelse @errorName(err);
+        const detail = base.getProvisionErrorDetail() orelse base.userFacingError(err);
         if (runner.last_failed_index) |index| {
             if (index < runner.resources.items.len) {
                 const id = runner.resources.items[index].id;
@@ -1209,9 +1344,26 @@ export fn zig_flush_delayed(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) 
     const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
     if (runner.display == null) return statusPair(mrb, false, "provision display is not attached");
     runner.flushDelayed() catch |err| {
-        return statusPair(mrb, false, base.getProvisionErrorDetail() orelse @errorName(err));
+        return statusPair(mrb, false, base.getProvisionErrorDetail() orelse base.userFacingError(err));
     };
     return statusPair(mrb, true, null);
+}
+
+export fn zig_failure_checkpoint(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return mruby.mrb_int_value(mrb, 0);
+    const display = runner.display orelse return mruby.mrb_int_value(mrb, 0);
+    return mruby.mrb_int_value(mrb, @intCast(display.failureCheckpoint()));
+}
+
+export fn zig_handle_failures_since(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var checkpoint: mruby.mrb_int = 0;
+    if (mruby.mrb_get_args(mrb, "i", &checkpoint) != 1) return mruby.mrb_nil_value();
+    const runner = currentRunnerOrNilValue() orelse return mruby.mrb_nil_value();
+    const display = runner.display orelse return mruby.mrb_nil_value();
+    display.handleFailuresSince(@intCast(@max(checkpoint, 0)));
+    return mruby.mrb_nil_value();
 }
 
 export fn zig_display_section(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
@@ -1237,6 +1389,47 @@ export fn zig_print_line(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) cal
     const display = runner.display orelse return statusPair(mrb, false, "provision display is not attached");
     const line = std.mem.span(mruby.mrb_str_to_cstr(mrb, text_value));
     display.printLine(line) catch |err| return statusPair(mrb, false, @errorName(err));
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_begin_resource_scope(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    var type_value: mruby.mrb_value = undefined;
+    var name_value: mruby.mrb_value = undefined;
+    var action_value: mruby.mrb_value = undefined;
+    if (mruby.mrb_get_args(mrb, "SSS", &type_value, &name_value, &action_value) != 3) {
+        return statusPair(mrb, false, "begin_resource_scope expects type, name, and action");
+    }
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    const allocator = runner.allocator;
+    const type_name = allocator.dupe(u8, std.mem.span(mruby.mrb_str_to_cstr(mrb, type_value))) catch return statusPair(mrb, false, "out of memory");
+    const name = allocator.dupe(u8, std.mem.span(mruby.mrb_str_to_cstr(mrb, name_value))) catch {
+        allocator.free(type_name);
+        return statusPair(mrb, false, "out of memory");
+    };
+    const action = allocator.dupe(u8, std.mem.span(mruby.mrb_str_to_cstr(mrb, action_value))) catch {
+        allocator.free(type_name);
+        allocator.free(name);
+        return statusPair(mrb, false, "out of memory");
+    };
+    runner.declaration_display_path.append(allocator, .{
+        .type_name = type_name,
+        .name = name,
+        .action = action,
+    }) catch {
+        allocator.free(type_name);
+        allocator.free(name);
+        allocator.free(action);
+        return statusPair(mrb, false, "out of memory");
+    };
+    return statusPair(mrb, true, null);
+}
+
+export fn zig_end_resource_scope(mrb: *mruby.mrb_state, self_value: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    _ = self_value;
+    const runner = currentRunnerOrNilValue() orelse return statusPair(mrb, false, "provision runner is not initialized");
+    if (runner.declaration_display_path.items.len == 0) return statusPair(mrb, false, "resource scope stack is empty");
+    if (runner.declaration_display_path.pop()) |scope| scope.deinit(runner.allocator);
     return statusPair(mrb, true, null);
 }
 
@@ -1285,8 +1478,12 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
     const bindings = [_]ResourceBinding{
         .{ .name = "converge", .handler = zig_converge, .args_spec = mruby.MRB_ARGS_NONE() },
         .{ .name = "flush_delayed", .handler = zig_flush_delayed, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "failure_checkpoint", .handler = zig_failure_checkpoint, .args_spec = mruby.MRB_ARGS_NONE() },
+        .{ .name = "handle_failures_since", .handler = zig_handle_failures_since, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "display_section", .handler = zig_display_section, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "print_line", .handler = zig_print_line, .args_spec = mruby.MRB_ARGS_REQ(1) },
+        .{ .name = "begin_resource_scope", .handler = zig_begin_resource_scope, .args_spec = mruby.MRB_ARGS_REQ(3) },
+        .{ .name = "end_resource_scope", .handler = zig_end_resource_scope, .args_spec = mruby.MRB_ARGS_NONE() },
         .{ .name = "glob", .handler = zig_glob, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "load_file", .handler = zig_load_file, .args_spec = mruby.MRB_ARGS_REQ(1) },
         .{ .name = "add_file", .handler = zig_add_file_resource, .args_spec = mruby.MRB_ARGS_REQ(6) | mruby.MRB_ARGS_OPT(5) },
@@ -1389,14 +1586,14 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     runner.start_time = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
 
     // Initialize modern display with the specified output mode
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.use_pretty_output);
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, opts.output_mode);
     defer display.deinit();
 
     runner.attachDisplay(&display);
     defer runner.detachDisplay();
 
     // Show section header
-    try display.showSection("Applying Configuration");
+    try display.showSection("Applying configuration");
 
     // Set total number of resources for progress display
     display.setTotalResources(runner.resources.items.len);
@@ -1548,9 +1745,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
         }
     }
 
-    if (download_mgr.tasks.items.len > 0) {
-        // Show download section header
-        try display.showSectionWithLevel("Downloading Remote Files", 3);
+    const has_downloads = download_mgr.tasks.items.len > 0;
+    if (has_downloads) {
+        try display.showSectionWithLevel("Downloads", 3);
 
         const download_names = try allocator.alloc([]const u8, download_mgr.tasks.items.len);
         defer allocator.free(download_names);
@@ -1563,7 +1760,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     // Start background download processing if we have tasks
     var download_thread: ?std.Thread = null;
     defer if (download_thread) |thread| thread.join();
-    if (download_mgr.tasks.items.len > 0) {
+    if (has_downloads) {
         const DownloadThread = struct {
             fn run(mgr: *http.download.Manager) void {
                 mgr.processAll() catch |err| {
@@ -1576,8 +1773,11 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     runner.download_mgr = &download_mgr;
     defer runner.download_mgr = null;
 
-    // Start resource execution phase
-    try display.showSectionWithLevel("Executing Resources", 3);
+    // With downloads present, name both phases. For the common resources-only
+    // path, the primary heading already provides enough context.
+    if (has_downloads) {
+        try display.showSectionWithLevel("Resources", 3);
+    }
 
     // Start the real-time timer spinner (after all download spinners are created)
     try display.startTimer(runner.start_time);
@@ -1653,6 +1853,70 @@ test "Session.open exposes every resource through Hola::Resources" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(global_io.io(), target, .{}));
 }
 
+test "composite resources preserve their virtual parent display path" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+
+    try session.evalString("apt_update('package metadata') { action :update }");
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resources.items.len);
+    const child = session.runner.resources.items[0];
+    try std.testing.expectEqual(@as(usize, 1), child.display_depth);
+    try std.testing.expectEqual(@as(usize, 1), child.display_path.len);
+    try std.testing.expectEqualStrings("apt_update", child.display_path[0].type_name);
+    try std.testing.expectEqualStrings("package metadata", child.display_path[0].name);
+    try std.testing.expectEqualStrings("update", child.display_path[0].action);
+}
+
+test "composite resource display scope unwinds after a Ruby exception" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+
+    try session.evalString(
+        \\begin
+        \\  Hola::Resources.with_resource_scope('outer', 'failing') { raise 'boom' }
+        \\rescue RuntimeError
+        \\end
+        \\Hola::Resources.execute('sibling') { action :nothing }
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), session.runner.declaration_display_path.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resources.items.len);
+    const sibling = session.runner.resources.items[0];
+    try std.testing.expectEqual(@as(usize, 0), sibling.display_depth);
+    try std.testing.expectEqual(@as(usize, 0), sibling.display_path.len);
+}
+
+test "resources declared while applying inherit the parent display depth" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    try session.evalString(
+        \\ruby_block 'parent' do
+        \\  block do
+        \\    Hola::Resources.execute 'child' do
+        \\      command 'exit 99'
+        \\      action :nothing
+        \\    end
+        \\  end
+        \\end
+    );
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    try session.runner.convergeFrom(0);
+
+    try std.testing.expectEqual(@as(usize, 2), session.runner.resources.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.runner.resources.items[0].display_depth);
+    try std.testing.expectEqual(@as(usize, 1), session.runner.resources.items[1].display_depth);
+}
+
 test "convergeFrom applies and records results once" {
     const allocator = std.testing.allocator;
     json.setAllocator(allocator);
@@ -1670,7 +1934,7 @@ test "convergeFrom applies and records results once" {
     defer allocator.free(script);
     try session.evalString(script);
 
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer display.deinit();
     session.runner.attachDisplay(&display);
     defer session.runner.detachDisplay();
@@ -1694,6 +1958,8 @@ test "task prelude supports common Rake task semantics" {
         \\module ZigBackend
         \\  def self.converge; [true, nil]; end
         \\  def self.flush_delayed; [true, nil]; end
+        \\  def self.failure_checkpoint; 0; end
+        \\  def self.handle_failures_since(checkpoint); nil; end
         \\  def self.display_section(name); ($sections ||= []) << name; [true, nil]; end
         \\end
         \\module ENV
@@ -1801,6 +2067,8 @@ test "task prelude immediate wrapper converges resource declarations" {
         \\module ZigBackend
         \\  def self.converge; $converge_calls += 1; [true, nil]; end
         \\  def self.flush_delayed; [true, nil]; end
+        \\  def self.failure_checkpoint; 0; end
+        \\  def self.handle_failures_since(checkpoint); nil; end
         \\  def self.display_section(name); [true, nil]; end
         \\end
         \\def execute(name, &block); name; end
@@ -1819,7 +2087,7 @@ test "task command-line assignments use the environment bridge" {
     defer session.close();
     defer session.evalString("ENV.delete('HOLA_TASK_TEST_ENV')") catch {};
 
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer display.deinit();
     session.runner.attachDisplay(&display);
     defer session.runner.detachDisplay();
@@ -1845,13 +2113,50 @@ test "task command-line assignments use the environment bridge" {
     try std.testing.expectEqual(@as(usize, 0), session.runner.resources.items.len);
 }
 
+test "task prelude treats rescued resource failures as handled" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{ .mode = .task });
+    defer session.close();
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    session.runner.start_time = std.Io.Timestamp.now(global_io.io(), .real).toNanoseconds();
+    try display.startTimer(session.runner.start_time);
+
+    try session.loadTaskPrelude();
+    try session.evalString(
+        \\task :rescued do
+        \\  begin
+        \\    sh 'exit 7'
+        \\  rescue Hola::ResourceError => error
+        \\    $rescued_message = error.message
+        \\  end
+        \\end
+        \\$hola_run_argv = ['rescued']
+        \\Hola::Rake.main
+    );
+
+    const status = session.mrb.getGlobal("$hola_run_status");
+    const message = session.mrb.getGlobal("$rescued_message");
+    try std.testing.expectEqual(@as(mruby.mrb_int, 0), mruby.mrb_fixnum(session.mrb.mrb.?, status));
+    try std.testing.expectEqualStrings(
+        "execute[exit 7]: command exited with status 7",
+        std.mem.span(mruby.mrb_str_to_cstr(session.mrb.mrb.?, message)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), display.failed_count);
+    try std.testing.expectEqual(@as(usize, 1), display.handled_failure_count);
+}
+
 test "protected ruby_block failure returns a converge status and session remains usable" {
     const allocator = std.testing.allocator;
     json.setAllocator(allocator);
     const session = try Session.open(allocator, .{});
     defer session.close();
 
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer display.deinit();
     session.runner.attachDisplay(&display);
     defer session.runner.detachDisplay();

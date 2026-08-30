@@ -595,12 +595,21 @@ pub const Resource = struct {
             .sink = sink,
         };
 
-        const result = try AsyncExecutor.executeWithContext(
+        const result = AsyncExecutor.executeWithContext(
             ExecuteContext,
             ExecuteResult,
             ctx,
             executeCommand,
-        );
+        ) catch |err| {
+            if (err == error.CommandOutputTooLarge) {
+                base.recordProvisionErrorDetail("command output exceeded the {d} MiB capture limit", .{MAX_OUTPUT_BYTES / (1024 * 1024)});
+            } else if (self.cwd) |cwd| {
+                base.recordProvisionErrorDetail("could not execute command in {s}: {s}", .{ cwd, base.userFacingError(err) });
+            } else {
+                base.recordProvisionErrorDetail("could not execute command: {s}", .{base.userFacingError(err)});
+            }
+            return err;
+        };
         defer result.deinit();
 
         const term = result.term;
@@ -658,6 +667,7 @@ pub const Resource = struct {
 
         if (result.timed_out) {
             logger.err("[execute] command timed out after {d}s", .{self.timeout_s});
+            base.recordCommandTimeoutOutput(self.timeout_s, stdout, stderr);
             return error.CommandTimedOut;
         }
 
@@ -666,19 +676,23 @@ pub const Resource = struct {
             .exited => |code| {
                 if (code != 0) {
                     logger.err("[execute] command exited with code {d}", .{code});
+                    base.recordCommandFailureOutput(term, stdout, stderr);
                     return error.CommandFailed;
                 }
             },
             .signal => |sig| {
                 logger.err("[execute] command killed by signal {d}", .{@intFromEnum(sig)});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandKilled;
             },
             .stopped => |sig| {
                 logger.err("[execute] command stopped by signal {d}", .{@intFromEnum(sig)});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandStopped;
             },
             .unknown => |unknown_status| {
                 logger.err("[execute] command exited with unknown status {d}", .{unknown_status});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandFailed;
             },
         }
@@ -844,4 +858,38 @@ test "LineSplitter emits complete and trailing partial lines" {
     const second = try channel.take();
     defer allocator.free(second.bytes);
     try std.testing.expectEqualSlices(u8, &.{ 1, 'b', '\n' }, second.bytes);
+}
+
+test "execute failure records exit status and normalized stderr" {
+    base.clearProvisionErrorDetail();
+    defer base.clearProvisionErrorDetail();
+
+    var common = base.CommonProps.init(std.testing.allocator);
+    defer common.deinit(std.testing.allocator);
+    const resource = Resource{
+        .name = "diagnostic failure",
+        .command = "printf 'first line\\nsecond line\\n' >&2; exit 7",
+        .cwd = null,
+        .user = null,
+        .group = null,
+        .environment = null,
+        .live_stream = false,
+        .creates = null,
+        .timeout_s = DEFAULT_TIMEOUT_S,
+        .action = .run,
+        .common = common,
+    };
+
+    try std.testing.expectError(error.CommandFailed, resource.apply());
+    try std.testing.expectEqualStrings(
+        "command exited with status 7; stderr: first line second line",
+        base.getProvisionErrorDetail().?,
+    );
+    const diagnostic = base.getCommandDiagnostic() orelse return error.TestExpectedCommandDiagnostic;
+    switch (diagnostic.term.?) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 7), code),
+        else => return error.TestExpectedExitStatus,
+    }
+    try std.testing.expect(diagnostic.stdout == null);
+    try std.testing.expectEqualStrings("first line\nsecond line", diagnostic.stderr.?);
 }

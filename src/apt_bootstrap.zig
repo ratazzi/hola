@@ -23,7 +23,7 @@ pub fn installPackages(
     display: *modern_display.ModernProvisionDisplay,
     apt_path: []const u8,
 ) !void {
-    try display.showSection("Installing Packages (apt)");
+    try display.showSection("Installing packages (apt)");
 
     const apt_list_path = try std.fs.path.join(allocator, &.{ config_root, "packages.apt.txt" });
     defer allocator.free(apt_list_path);

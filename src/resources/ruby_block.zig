@@ -178,8 +178,6 @@ pub const Resource = struct {
                     // of the raw Zig error name.
                     base.recordProvisionException(mrb, exc, "ruby_block raised");
 
-                    // Also print to stderr for consistency
-                    mruby.zig_mrb_print_exc(mrb, exc);
                     return error.RubyBlockFailed;
                 },
             }

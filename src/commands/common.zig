@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../http.zig");
 const global_io = @import("../global_io.zig");
 const logger = @import("../logger.zig");
+const modern_display = @import("../modern_provision_display.zig");
 
 pub const TlsClientAuth = struct {
     cert: ?[]const u8 = null,
@@ -34,14 +35,14 @@ pub const ResolvedBags = struct {
     }
 };
 
-pub fn parseOutputMode(output_mode: ?[]const u8) !bool {
+pub fn parseOutputMode(output_mode: ?[]const u8) !modern_display.OutputMode {
     if (output_mode) |mode| {
-        if (std.mem.eql(u8, mode, "plain")) return false;
-        if (std.mem.eql(u8, mode, "pretty")) return true;
-        std.debug.print("Invalid output mode: {s}\nValid modes: pretty, plain\n", .{mode});
+        if (std.mem.eql(u8, mode, "normal") or std.mem.eql(u8, mode, "plain")) return .normal;
+        if (std.mem.eql(u8, mode, "compact") or std.mem.eql(u8, mode, "pretty")) return .compact;
+        std.debug.print("Invalid output mode: {s}\nValid modes: normal, compact\n", .{mode});
         return error.InvalidOutputMode;
     }
-    return std.Io.File.stdout().isTty(global_io.io()) catch false;
+    return .normal;
 }
 
 /// Fetch JSON content from a URL, using optional mTLS credentials.
@@ -129,4 +130,13 @@ pub fn resolveBags(allocator: std.mem.Allocator, args: BagArgs) !ResolvedBags {
         .owned_data_bag = owned_data_bag,
         .owned_secrets_bag = owned_secrets_bag,
     };
+}
+
+test "output mode defaults to normal and keeps legacy aliases" {
+    try std.testing.expectEqual(modern_display.OutputMode.normal, try parseOutputMode(null));
+    try std.testing.expectEqual(modern_display.OutputMode.normal, try parseOutputMode("normal"));
+    try std.testing.expectEqual(modern_display.OutputMode.normal, try parseOutputMode("plain"));
+    try std.testing.expectEqual(modern_display.OutputMode.compact, try parseOutputMode("compact"));
+    try std.testing.expectEqual(modern_display.OutputMode.compact, try parseOutputMode("pretty"));
+    try std.testing.expectError(error.InvalidOutputMode, parseOutputMode("verbose"));
 }

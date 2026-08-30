@@ -207,7 +207,13 @@ hola run -T                      # List described tasks
 hola run -P                      # Show prerequisites
 hola run -n build                # Dry run
 hola run --trace build           # Trace task invocation
+hola run --output compact build  # Animated spinner for established scripts
 ```
+
+Normal output is the default, including on a TTY. It is append-only and shows
+resource actions, nested composite resources, live command streams, change details,
+and structured failure diagnostics. `--output compact` enables the animated spinner;
+the older `plain` and `pretty` mode names remain accepted as aliases.
 
 The embedded mruby task runtime is inspired by Rake rather than compatible with it.
 It covers the common task surface: dependencies, namespaces,

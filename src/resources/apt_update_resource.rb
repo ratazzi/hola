@@ -12,12 +12,15 @@ class AptUpdateResource
 
     instance_eval(&block) if block
 
-    # Execute the actual logic based on action
-    case @action
-    when :periodic
-      apply_periodic
-    when :update
-      apply_update
+    Hola::Resources.with_resource_scope("apt_update", @name, @action) do
+      # apt_update is a composite resource. Children keep this parent in their
+      # display path so normal output mirrors Chef's nested custom resources.
+      case @action
+      when :periodic
+        apply_periodic
+      when :update
+        apply_update
+      end
     end
   end
 

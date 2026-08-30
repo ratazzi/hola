@@ -138,7 +138,12 @@ module Hola
           return self
         end
         puts "** Execute #{@name}" if Hola::Rake.trace?
-        @actions.each { |action| action.call(self, args) }
+        @actions.each do |action|
+          failure_checkpoint = ZigBackend.failure_checkpoint
+          action.call(self, args)
+          Hola::Rake.converge!
+          ZigBackend.handle_failures_since(failure_checkpoint)
+        end
         Hola::Rake.converge!
         self
       end
@@ -541,6 +546,10 @@ module Hola
           application.run($hola_run_argv || [])
           flush_delayed!
           $hola_run_status = 0
+        rescue Hola::ResourceError => error
+          location = error.backtrace && error.backtrace[0]
+          puts(location ? "Task aborted at #{location}" : "Task aborted")
+          $hola_run_status = 1
         rescue Exception => error
           puts "hola aborted!"
           puts error.message
