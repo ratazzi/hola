@@ -17,7 +17,7 @@ pub const Resource = struct {
     repository: []const u8, // Git repository URL
     destination: []const u8, // Destination path where to clone/checkout
     revision: []const u8, // Branch, tag, or commit SHA (default: "HEAD")
-    checkout_branch: ?[]const u8, // Branch to checkout (default: "deploy")
+    checkout_branch: ?[]const u8, // Optional explicit local branch to check out (Chef parity; no default)
     remote: []const u8, // Remote name (default: "origin")
     depth: ?u32, // Shallow clone depth (not yet supported by our git.zig)
     enable_checkout: bool, // Whether to checkout files (default: true)
@@ -423,6 +423,152 @@ pub const Resource = struct {
         return try allocator.dupe(u8, sha);
     }
 
+    const TargetKind = enum { sha, tag, branch, other };
+
+    const Target = struct {
+        sha: []const u8,
+        kind: TargetKind,
+    };
+
+    fn isShaHash(revision: []const u8) bool {
+        if (revision.len != 40) return false;
+        for (revision) |ch| {
+            switch (ch) {
+                '0'...'9', 'a'...'f' => {},
+                else => return false,
+            }
+        }
+        return true;
+    }
+
+    /// Resolve the revision to a target SHA following Chef's precedence:
+    /// explicit SHA, then tags, then remote branches, then the raw rev-spec.
+    /// "HEAD" (the default) means the remote's default branch.
+    fn resolveTarget(self: Resource, allocator: std.mem.Allocator, repo: *c.git_repository) !Target {
+        if (isShaHash(self.revision)) {
+            return .{ .sha = try resolveRevision(allocator, repo, self.revision), .kind = .sha };
+        }
+        if (self.revision.len == 0 or std.mem.eql(u8, self.revision, "HEAD")) {
+            const ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/HEAD", .{self.remote});
+            defer allocator.free(ref);
+            return .{ .sha = try resolveRevision(allocator, repo, ref), .kind = .other };
+        }
+        const tag_ref = try std.fmt.allocPrint(allocator, "refs/tags/{s}^{{}}", .{self.revision});
+        defer allocator.free(tag_ref);
+        if (resolveRevision(allocator, repo, tag_ref)) |sha| {
+            return .{ .sha = sha, .kind = .tag };
+        } else |_| {}
+        const branch_ref = try std.fmt.allocPrint(allocator, "refs/remotes/{s}/{s}", .{ self.remote, self.revision });
+        defer allocator.free(branch_ref);
+        if (resolveRevision(allocator, repo, branch_ref)) |sha| {
+            return .{ .sha = sha, .kind = .branch };
+        } else |_| {}
+        return .{ .sha = try resolveRevision(allocator, repo, self.revision), .kind = .other };
+    }
+
+    /// Local branch HEAD should end up on, or null for detached-style targets
+    /// (SHA, tag, remote HEAD). An explicit checkout_branch always wins so the
+    /// clone and update paths share one semantic (Chef's `checkout` precedence).
+    fn desiredBranch(self: Resource, kind: TargetKind) ?[]const u8 {
+        if (self.checkout_branch) |cb| return cb;
+        if (kind == .branch) return self.revision;
+        return null;
+    }
+
+    /// Returns true when HEAD is attached to refs/heads/<name>.
+    fn onBranch(repo: *c.git_repository, name: []const u8) bool {
+        var head_ref: ?*c.git_reference = null;
+        if (c.git_repository_head(&head_ref, repo) != 0) return false;
+        defer if (head_ref) |ref| c.git_reference_free(ref);
+        if (c.git_reference_is_branch(head_ref) == 0) return false;
+        const short = c.git_reference_shorthand(head_ref);
+        if (short == null) return false;
+        return std.mem.eql(u8, std.mem.span(short), name);
+    }
+
+    /// Move the working copy to the resolved target, mirroring the tail of
+    /// Chef's fetch_updates/checkout:
+    /// - no desired branch (SHA/tag/remote-HEAD revision): detach HEAD at the
+    ///   target so no local branch masquerades as another lineage, then reset;
+    /// - already on the desired branch: plain `git reset --hard`;
+    /// - otherwise: `git branch -f <name> <sha>`, optional upstream, checkout.
+    fn syncToTarget(
+        self: Resource,
+        allocator: std.mem.Allocator,
+        repo: *c.git_repository,
+        target: Target,
+        desired_branch: ?[]const u8,
+        on_desired_branch: bool,
+    ) !void {
+        const sha_c = try dupZ(allocator, target.sha);
+        defer allocator.free(sha_c);
+
+        var target_obj: ?*c.git_object = null;
+        if (c.git_revparse_single(&target_obj, repo, sha_c.ptr) != 0) return error.RevParseFailed;
+        defer if (target_obj) |o| c.git_object_free(o);
+
+        var commit_obj: ?*c.git_object = null;
+        if (c.git_object_peel(&commit_obj, target_obj, c.GIT_OBJECT_COMMIT) != 0) return error.RevParseFailed;
+        defer if (commit_obj) |o| c.git_object_free(o);
+
+        if (desired_branch) |name| {
+            if (!on_desired_branch) {
+                // git branch -f <name> <sha>
+                const name_c = try dupZ(allocator, name);
+                defer allocator.free(name_c);
+                var branch_ref: ?*c.git_reference = null;
+                if (c.git_branch_create(&branch_ref, repo, name_c.ptr, @ptrCast(commit_obj), 1) != 0) {
+                    return error.BranchCreateFailed;
+                }
+                defer if (branch_ref) |ref| c.git_reference_free(ref);
+
+                // git branch -u <remote>/<name> — Chef sets the upstream only
+                // for plain branch revisions, not for explicit checkout_branch.
+                if (self.checkout_branch == null and target.kind == .branch) {
+                    const upstream_c = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ self.remote, name }, 0);
+                    defer allocator.free(upstream_c);
+                    if (c.git_branch_set_upstream(branch_ref, upstream_c.ptr) != 0) {
+                        logger.warn("[git] failed to set upstream {s} for branch {s}", .{ upstream_c, name });
+                    }
+                }
+
+                // git checkout <name> (worktree is forced by the reset below)
+                const head_ref_c = try std.fmt.allocPrintSentinel(allocator, "refs/heads/{s}", .{name}, 0);
+                defer allocator.free(head_ref_c);
+                if (c.git_repository_set_head(repo, head_ref_c.ptr) != 0) return error.CheckoutFailed;
+            }
+        } else {
+            const oid = c.git_object_id(commit_obj);
+            if (c.git_repository_set_head_detached(repo, oid) != 0) return error.CheckoutFailed;
+        }
+
+        // git reset --hard <sha>: aligns the ref (no-op when already there)
+        // and forces index/worktree to match.
+        if (c.git_reset(repo, commit_obj, c.GIT_RESET_HARD, null) != 0) return error.ResetFailed;
+    }
+
+    /// After a fresh clone, put HEAD on the requested target (Chef's post-clone
+    /// `checkout` action). The clone leaves HEAD on the remote's default branch.
+    fn establishAfterClone(self: Resource, allocator: std.mem.Allocator) !void {
+        const user_ctx = try switchEffectiveUser(self.user, self.group);
+        defer restoreEffectiveUser(user_ctx);
+
+        const repo_opt = try openRepository(allocator, self.destination);
+        const repo = repo_opt orelse return error.OpenRepoFailed;
+        defer c.git_repository_free(repo);
+
+        const target = try self.resolveTarget(allocator, repo);
+        defer allocator.free(target.sha);
+        const desired_branch = self.desiredBranch(target.kind);
+        const on_desired_branch = if (desired_branch) |name| onBranch(repo, name) else true;
+
+        const current_rev = try getCurrentRevision(allocator, repo);
+        defer allocator.free(current_rev);
+        if (std.mem.eql(u8, current_rev, target.sha) and on_desired_branch) return;
+
+        try self.syncToTarget(allocator, repo, target, desired_branch, on_desired_branch);
+    }
+
     /// Context for async clone operation
     /// Carries a libgit2 failure reason from a background worker thread back to
     /// the caller. Thread-local error buffers don't cross threads, mirroring
@@ -634,6 +780,10 @@ pub const Resource = struct {
             return error.FetchOptionsInitFailed;
         }
 
+        // Chef parity: `git fetch --prune` + `git fetch --tags`
+        fetch_opts.prune = c.GIT_FETCH_PRUNE;
+        fetch_opts.download_tags = c.GIT_REMOTE_DOWNLOAD_TAGS_ALL;
+
         // Setup credentials and certificate callbacks for fetch
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
@@ -660,46 +810,22 @@ pub const Resource = struct {
         const current_rev = try getCurrentRevision(allocator, repo);
         defer allocator.free(current_rev);
 
-        // Resolve target revision
-        // For "HEAD", use checkout_branch on the remote.
-        // For other values, try as-is first (tag, SHA, or already-qualified ref),
-        // then fall back to {remote}/{revision} (bare branch name after fetch).
-        const target_rev = blk: {
-            if (std.mem.eql(u8, self.revision, "HEAD")) {
-                const ref = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote, self.checkout_branch orelse "deploy" });
-                defer allocator.free(ref);
-                break :blk try resolveRevision(allocator, repo, ref);
-            }
-            break :blk resolveRevision(allocator, repo, self.revision) catch {
-                const qualified = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.remote, self.revision });
-                defer allocator.free(qualified);
-                break :blk try resolveRevision(allocator, repo, qualified);
-            };
-        };
-        defer allocator.free(target_rev);
+        // Resolve the target following Chef's precedence (SHA, tag, remote
+        // branch, raw rev-spec); "HEAD" means the remote's default branch.
+        const target = try self.resolveTarget(allocator, repo);
+        defer allocator.free(target.sha);
 
-        // Compare revisions
-        if (!std.mem.eql(u8, current_rev, target_rev)) {
-            // Reset to target revision
-            const target_rev_c = try dupZ(allocator, target_rev);
-            defer allocator.free(target_rev_c);
+        const desired_branch = self.desiredBranch(target.kind);
+        const on_desired_branch = if (desired_branch) |name| onBranch(repo, name) else true;
 
-            var target_obj: ?*c.git_object = null;
-            code = c.git_revparse_single(&target_obj, repo, target_rev_c.ptr);
-            if (code != 0) {
-                return error.RevParseFailed;
-            }
-            defer if (target_obj) |o| c.git_object_free(o);
-
-            code = c.git_reset(repo, target_obj, c.GIT_RESET_HARD, null);
-            if (code != 0) {
-                return error.ResetFailed;
-            }
-
-            return true; // was_updated
+        // Up to date only when both the commit and the branch identity match;
+        // a repo left on the wrong branch by older hola versions self-heals here.
+        if (std.mem.eql(u8, current_rev, target.sha) and on_desired_branch) {
+            return false; // not updated
         }
 
-        return false; // not updated
+        try self.syncToTarget(allocator, repo, target, desired_branch, on_desired_branch);
+        return true; // was_updated
     }
 
     /// Apply environment variables from "KEY=VALUE\0..." format string using setenv().
@@ -857,6 +983,9 @@ pub const Resource = struct {
             // Clone the repository with custom credentials (async)
             // (cloneRepositoryImpl handles user switching internally)
             try self.cloneRepository(allocator);
+            if (self.enable_checkout) {
+                try self.establishAfterClone(allocator);
+            }
             was_updated = true;
         } else {
             // Switch effective user for git_repository_open (safe.directory check)
@@ -961,6 +1090,9 @@ pub const Resource = struct {
         defer restoreEnvironment(allocator, &env_saved);
 
         try self.cloneRepository(allocator);
+        if (self.enable_checkout) {
+            try self.establishAfterClone(allocator);
+        }
 
         // Set file ownership if user or group is specified
         if (self.user != null or self.group != null) {
@@ -1159,4 +1291,165 @@ pub fn zigAddResource(
     };
 
     return mruby.mrb_nil_value();
+}
+
+// The global_io test fallback (Threaded.init_single_threaded) uses a failing
+// allocator and cannot spawn processes, so tests bring their own Io instance.
+var test_threaded: ?std.Io.Threaded = null;
+
+fn testIo() std.Io {
+    if (test_threaded == null) {
+        test_threaded = .init(std.heap.page_allocator, .{});
+    }
+    return test_threaded.?.io();
+}
+
+fn testRunGitCapture(allocator: std.mem.Allocator, dir: []const u8, argv: []const []const u8) ![]u8 {
+    var full = std.ArrayList([]const u8).empty;
+    defer full.deinit(allocator);
+    try full.append(allocator, "git");
+    try full.append(allocator, "-C");
+    try full.append(allocator, dir);
+    try full.appendSlice(allocator, argv);
+    const result = try std.process.run(allocator, testIo(), .{ .argv = full.items });
+    defer allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.GitCommandFailed,
+        else => return error.GitCommandFailed,
+    }
+    return result.stdout;
+}
+
+fn testRunGit(allocator: std.mem.Allocator, dir: []const u8, argv: []const []const u8) !void {
+    const out = try testRunGitCapture(allocator, dir, argv);
+    allocator.free(out);
+}
+
+test "git sync checks out the revision branch and self-heals wrong-branch checkouts" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(global_io.io(), ".", allocator);
+    defer allocator.free(root);
+
+    const source = try std.fs.path.join(allocator, &.{ root, "source" });
+    defer allocator.free(source);
+    const dest = try std.fs.path.join(allocator, &.{ root, "dest" });
+    defer allocator.free(dest);
+
+    // Source repo with main + feature branches.
+    try testRunGit(allocator, root, &.{ "init", "-q", "-b", "main", "source" });
+    try testRunGit(allocator, source, &.{ "config", "user.email", "test@hola" });
+    try testRunGit(allocator, source, &.{ "config", "user.name", "hola-test" });
+    try testRunGit(allocator, source, &.{ "commit", "-q", "--allow-empty", "-m", "base" });
+    try testRunGit(allocator, source, &.{ "checkout", "-q", "-b", "feature" });
+    try testRunGit(allocator, source, &.{ "commit", "-q", "--allow-empty", "-m", "feature-1" });
+    try testRunGit(allocator, source, &.{ "checkout", "-q", "main" });
+
+    var res = Resource{
+        .repository = source,
+        .destination = dest,
+        .revision = "feature",
+        .checkout_branch = null,
+        .remote = "origin",
+        .depth = null,
+        .enable_checkout = true,
+        .enable_submodules = false,
+        .ssh_key = null,
+        .ssh_wrapper = null,
+        .enable_strict_host_key_checking = false,
+        .user = null,
+        .group = null,
+        .environment = null,
+        .action = .sync,
+        .common = base.CommonProps.init(allocator),
+    };
+    defer res.common.deinit(allocator);
+
+    // Initial converge clones and puts HEAD on a local 'feature' branch
+    // tracking origin/feature (Chef's third fetch_updates arm).
+    var result = try res.apply();
+    try std.testing.expect(result.was_updated);
+
+    const head_branch = try testRunGitCapture(allocator, dest, &.{ "rev-parse", "--abbrev-ref", "HEAD" });
+    defer allocator.free(head_branch);
+    try std.testing.expectEqualStrings("feature", std.mem.trim(u8, head_branch, &std.ascii.whitespace));
+
+    const upstream = try testRunGitCapture(allocator, dest, &.{ "rev-parse", "--abbrev-ref", "feature@{upstream}" });
+    defer allocator.free(upstream);
+    try std.testing.expectEqualStrings("origin/feature", std.mem.trim(u8, upstream, &std.ascii.whitespace));
+
+    // The very first converge of a fresh clone must land on the requested
+    // revision's tip, not the remote default branch's (pre-fix behavior).
+    const first_sha = try testRunGitCapture(allocator, dest, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(first_sha);
+    const feature_sha = try testRunGitCapture(allocator, source, &.{ "rev-parse", "feature" });
+    defer allocator.free(feature_sha);
+    const main_sha = try testRunGitCapture(allocator, source, &.{ "rev-parse", "main" });
+    defer allocator.free(main_sha);
+    try std.testing.expectEqualStrings(
+        std.mem.trim(u8, feature_sha, &std.ascii.whitespace),
+        std.mem.trim(u8, first_sha, &std.ascii.whitespace),
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        std.mem.trim(u8, main_sha, &std.ascii.whitespace),
+        std.mem.trim(u8, first_sha, &std.ascii.whitespace),
+    ));
+
+    // Second run is idempotent.
+    result = try res.apply();
+    try std.testing.expect(!result.was_updated);
+
+    // A new upstream commit is picked up on the next converge.
+    try testRunGit(allocator, source, &.{ "checkout", "-q", "feature" });
+    try testRunGit(allocator, source, &.{ "commit", "-q", "--allow-empty", "-m", "feature-2" });
+    try testRunGit(allocator, source, &.{ "checkout", "-q", "main" });
+    result = try res.apply();
+    try std.testing.expect(result.was_updated);
+
+    const dest_sha = try testRunGitCapture(allocator, dest, &.{ "rev-parse", "HEAD" });
+    defer allocator.free(dest_sha);
+    const src_sha = try testRunGitCapture(allocator, source, &.{ "rev-parse", "feature" });
+    defer allocator.free(src_sha);
+    try std.testing.expectEqualStrings(
+        std.mem.trim(u8, src_sha, &std.ascii.whitespace),
+        std.mem.trim(u8, dest_sha, &std.ascii.whitespace),
+    );
+
+    // A checkout left on the wrong branch at the right SHA self-heals
+    // (the pre-fix behavior hard-reset the clone's default branch instead
+    // of ever creating the target branch).
+    try testRunGit(allocator, dest, &.{ "checkout", "-q", "-B", "master" });
+    result = try res.apply();
+    try std.testing.expect(result.was_updated);
+
+    const healed = try testRunGitCapture(allocator, dest, &.{ "rev-parse", "--abbrev-ref", "HEAD" });
+    defer allocator.free(healed);
+    try std.testing.expectEqualStrings("feature", std.mem.trim(u8, healed, &std.ascii.whitespace));
+}
+
+test "git resource DSL rejects remote branch revisions like Chef" {
+    var mrb = try mruby.State.init();
+    defer mrb.deinit();
+
+    // Without ZigBackend.add_git registered the prelude only validates, which
+    // is exactly what this test needs.
+    try mrb.evalString(ruby_prelude);
+
+    try std.testing.expectError(error.MRubyException, mrb.evalString(
+        \\git "/tmp/hola_git_origin_test" do
+        \\  repository "https://example.com/repo.git"
+        \\  revision "origin/main"
+        \\end
+    ));
+
+    // A plain branch revision passes validation.
+    try mrb.evalString(
+        \\git "/tmp/hola_git_origin_test" do
+        \\  repository "https://example.com/repo.git"
+        \\  revision "main"
+        \\end
+    );
 }
