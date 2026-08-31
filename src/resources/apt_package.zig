@@ -328,6 +328,7 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
                 if (stderr.len > 0) {
                     logger.err("[apt_package] error: {s}", .{stderr});
                 }
+                base.recordCommandFailure(term, stderr);
                 // Map action to corresponding error type
                 return switch (action) {
                     .install => common.PackageError.InstallFailed,
@@ -341,12 +342,14 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8, action: common.Acti
             const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
             defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
             logger.err("[apt_package] command killed by signal {d} for package(s): {s}", .{ @intFromEnum(sig), pkg_list });
+            base.recordCommandFailure(term, stderr);
             return common.PackageError.CommandFailed;
         },
         else => {
             const pkg_list = std.mem.join(allocator, ", ", packages) catch "unknown";
             defer if (pkg_list.ptr != "unknown".ptr) allocator.free(pkg_list);
             logger.err("[apt_package] command failed with unknown status for package(s): {s}", .{pkg_list});
+            base.recordCommandFailure(term, stderr);
             return common.PackageError.CommandFailed;
         },
     }

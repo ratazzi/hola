@@ -168,6 +168,140 @@ No YAML hell. No cryptic property lists. Just readable code.
 
 If you know Ruby, you already know this. If you don't, you can still read it.
 
+### Project Tasks with `hola run`
+
+Put a `Holafile` in a project to define repeatable, state-aware development tasks.
+Hola finds it from the current directory or any parent directory, then runs each
+resource as soon as it is declared. `holafile.rb` is also canonical; the Rake file
+names remain as legacy fallbacks and emit a migration warning when discovered
+implicitly:
+
+```ruby
+directory ".cache"
+
+file ".cache/config" => ".cache" do
+  File.open(".cache/config", "wb") { |file| file.write("ready\n") }
+end
+
+desc "Build the project"
+task :build => ".cache/config" do
+  sh "zig build"
+end
+
+namespace :db do
+  task :migrate, [:environment] do |_task, args|
+    args.with_defaults :environment => "development"
+    sh "./bin/migrate #{args.environment}"
+  end
+end
+
+task :default => :build
+```
+
+```bash
+hola run                         # Run the default task
+hola run build                   # Run an explicit task
+hola build                       # Shorthand when it does not collide with a built-in
+hola run "db:migrate[staging]"   # Pass task arguments
+hola run -T                      # List described tasks
+hola run -P                      # Show prerequisites
+hola run -n build                # Dry run
+hola run --trace build           # Trace task invocation
+hola run --output compact build  # Animated spinner for established scripts
+```
+
+Normal output is the default, including on a TTY. It is append-only and shows
+resource actions, nested composite resources, live command streams, change details,
+and structured failure diagnostics. `--output compact` enables the animated spinner;
+the older `plain` and `pretty` mode names remain accepted as aliases.
+
+The embedded mruby task runtime is inspired by Rake rather than compatible with it.
+It covers the common task surface: dependencies, namespaces,
+arguments, task enhancement and re-enabling, `Rake::Task[]`, `file`, `directory`, string
+suffix rules, `Dir.glob`, `FileList`, `rake/clean`, local `require`/
+`require_relative`, `FileUtils`, and streaming `sh` output. In task mode, `file`
+and `directory` always have their standard Rake meanings; `file_task` remains as
+a compatibility alias for `file`. Configuration resources enter through the
+explicit `resources` gateway and converge immediately when declared inside a task:
+
+```ruby
+task :configure do
+  resources do
+    directory "build"
+    file "build/version.txt" do
+      content VERSION
+    end
+  end
+end
+
+task :compile do
+  resources.execute "compile" do
+    command "zig build"
+  end
+end
+```
+
+The gateway delegates to the complete `Hola::Resources.*` API, so extensions have
+one stable namespace without forcing every call site to repeat the long prefix.
+Provision scripts retain their existing top-level resource DSL and may also use the
+namespace.
+
+#### Reusable provisioning phases
+
+A provisioning recipe may split its flat resource stream with `phase` markers.
+The marker changes the declaration context for the resources that follow it; it
+does not add another Ruby block or another output indentation level:
+
+```ruby
+# scripts/deploy.rb
+phase :prepare
+
+git "/srv/app/releases/next" do
+  repository "https://example.com/app.git"
+end
+
+execute "build application"
+
+phase :deploy
+
+link "/srv/app/current" do
+  to "/srv/app/releases/next"
+end
+
+execute "restart application"
+```
+
+The same recipe supports a complete unattended run or a single operator-selected
+stage:
+
+```bash
+hola provision scripts/deploy.rb
+hola provision --phase prepare scripts/deploy.rb
+hola provision --phase deploy scripts/deploy.rb
+```
+
+A Holafile can import those phases as namespaced tasks. No duplicate mise tasks or
+wrapper scripts are required:
+
+```ruby
+import_phases "scripts/deploy.rb", :as => :app
+
+task :release => ["app:prepare", "app:deploy"]
+task :default => :release
+```
+
+`hola run app:prepare` executes one phase, while `hola run release` composes both.
+Imported phases also appear in `hola run -T`. Recipes without a `phase` marker keep
+the existing flat provisioning behavior and the Chef-compatible top-level resource
+style. Agent tasks may provide an optional `"phase"` field; resource callback
+results include their phase name.
+
+This is an mruby runtime, not system Ruby. Regular expressions, native gems,
+backticks, `exit`, and the block form of `sh` are unavailable. Use `raise` or
+`abort` to stop a task. Delayed notifications are flushed after all requested
+tasks; subscriptions cannot target resources that are only declared by a later
+task.
+
 ---
 
 ## Performance
@@ -186,6 +320,8 @@ If you know Ruby, you already know this. If you don't, you can still read it.
 ```bash
 hola apply             # Run Brewfile + mise.toml + symlinks
 hola provision         # Run provision.rb (advanced)
+hola run [task]        # Run Rake-inspired project tasks
+hola <task>            # Shorthand for a project task
 ```
 
 ---

@@ -5,4 +5,5 @@ zig-out
 zig-pkg
 /indicatif
 /test_*
+/.hola-rake-test/
 /zig-cache

@@ -150,11 +150,15 @@ pub const Resource = struct {
                     if (result.stderr.len > 0) {
                         logger.err("stderr: {s}", .{result.stderr});
                     }
+                    base.recordCommandFailure(result.term, result.stderr);
                     return error.CommandFailed;
                 }
                 return true;
             },
-            else => return error.CommandFailed,
+            else => {
+                base.recordCommandFailure(result.term, result.stderr);
+                return error.CommandFailed;
+            },
         }
     }
 

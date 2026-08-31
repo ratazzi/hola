@@ -1,0 +1,126 @@
+# Integration fixture for `hola run`.
+#
+# Try:
+#   ./zig-out/bin/hola-macos-aarch64 run -T
+#   ./zig-out/bin/hola-macos-aarch64 run
+#   ./zig-out/bin/hola-macos-aarch64 run "db:migrate[staging,42]"
+#   ./zig-out/bin/hola-macos-aarch64 env_check HOLA_RAKE_ENV=demo
+
+require_relative "test/rake_helpers"
+
+DEMO_DIR = ".hola-rake-test"
+INPUT = "#{DEMO_DIR}/input.txt"
+GENERATED = "#{DEMO_DIR}/generated.txt"
+RULE_INPUT = "#{DEMO_DIR}/rule.in"
+RULE_OUTPUT = "#{DEMO_DIR}/rule.out"
+
+desc "Remove files created by this Holafile"
+require "rake/clean"
+CLEAN << DEMO_DIR
+
+directory DEMO_DIR
+
+desc "Prepare the demonstration directory"
+task :prepare => DEMO_DIR
+
+desc "Create the input file when it is missing"
+file INPUT => DEMO_DIR do
+  resources.file INPUT do
+    content "hello from hola rake\n"
+  end
+end
+
+desc "Generate a file from its prerequisite"
+file GENERATED => INPUT do |task|
+  sh "cp #{INPUT} #{task.name}"
+end
+
+desc "Create the input used by the suffix rule"
+file RULE_INPUT => DEMO_DIR do
+  resources.file RULE_INPUT do
+    content "suffix rule input\n"
+  end
+end
+
+rule ".out" => ".in" do |task|
+  sh "cp #{task.source} #{task.name}"
+end
+
+desc "Exercise file tasks, prerequisites, suffix rules, and streaming sh"
+task :build => [:prepare, GENERATED, RULE_OUTPUT] do
+  sh "wc -c #{GENERATED} #{RULE_OUTPUT}"
+end
+
+namespace :db do
+  desc "Run a namespaced task with arguments and defaults"
+  task :migrate, [:environment, :version] do |_task, args|
+    args.with_defaults :environment => "development", :version => "latest"
+    puts "migrating #{args.environment} to #{args.version}"
+  end
+
+  desc "Invoke another task from inside a namespace"
+  task :setup => :migrate do
+    puts "database setup complete"
+  end
+end
+
+desc "Inspect project files with Dir.glob and FileList"
+task :glob_demo do
+  ruby_files = FileList["**/*.rb"].exclude(".hola-rake-test/**")
+  zig_files = Dir.glob("src/**/*.zig")
+  raise "expected Ruby files" if ruby_files.empty?
+  raise "expected Zig files" if zig_files.empty?
+  puts "Ruby files: #{ruby_files.length}; Zig files: #{zig_files.length}"
+end
+
+desc "Read a helper loaded with require_relative"
+task :helper_demo do
+  puts rake_helper_message
+end
+
+desc "Check command-line ENV assignments and per-command environment overrides"
+task :env_check, [:expected] do |_task, args|
+  args.with_defaults :expected => "demo"
+  raise "HOLA_RAKE_ENV does not match" unless ENV["HOLA_RAKE_ENV"] == args.expected
+  sh 'test "$HOLA_RAKE_ENV" = "$EXPECTED"', :env => {"EXPECTED" => args.expected}
+end
+
+desc "Demonstrate that redefining a task enhances its actions"
+task :enhanced do
+  puts "enhanced action one"
+end
+
+task :enhanced do
+  puts "enhanced action two"
+end
+
+desc "Invoke and re-enable a task programmatically"
+task :invoke_demo do
+  target = Rake::Task[:enhanced]
+  target.invoke
+  target.reenable
+  target.invoke
+end
+
+desc "Run multiple prerequisites through the multitask compatibility API"
+multitask :checks => [:glob_demo, :helper_demo]
+
+desc "Rescue a failed hola resource and continue"
+task :rescued_failure do
+  begin
+    sh "exit 7"
+  rescue Hola::ResourceError => error
+    puts "rescued: #{error.message}"
+  end
+end
+
+namespace :cycle do
+  task :a => :b
+  task :b => :a
+end
+
+desc "Intentionally fail to demonstrate circular-dependency detection"
+task :cycle_demo => "cycle:a"
+
+desc "Build the default fixture"
+task :default => :build

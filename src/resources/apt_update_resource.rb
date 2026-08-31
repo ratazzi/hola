@@ -12,12 +12,15 @@ class AptUpdateResource
 
     instance_eval(&block) if block
 
-    # Execute the actual logic based on action
-    case @action
-    when :periodic
-      apply_periodic
-    when :update
-      apply_update
+    Hola::Resources.with_resource_scope("apt_update", @name, @action) do
+      # apt_update is a composite resource. Children keep this parent in their
+      # display path so normal output mirrors Chef's nested custom resources.
+      case @action
+      when :periodic
+        apply_periodic
+      when :update
+        apply_update
+      end
     end
   end
 
@@ -54,7 +57,7 @@ class AptUpdateResource
     command_str = "apt-get update && mkdir -p /var/lib/apt/periodic && touch /var/lib/apt/periodic/update-success-stamp"
     stamp_path = "/var/lib/apt/periodic/update-success-stamp"
 
-    execute @name do
+    Hola::Resources.execute @name do
       command command_str
       action "run"
 
@@ -85,7 +88,7 @@ class AptUpdateResource
     # Always update, no frequency check
     ignore_fail = @ignore_failure
 
-    execute @name do
+    Hola::Resources.execute @name do
       command "apt-get update"
       action "run"
       ignore_failure ignore_fail

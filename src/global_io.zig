@@ -7,6 +7,7 @@
 //! standalone tools), falls back to the blocking single-threaded
 //! implementation from std.
 const std = @import("std");
+const builtin = @import("builtin");
 
 var override: ?std.Io = null;
 
@@ -15,7 +16,9 @@ pub fn set(new_io: std.Io) void {
 }
 
 pub fn io() std.Io {
-    return override orelse std.Io.Threaded.global_single_threaded.io();
+    if (override) |value| return value;
+    if (builtin.is_test) return std.testing.io;
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 var environ_map: ?*std.process.Environ.Map = null;

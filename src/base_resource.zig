@@ -18,16 +18,53 @@ const GUARD_REAP_GRACE_MS: i64 = 2000;
 // apply loop and the agent callback can then show details like the raised Ruby
 // exception, failed URL, HTTP status, or checksum mismatch.
 const PROVISION_ERROR_DETAIL_BUF_SIZE = 1024;
+const PROVISION_ERROR_TRACE_BUF_SIZE = 4 * 1024;
+const COMMAND_STDERR_SUMMARY_SIZE = 768;
+const COMMAND_OUTPUT_CAPTURE_SIZE = 8 * 1024;
 threadlocal var provision_error_detail_buf: [PROVISION_ERROR_DETAIL_BUF_SIZE]u8 = undefined;
 threadlocal var provision_error_detail_len: usize = 0;
+threadlocal var provision_error_trace_buf: [PROVISION_ERROR_TRACE_BUF_SIZE]u8 = undefined;
+threadlocal var provision_error_trace_len: usize = 0;
+threadlocal var command_term: ?std.process.Child.Term = null;
+threadlocal var command_timeout_s: ?u32 = null;
+threadlocal var command_stdout_buf: [COMMAND_OUTPUT_CAPTURE_SIZE]u8 = undefined;
+threadlocal var command_stdout_len: usize = 0;
+threadlocal var command_stderr_buf: [COMMAND_OUTPUT_CAPTURE_SIZE]u8 = undefined;
+threadlocal var command_stderr_len: usize = 0;
+
+pub const CommandDiagnostic = struct {
+    term: ?std.process.Child.Term,
+    timeout_s: ?u32,
+    stdout: ?[]const u8,
+    stderr: ?[]const u8,
+};
+
+pub const CommandDiagnosticSnapshot = struct {
+    term: ?std.process.Child.Term = null,
+    timeout_s: ?u32 = null,
+    stdout: [COMMAND_OUTPUT_CAPTURE_SIZE]u8 = undefined,
+    stdout_len: usize = 0,
+    stderr: [COMMAND_OUTPUT_CAPTURE_SIZE]u8 = undefined,
+    stderr_len: usize = 0,
+};
 
 pub fn clearProvisionErrorDetail() void {
     provision_error_detail_len = 0;
+    provision_error_trace_len = 0;
+    command_term = null;
+    command_timeout_s = null;
+    command_stdout_len = 0;
+    command_stderr_len = 0;
 }
 
 pub fn getProvisionErrorDetail() ?[]const u8 {
     if (provision_error_detail_len == 0) return null;
     return provision_error_detail_buf[0..provision_error_detail_len];
+}
+
+pub fn getProvisionErrorTrace() ?[]const u8 {
+    if (provision_error_trace_len == 0) return null;
+    return provision_error_trace_buf[0..provision_error_trace_len];
 }
 
 pub fn recordProvisionErrorDetailSlice(detail: []const u8) void {
@@ -43,6 +80,169 @@ pub fn recordProvisionErrorDetail(comptime fmt: []const u8, args: anytype) void 
         break :blk provision_error_detail_buf[0..fallback.len];
     };
     provision_error_detail_len = written.len;
+}
+
+/// Translate internal Zig errors into stable, familiar operator-facing text.
+/// Structured results may keep the original error name as a machine-readable
+/// code, but terminal output should read like the underlying OS/tool error.
+pub fn userFacingError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.NotDir => "Not a directory",
+        error.IsDir => "Is a directory",
+        error.AccessDenied, error.PermissionDenied => "Permission denied",
+        error.ReadOnlyFileSystem => "Read-only file system",
+        error.PathAlreadyExists => "File exists",
+        error.DirNotEmpty => "Directory not empty",
+        error.NameTooLong => "File name too long",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.NoSpaceLeft => "No space left on device",
+        error.DiskQuota => "Disk quota exceeded",
+        error.FileTooBig => "File too large",
+        error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => "Too many open files",
+        error.DeviceBusy => "Device or resource busy",
+        error.CommandFailed => "Command failed",
+        error.CommandTimedOut => "Command timed out",
+        error.CommandKilled => "Command terminated",
+        error.CommandStopped => "Command stopped",
+        error.RubyBlockFailed => "Ruby block failed",
+        error.DownloadFailed => "Download failed",
+        error.ChecksumMismatch => "Checksum mismatch",
+        else => @errorName(err),
+    };
+}
+
+test "internal errors have operator-facing descriptions" {
+    try std.testing.expectEqualStrings("No such file or directory", userFacingError(error.FileNotFound));
+    try std.testing.expectEqualStrings("Not a directory", userFacingError(error.NotDir));
+    try std.testing.expectEqualStrings("Permission denied", userFacingError(error.AccessDenied));
+    try std.testing.expectEqualStrings("Command failed", userFacingError(error.CommandFailed));
+}
+
+/// Record a process failure with the exit status and a bounded, single-line
+/// stderr summary suitable for both the progress display and structured result.
+pub fn recordCommandFailure(term: std.process.Child.Term, stderr: []const u8) void {
+    recordCommandFailureOutput(term, "", stderr);
+}
+
+pub fn recordCommandFailureOutput(term: std.process.Child.Term, stdout: []const u8, stderr: []const u8) void {
+    storeCommandDiagnostic(term, null, stdout, stderr);
+    var stderr_buf: [COMMAND_STDERR_SUMMARY_SIZE]u8 = undefined;
+    const stderr_summary = normalizeCommandDiagnostic(stderr, &stderr_buf);
+
+    switch (term) {
+        .exited => |code| if (stderr_summary.len > 0)
+            recordProvisionErrorDetail("command exited with status {d}; stderr: {s}", .{ code, stderr_summary })
+        else
+            recordProvisionErrorDetail("command exited with status {d}", .{code}),
+        .signal => |signal| if (stderr_summary.len > 0)
+            recordProvisionErrorDetail("command terminated by signal {d}; stderr: {s}", .{ @intFromEnum(signal), stderr_summary })
+        else
+            recordProvisionErrorDetail("command terminated by signal {d}", .{@intFromEnum(signal)}),
+        .stopped => |signal| if (stderr_summary.len > 0)
+            recordProvisionErrorDetail("command stopped by signal {d}; stderr: {s}", .{ @intFromEnum(signal), stderr_summary })
+        else
+            recordProvisionErrorDetail("command stopped by signal {d}", .{@intFromEnum(signal)}),
+        .unknown => |status| if (stderr_summary.len > 0)
+            recordProvisionErrorDetail("command returned unknown status {d}; stderr: {s}", .{ status, stderr_summary })
+        else
+            recordProvisionErrorDetail("command returned unknown status {d}", .{status}),
+    }
+}
+
+pub fn recordCommandTimeout(seconds: u32, stderr: []const u8) void {
+    recordCommandTimeoutOutput(seconds, "", stderr);
+}
+
+pub fn recordCommandTimeoutOutput(seconds: u32, stdout: []const u8, stderr: []const u8) void {
+    storeCommandDiagnostic(null, seconds, stdout, stderr);
+    var stderr_buf: [COMMAND_STDERR_SUMMARY_SIZE]u8 = undefined;
+    const stderr_summary = normalizeCommandDiagnostic(stderr, &stderr_buf);
+    if (stderr_summary.len > 0) {
+        recordProvisionErrorDetail("command timed out after {d}s; stderr: {s}", .{ seconds, stderr_summary });
+    } else {
+        recordProvisionErrorDetail("command timed out after {d}s", .{seconds});
+    }
+}
+
+fn copyCommandOutput(destination: []u8, input: []const u8) usize {
+    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
+    const copy_len = @min(destination.len, trimmed.len);
+    @memcpy(destination[0..copy_len], trimmed[0..copy_len]);
+    return copy_len;
+}
+
+fn storeCommandDiagnostic(term: ?std.process.Child.Term, timeout_s: ?u32, stdout: []const u8, stderr: []const u8) void {
+    command_term = term;
+    command_timeout_s = timeout_s;
+    command_stdout_len = copyCommandOutput(&command_stdout_buf, stdout);
+    command_stderr_len = copyCommandOutput(&command_stderr_buf, stderr);
+}
+
+pub fn getCommandDiagnostic() ?CommandDiagnostic {
+    if (command_term == null and command_timeout_s == null and command_stdout_len == 0 and command_stderr_len == 0) return null;
+    return .{
+        .term = command_term,
+        .timeout_s = command_timeout_s,
+        .stdout = if (command_stdout_len > 0) command_stdout_buf[0..command_stdout_len] else null,
+        .stderr = if (command_stderr_len > 0) command_stderr_buf[0..command_stderr_len] else null,
+    };
+}
+
+pub fn snapshotCommandDiagnostic() CommandDiagnosticSnapshot {
+    var snapshot = CommandDiagnosticSnapshot{
+        .term = command_term,
+        .timeout_s = command_timeout_s,
+        .stdout_len = command_stdout_len,
+        .stderr_len = command_stderr_len,
+    };
+    @memcpy(snapshot.stdout[0..command_stdout_len], command_stdout_buf[0..command_stdout_len]);
+    @memcpy(snapshot.stderr[0..command_stderr_len], command_stderr_buf[0..command_stderr_len]);
+    return snapshot;
+}
+
+pub fn restoreCommandDiagnostic(snapshot: *const CommandDiagnosticSnapshot) void {
+    command_term = snapshot.term;
+    command_timeout_s = snapshot.timeout_s;
+    command_stdout_len = snapshot.stdout_len;
+    command_stderr_len = snapshot.stderr_len;
+    @memcpy(command_stdout_buf[0..command_stdout_len], snapshot.stdout[0..command_stdout_len]);
+    @memcpy(command_stderr_buf[0..command_stderr_len], snapshot.stderr[0..command_stderr_len]);
+}
+
+fn normalizeCommandDiagnostic(input: []const u8, output: []u8) []const u8 {
+    const trimmed = std.mem.trim(u8, input, &std.ascii.whitespace);
+    if (trimmed.len == 0 or output.len == 0) return "";
+
+    var output_len: usize = 0;
+    var pending_space = false;
+    var truncated = false;
+    for (trimmed) |byte| {
+        if (std.ascii.isWhitespace(byte)) {
+            pending_space = output_len > 0;
+            continue;
+        }
+
+        const required = @as(usize, @intFromBool(pending_space)) + 1;
+        const reserve: usize = if (output.len >= 3) 3 else 0;
+        if (output_len + required > output.len - reserve) {
+            truncated = true;
+            break;
+        }
+        if (pending_space) {
+            output[output_len] = ' ';
+            output_len += 1;
+            pending_space = false;
+        }
+        output[output_len] = byte;
+        output_len += 1;
+    }
+
+    if (truncated and output.len - output_len >= 3) {
+        @memcpy(output[output_len..][0..3], "...");
+        output_len += 3;
+    }
+    return output[0..output_len];
 }
 
 /// Capture a friendly summary of an mruby exception into the thread-local
@@ -66,6 +266,34 @@ pub fn recordProvisionException(mrb: *mruby.mrb_state, exc: mruby.mrb_value, pre
             break :blk provision_error_detail_buf[0..fallback.len];
         };
     provision_error_detail_len = written.len;
+    captureProvisionBacktrace(mrb, exc);
+}
+
+fn captureProvisionBacktrace(mrb: *mruby.mrb_state, exc: mruby.mrb_value) void {
+    provision_error_trace_len = 0;
+    const backtrace = switch (mruby.callProtected(mrb, exc, "backtrace", &.{})) {
+        .ok => |value| value,
+        .raised => return,
+    };
+    if (mruby.zig_mrb_array_p(backtrace) == 0) return;
+
+    const line_count: usize = @intCast(@max(mruby.mrb_ary_len(mrb, backtrace), 0));
+    for (0..@min(line_count, 32)) |index| {
+        const value = mruby.mrb_ary_ref(mrb, backtrace, @intCast(index));
+        if (mruby.zig_mrb_string_p(value) == 0) continue;
+        const line = std.mem.span(mruby.mrb_str_to_cstr(mrb, value));
+        const remaining = provision_error_trace_buf.len - provision_error_trace_len;
+        if (remaining <= 1) break;
+        const copy_len = @min(line.len, remaining - 1);
+        @memcpy(provision_error_trace_buf[provision_error_trace_len..][0..copy_len], line[0..copy_len]);
+        provision_error_trace_len += copy_len;
+        provision_error_trace_buf[provision_error_trace_len] = '\n';
+        provision_error_trace_len += 1;
+        if (copy_len < line.len) break;
+    }
+    if (provision_error_trace_len > 0 and provision_error_trace_buf[provision_error_trace_len - 1] == '\n') {
+        provision_error_trace_len -= 1;
+    }
 }
 
 /// Result of applying a resource
@@ -146,17 +374,14 @@ pub const CommonProps = struct {
                 return "skipped due to only_if"; // command failed (non-zero exit)
             }
         } else if (self.only_if_block) |block| {
-            // Use funcall instead of yield to properly handle exceptions
-            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
-            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
-
-            // Check for exceptions during call
-            const exc = mruby.mrb_get_exception(mrb);
-            if (mruby.mrb_test(exc)) {
-                recordProvisionException(mrb, exc, "only_if block raised");
-                mruby.mrb_print_error(mrb);
-                return error.MRubyException;
-            }
+            const result = switch (mruby.callProtected(mrb, block, "call", &.{})) {
+                .ok => |value| value,
+                .raised => |exc| {
+                    recordProvisionException(mrb, exc, "only_if block raised");
+                    mruby.zig_mrb_print_exc(mrb, exc);
+                    return error.MRubyException;
+                },
+            };
 
             if (!mruby.mrb_test(result)) {
                 return "skipped due to only_if"; // only_if returned falsy
@@ -172,17 +397,14 @@ pub const CommonProps = struct {
                 return "skipped due to not_if"; // command succeeded (exit 0)
             }
         } else if (self.not_if_block) |block| {
-            // Use funcall instead of yield to properly handle exceptions
-            const call_sym = mruby.mrb_intern_cstr(mrb, "call");
-            const result = mruby.mrb_funcall_argv(mrb, block, call_sym, 0, null);
-
-            // Check for exceptions during call
-            const exc = mruby.mrb_get_exception(mrb);
-            if (mruby.mrb_test(exc)) {
-                recordProvisionException(mrb, exc, "not_if block raised");
-                mruby.mrb_print_error(mrb);
-                return error.MRubyException;
-            }
+            const result = switch (mruby.callProtected(mrb, block, "call", &.{})) {
+                .ok => |value| value,
+                .raised => |exc| {
+                    recordProvisionException(mrb, exc, "not_if block raised");
+                    mruby.zig_mrb_print_exc(mrb, exc);
+                    return error.MRubyException;
+                },
+            };
 
             if (mruby.mrb_test(result)) {
                 return "skipped due to not_if"; // not_if returned truthy

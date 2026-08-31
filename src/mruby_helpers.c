@@ -6,6 +6,7 @@
 #include <mruby/variable.h>
 #include <mruby/class.h>
 #include <mruby/error.h>
+#include <mruby/compile.h>
 #include <stdio.h>
 
 #ifdef __linux__
@@ -182,4 +183,78 @@ void zig_mrb_exc_summary(mrb_state *mrb, mrb_value exc, char *buf, size_t buflen
     } else {
         snprintf(buf, buflen, "%s", class_name);
     }
+}
+
+struct zig_mrb_funcall_context {
+    mrb_value receiver;
+    mrb_sym method;
+    mrb_int argc;
+    const mrb_value *argv;
+};
+
+static mrb_value zig_mrb_funcall_body(mrb_state *mrb, void *userdata) {
+    struct zig_mrb_funcall_context *context = userdata;
+    return mrb_funcall_argv(mrb, context->receiver, context->method,
+                            context->argc, context->argv);
+}
+
+// Call Ruby with a catch frame even when invoked reentrantly from the VM. This
+// prevents a Ruby raise from longjmping across Zig stack frames and skipping
+// their cleanup.
+mrb_value zig_mrb_funcall_protected(mrb_state *mrb, mrb_value receiver,
+                                    mrb_sym method, mrb_int argc,
+                                    const mrb_value *argv, mrb_bool *raised) {
+    struct zig_mrb_funcall_context context = {
+        .receiver = receiver,
+        .method = method,
+        .argc = argc,
+        .argv = argv,
+    };
+    return mrb_protect_error(mrb, zig_mrb_funcall_body, &context, raised);
+}
+
+int zig_mrb_gc_arena_save(mrb_state *mrb) {
+    return mrb_gc_arena_save(mrb);
+}
+
+void zig_mrb_gc_arena_restore(mrb_state *mrb, int arena_index) {
+    mrb_gc_arena_restore(mrb, arena_index);
+}
+
+void zig_mrb_print_exc(mrb_state *mrb, mrb_value exc) {
+    struct RObject *previous = mrb->exc;
+    mrb->exc = mrb_exc_ptr(exc);
+    mrb_print_error(mrb);
+    mrb->exc = previous;
+}
+
+struct zig_mrb_load_context {
+    const char *source;
+    size_t length;
+    mrbc_context *context;
+};
+
+static mrb_value zig_mrb_load_body(mrb_state *mrb, void *userdata) {
+    struct zig_mrb_load_context *context = userdata;
+    return mrb_load_nstring_cxt(mrb, context->source, context->length,
+                                context->context);
+}
+
+mrb_value zig_mrb_load_nstring_protected(mrb_state *mrb, const char *source,
+                                         size_t length, const char *filename,
+                                         mrb_bool *raised) {
+    mrbc_context *compiler_context = mrbc_context_new(mrb);
+    if (compiler_context == NULL) {
+        if (raised) *raised = TRUE;
+        return mrb_nil_value();
+    }
+    mrbc_filename(mrb, compiler_context, filename);
+    struct zig_mrb_load_context context = {
+        .source = source,
+        .length = length,
+        .context = compiler_context,
+    };
+    mrb_value result = mrb_protect_error(mrb, zig_mrb_load_body, &context, raised);
+    mrbc_context_free(mrb, compiler_context);
+    return result;
 }

@@ -349,9 +349,11 @@ test "Manager task queue operations" {
 
     // Add multiple tasks
     for (0..3) |i| {
+        const id = try std.fmt.allocPrint(allocator, "task-{d}", .{i});
+        defer allocator.free(id);
         const task = try Task.init(
             allocator,
-            try std.fmt.allocPrint(allocator, "task-{d}", .{i}),
+            id,
             "https://example.com/file.zip",
             "file.zip",
             "/tmp/file.zip.tmp",

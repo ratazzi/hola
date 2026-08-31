@@ -96,10 +96,10 @@ const AptBootstrap = if (is_linux) struct {
 
     pub fn installPackagesParallel(allocator: std.mem.Allocator, config_root: []const u8) !void {
         // For apt we run installs sequentially: apt first, then mise.
-        var apt_display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+        var apt_display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
         defer apt_display.deinit();
 
-        var mise_display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+        var mise_display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
         defer mise_display.deinit();
 
         // Detect apt (apt-get preferred) at the platform layer so we can extend
@@ -135,7 +135,7 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
 
     // Use simple output for apply command (no spinner)
     // provision command will use its own spinner display
-    var display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer display.deinit();
 
     // Print banner with version info using help formatter
@@ -192,7 +192,7 @@ fn runWithBootstrap(comptime Impl: type, allocator: std.mem.Allocator, opts: App
     }
 
     std.debug.print("\n", .{});
-    // provision.run() will use its own ModernProvisionDisplay with spinner and will show section
+    // provision.run() owns its resource display and section output.
     var prov_result = try provision.run(allocator, .{ .script_path = script_path });
     defer prov_result.deinit(allocator);
 
@@ -212,7 +212,7 @@ pub fn run(allocator: std.mem.Allocator, opts: ApplyOptions) !void {
 
 /// Step 1: Link dotfiles
 fn linkDotfiles(allocator: std.mem.Allocator, config_root: []const u8, dry_run: bool, display: *modern_display.ModernProvisionDisplay) !void {
-    try display.showSection("Linking Dotfiles");
+    try display.showSection("Linking dotfiles");
 
     // config_root is the dotfiles repository location
     // Check if it exists
@@ -247,13 +247,13 @@ fn linkDotfiles(allocator: std.mem.Allocator, config_root: []const u8, dry_run: 
     }
 
     // Call dotfiles.run() - it will output directly to stdout
-    // Since show_progress is false, output will be clean text
+    // Normal mode uses an append-only execution log.
     try dotfiles.run(allocator, options);
 }
 
 /// Step 2: Install homebrew (if not installed)
 fn installHomebrew(allocator: std.mem.Allocator, display: *modern_display.ModernProvisionDisplay) !void {
-    try display.showSection("Installing Foundation");
+    try display.showSection("Installing foundation");
 
     // Check if brew is already installed
     const brew_path = brew.findBrew(allocator) catch |err| switch (err) {
@@ -304,10 +304,10 @@ fn installPackagesParallelImpl(allocator: std.mem.Allocator, config_root: []cons
     // Note: Section display is handled in child functions to avoid thread safety issues
 
     // Create separate display instances for each thread to avoid thread safety issues
-    var brew_display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var brew_display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer brew_display.deinit();
 
-    var mise_display = try modern_display.ModernProvisionDisplay.init(allocator, false);
+    var mise_display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
     defer mise_display.deinit();
 
     // Spawn threads for parallel execution
@@ -324,7 +324,7 @@ fn installPackagesParallelImpl(allocator: std.mem.Allocator, config_root: []cons
 
 /// Install Homebrew packages from Brewfile using brew bundle --global
 fn installBrewPackages(allocator: std.mem.Allocator, _: []const u8, display: *modern_display.ModernProvisionDisplay) !void {
-    try display.showSection("Installing Packages (Parallel)");
+    try display.showSection("Installing packages (parallel)");
 
     const brew_path = try brew.findBrew(allocator);
     defer allocator.free(brew_path);

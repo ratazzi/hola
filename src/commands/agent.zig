@@ -171,6 +171,20 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
         }
         break :blk "unknown";
     };
+    const phase: ?[]const u8 = blk: {
+        if (obj.get("phase")) |value| {
+            if (value != .string or value.string.len == 0) {
+                const detail = "'phase' field must be a non-empty string";
+                std.debug.print("[agent] {s}\n", .{detail});
+                if (callback_url) |cb| {
+                    sendCallback(allocator, cb, data, "error", "InvalidPhase", detail, null, endpoint, tls_auth);
+                }
+                return;
+            }
+            break :blk value.string;
+        }
+        break :blk null;
+    };
     // Extract params field as JSON string for data_bag injection
     const params_json: ?[]const u8 = blk: {
         if (obj.get("params")) |v| {
@@ -201,10 +215,10 @@ fn handleTaskJson(allocator: std.mem.Allocator, data: []const u8, default_callba
 
     // Only pass mTLS credentials if script URL matches agent endpoint origin
     const use_tls_for_download = originMatches(url, endpoint);
-    var prov_result = provision_cmd.runScript(allocator, url, false, params_json, secrets_json, .{
+    var prov_result = provision_cmd.runScript(allocator, url, .normal, params_json, secrets_json, .{
         .cert = if (use_tls_for_download) tls_auth.cert else null,
         .key = if (use_tls_for_download) tls_auth.key else null,
-    }) catch |err| {
+    }, phase) catch |err| {
         std.debug.print("[agent] provision failed: {}\n", .{err});
         if (callback_url) |cb| {
             sendCallback(allocator, cb, data, "error", @errorName(err), base_resource.getProvisionErrorDetail(), null, endpoint, tls_auth);
@@ -254,6 +268,9 @@ fn buildCallbackBody(allocator: std.mem.Allocator, event_data: []const u8, statu
             var res_obj: std.json.ObjectMap = .empty;
             try res_obj.put(aa, "type", .{ .string = rr.type_name });
             try res_obj.put(aa, "name", .{ .string = rr.name });
+            if (rr.phase) |phase_name| {
+                try res_obj.put(aa, "phase", .{ .string = phase_name });
+            }
             try res_obj.put(aa, "action", .{ .string = rr.action });
             try res_obj.put(aa, "updated", .{ .bool = rr.was_updated });
             if (rr.skipped) {
@@ -723,9 +740,10 @@ fn printHelp(reason: ?[]const u8) !void {
         \\                           connections are only detected by TCP keepalive / send errors.
         \\
         \\Task JSON Format:
-        \\  {"url": "https://r2.example.com/task.rb", "callback": "https://example.com/done", ...}
+        \\  {"url": "https://r2.example.com/task.rb", "phase": "deploy", "callback": "https://example.com/done", ...}
         \\
         \\  - url       (required) Provision script URL
+        \\  - phase     (optional) Execute only this provisioning phase
         \\  - callback  (optional) Callback URL for this task (overrides --callback)
         \\  - ...       All other fields are passed through to callback
         \\
@@ -752,10 +770,12 @@ test "buildCallbackBody with ProvisionResult" {
 
     const type1 = try allocator.dupe(u8, "file");
     const name1 = try allocator.dupe(u8, "/tmp/config");
+    const phase1 = try allocator.dupe(u8, "prepare");
     const action1 = try allocator.dupe(u8, "create");
     try resource_results.append(allocator, .{
         .type_name = type1,
         .name = name1,
+        .phase = phase1,
         .action = action1,
         .was_updated = true,
         .skipped = false,
@@ -802,6 +822,7 @@ test "buildCallbackBody with ProvisionResult" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"duration_ms\":142") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"resources\":[") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"/tmp/config\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"phase\":\"prepare\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"skip_reason\":\"up to date\"") != null);
     // url, callback, and secrets should be removed
     try std.testing.expect(std.mem.indexOf(u8, body, "\"url\":") == null);
@@ -812,6 +833,7 @@ test "buildCallbackBody with ProvisionResult" {
     // Free the duped strings
     allocator.free(type1);
     allocator.free(name1);
+    allocator.free(phase1);
     allocator.free(action1);
     allocator.free(type2);
     allocator.free(name2);

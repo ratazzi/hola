@@ -69,6 +69,9 @@ pub fn zig_env_set(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mruby
     if (result != 0) {
         return mruby.mrb_nil_value();
     }
+    if (global_io.environMap()) |map| {
+        map.put(key_ptr[0..@intCast(key_len)], value) catch return mruby.mrb_nil_value();
+    }
 
     return mruby.mrb_str_new(mrb, value.ptr, @intCast(value.len));
 }
@@ -92,6 +95,9 @@ pub fn zig_env_delete(mrb: *mruby.mrb_state, _: mruby.mrb_value) callconv(.c) mr
 
     // Unset environment variable using libc
     _ = c.unsetenv(key_z.ptr);
+    if (global_io.environMap()) |map| {
+        _ = map.swapRemove(key_ptr[0..@intCast(key_len)]);
+    }
 
     return mruby.mrb_nil_value();
 }

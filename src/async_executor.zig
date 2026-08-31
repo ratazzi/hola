@@ -1,5 +1,8 @@
 const std = @import("std");
 const global_io = @import("global_io.zig");
+const base = @import("base_resource.zig");
+
+const ERROR_DETAIL_CAPACITY = 1024;
 
 /// Global poll callback for UI updates during async execution
 threadlocal var global_poll_callback: ?*const fn () anyerror!void = null;
@@ -20,6 +23,9 @@ pub const AsyncExecutor = struct {
             status: std.atomic.Value(u8), // 0=running, 1=completed, 2=failed
             result: ?T = null,
             err: ?anyerror = null,
+            error_detail: [ERROR_DETAIL_CAPACITY]u8 = undefined,
+            error_detail_len: usize = 0,
+            command_diagnostic: base.CommandDiagnosticSnapshot = .{},
             mutex: std.Io.Mutex = .init,
 
             pub fn init() @This() {
@@ -44,6 +50,8 @@ pub const AsyncExecutor = struct {
                 const result = func() catch |err| {
                     context.mutex.lockUncancelable(global_io.io());
                     context.err = err;
+                    captureWorkerErrorDetail(&context.error_detail, &context.error_detail_len);
+                    context.command_diagnostic = base.snapshotCommandDiagnostic();
                     context.mutex.unlock(global_io.io());
                     context.status.store(2, .release);
                     return;
@@ -71,12 +79,15 @@ pub const AsyncExecutor = struct {
 
         // Wait for thread to complete
         thread.join();
+        if (global_poll_callback) |callback| callback() catch {};
 
         // Check result
         ctx.mutex.lockUncancelable(global_io.io());
         defer ctx.mutex.unlock(global_io.io());
 
         if (ctx.status.load(.acquire) == 2) {
+            restoreWorkerErrorDetail(ctx.error_detail[0..ctx.error_detail_len]);
+            base.restoreCommandDiagnostic(&ctx.command_diagnostic);
             return ctx.err orelse error.UnknownError;
         }
 
@@ -108,6 +119,9 @@ pub const AsyncExecutor = struct {
             status: std.atomic.Value(u8),
             result: ?ResultType = null,
             err: ?anyerror = null,
+            error_detail: [ERROR_DETAIL_CAPACITY]u8 = undefined,
+            error_detail_len: usize = 0,
+            command_diagnostic: base.CommandDiagnosticSnapshot = .{},
             mutex: std.Io.Mutex = .init,
         };
 
@@ -122,6 +136,8 @@ pub const AsyncExecutor = struct {
                 const result = func(task_ctx.user_context) catch |err| {
                     task_ctx.mutex.lockUncancelable(global_io.io());
                     task_ctx.err = err;
+                    captureWorkerErrorDetail(&task_ctx.error_detail, &task_ctx.error_detail_len);
+                    task_ctx.command_diagnostic = base.snapshotCommandDiagnostic();
                     task_ctx.mutex.unlock(global_io.io());
                     task_ctx.status.store(2, .release);
                     return;
@@ -156,15 +172,45 @@ pub const AsyncExecutor = struct {
 
         // Wait for thread to complete
         thread.join();
+        const final_callback = poll_callback orelse global_poll_callback;
+        if (final_callback) |callback| callback() catch {};
 
         // Check result
         ctx.mutex.lockUncancelable(global_io.io());
         defer ctx.mutex.unlock(global_io.io());
 
         if (ctx.status.load(.acquire) == 2) {
+            restoreWorkerErrorDetail(ctx.error_detail[0..ctx.error_detail_len]);
+            base.restoreCommandDiagnostic(&ctx.command_diagnostic);
             return ctx.err orelse error.UnknownError;
         }
 
         return ctx.result.?;
     }
 };
+
+fn captureWorkerErrorDetail(buffer: []u8, length: *usize) void {
+    const detail = base.getProvisionErrorDetail() orelse return;
+    const copy_len = @min(detail.len, buffer.len);
+    @memcpy(buffer[0..copy_len], detail[0..copy_len]);
+    length.* = copy_len;
+}
+
+fn restoreWorkerErrorDetail(detail: []const u8) void {
+    if (detail.len > 0) base.recordProvisionErrorDetailSlice(detail);
+}
+
+test "async executor propagates worker error detail" {
+    base.clearProvisionErrorDetail();
+    defer base.clearProvisionErrorDetail();
+
+    const Worker = struct {
+        fn fail() !void {
+            base.recordProvisionErrorDetailSlice("worker detail");
+            return error.CommandFailed;
+        }
+    };
+
+    try std.testing.expectError(error.CommandFailed, AsyncExecutor.execute(void, Worker.fail));
+    try std.testing.expectEqualStrings("worker detail", base.getProvisionErrorDetail().?);
+}

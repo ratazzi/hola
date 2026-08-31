@@ -5,6 +5,7 @@ const ansi = @import("../ansi_constants.zig");
 const logger = @import("../logger.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const global_io = @import("../global_io.zig");
+const output_channel = @import("../output_channel.zig");
 
 const DEFAULT_TIMEOUT_S: u32 = 3600;
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
@@ -14,6 +15,44 @@ const TERM_GRACE_MS: i64 = 2000;
 const PIPE_CLOSE_GRACE_MS: i64 = 5000;
 const POST_EXIT_PIPE_GRACE_MS: i64 = 1000;
 const REAP_GRACE_MS: i64 = 2000;
+
+pub const LineSplitter = struct {
+    allocator: std.mem.Allocator,
+    stream: output_channel.Stream,
+    sink: ?*output_channel.LineChannel,
+    partial: std.ArrayList(u8) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator, stream: output_channel.Stream, sink: ?*output_channel.LineChannel) LineSplitter {
+        return .{ .allocator = allocator, .stream = stream, .sink = sink };
+    }
+
+    pub fn deinit(self: *LineSplitter) void {
+        self.partial.deinit(self.allocator);
+    }
+
+    pub fn feed(self: *LineSplitter, bytes: []const u8) !void {
+        if (self.sink == null) return;
+        for (bytes) |byte| {
+            if (byte == '\n') {
+                self.emit();
+            } else {
+                try self.partial.append(self.allocator, byte);
+            }
+        }
+    }
+
+    pub fn flush(self: *LineSplitter) void {
+        if (self.sink == null or self.partial.items.len == 0) return;
+        self.emit();
+    }
+
+    fn emit(self: *LineSplitter) void {
+        var line = self.partial.items;
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        self.sink.?.push(self.stream, line);
+        self.partial.clearRetainingCapacity();
+    }
+};
 
 /// Execute resource data structure
 pub const Resource = struct {
@@ -139,6 +178,7 @@ pub const Resource = struct {
         group: ?[]const u8,
         environment: ?[]const u8,
         timeout_s: u32,
+        sink: ?*output_channel.LineChannel,
     };
 
     fn termFromStatus(status: u32) std.process.Child.Term {
@@ -216,11 +256,13 @@ pub const Resource = struct {
         allocator: std.mem.Allocator,
         file: std.Io.File,
         output: *std.ArrayList(u8),
+        splitter: *LineSplitter,
     ) !bool {
         var buf: [READ_BUFFER_SIZE]u8 = undefined;
         const n = try std.posix.read(file.handle, &buf);
         if (n == 0) return false;
         try appendOutputBounded(allocator, output, buf[0..n]);
+        try splitter.feed(buf[0..n]);
         return true;
     }
 
@@ -229,6 +271,7 @@ pub const Resource = struct {
         pipe: *?std.Io.File,
         output: *std.ArrayList(u8),
         is_open: *bool,
+        splitter: *LineSplitter,
     ) !void {
         if (!is_open.*) return;
         const file = pipe.* orelse {
@@ -236,7 +279,7 @@ pub const Resource = struct {
             return;
         };
 
-        const still_open = try drainPipe(allocator, file, output);
+        const still_open = try drainPipe(allocator, file, output, splitter);
         if (!still_open) {
             closePipe(pipe);
             is_open.* = false;
@@ -262,6 +305,7 @@ pub const Resource = struct {
         child: *std.process.Child,
         allocator: std.mem.Allocator,
         timeout_s: u32,
+        sink: ?*output_channel.LineChannel,
     ) !ExecuteResult {
         const io = global_io.io();
 
@@ -269,6 +313,10 @@ pub const Resource = struct {
         defer stdout.deinit(allocator);
         var stderr = std.ArrayList(u8).empty;
         defer stderr.deinit(allocator);
+        var stdout_splitter = LineSplitter.init(allocator, .stdout, sink);
+        defer stdout_splitter.deinit();
+        var stderr_splitter = LineSplitter.init(allocator, .stderr, sink);
+        defer stderr_splitter.deinit();
 
         var stdout_open = child.stdout != null;
         var stderr_open = child.stderr != null;
@@ -381,14 +429,14 @@ pub const Resource = struct {
             if (ready == 0) continue;
 
             if (stdout_open and fds[0].revents != 0) {
-                drainReadyPipe(allocator, &child.stdout, &stdout, &stdout_open) catch |err| {
+                drainReadyPipe(allocator, &child.stdout, &stdout, &stdout_open, &stdout_splitter) catch |err| {
                     killAndReap(pid, &child_running);
                     closeChildPipes(child);
                     return err;
                 };
             }
             if (stderr_open and fds[1].revents != 0) {
-                drainReadyPipe(allocator, &child.stderr, &stderr, &stderr_open) catch |err| {
+                drainReadyPipe(allocator, &child.stderr, &stderr, &stderr_open, &stderr_splitter) catch |err| {
                     killAndReap(pid, &child_running);
                     closeChildPipes(child);
                     return err;
@@ -408,6 +456,8 @@ pub const Resource = struct {
         }
 
         closeChildPipes(child);
+        stdout_splitter.flush();
+        stderr_splitter.flush();
 
         const result_allocator = std.heap.page_allocator;
         return ExecuteResult{
@@ -432,7 +482,7 @@ pub const Resource = struct {
         // Note: env_map must live until child.wait() completes
         var env_map_storage: ?std.process.Environ.Map = null;
         defer if (env_map_storage) |*map| map.deinit();
-        var environ_map: ?*const std.process.Environ.Map = null;
+        var environ_map: ?*const std.process.Environ.Map = global_io.environMap();
 
         if (ctx.environment) |env_str| {
             // Parse environment string "KEY=VALUE\0KEY2=VALUE2\0" into a map.
@@ -525,7 +575,7 @@ pub const Resource = struct {
             .pgid = 0,
         });
 
-        return try collectOutputAndWait(&child, temp_allocator, ctx.timeout_s);
+        return try collectOutputAndWait(&child, temp_allocator, ctx.timeout_s, ctx.sink);
     }
 
     fn applyRun(self: Resource) !?[]const u8 {
@@ -534,6 +584,7 @@ pub const Resource = struct {
         const allocator = arena.allocator();
 
         // Execute command asynchronously to allow spinner to continue
+        const sink = if (self.live_stream) output_channel.getCurrent() else null;
         const ctx = ExecuteContext{
             .command = self.command,
             .cwd = self.cwd,
@@ -541,14 +592,24 @@ pub const Resource = struct {
             .group = self.group,
             .environment = self.environment,
             .timeout_s = self.timeout_s,
+            .sink = sink,
         };
 
-        const result = try AsyncExecutor.executeWithContext(
+        const result = AsyncExecutor.executeWithContext(
             ExecuteContext,
             ExecuteResult,
             ctx,
             executeCommand,
-        );
+        ) catch |err| {
+            if (err == error.CommandOutputTooLarge) {
+                base.recordProvisionErrorDetail("command output exceeded the {d} MiB capture limit", .{MAX_OUTPUT_BYTES / (1024 * 1024)});
+            } else if (self.cwd) |cwd| {
+                base.recordProvisionErrorDetail("could not execute command in {s}: {s}", .{ cwd, base.userFacingError(err) });
+            } else {
+                base.recordProvisionErrorDetail("could not execute command: {s}", .{base.userFacingError(err)});
+            }
+            return err;
+        };
         defer result.deinit();
 
         const term = result.term;
@@ -592,7 +653,7 @@ pub const Resource = struct {
         }
 
         // Display command output only if live_stream is enabled
-        if (self.live_stream) {
+        if (self.live_stream and sink == null) {
             if (stdout.len > 0) {
                 showCommandOutput(stdout);
             }
@@ -606,6 +667,7 @@ pub const Resource = struct {
 
         if (result.timed_out) {
             logger.err("[execute] command timed out after {d}s", .{self.timeout_s});
+            base.recordCommandTimeoutOutput(self.timeout_s, stdout, stderr);
             return error.CommandTimedOut;
         }
 
@@ -614,19 +676,23 @@ pub const Resource = struct {
             .exited => |code| {
                 if (code != 0) {
                     logger.err("[execute] command exited with code {d}", .{code});
+                    base.recordCommandFailureOutput(term, stdout, stderr);
                     return error.CommandFailed;
                 }
             },
             .signal => |sig| {
                 logger.err("[execute] command killed by signal {d}", .{@intFromEnum(sig)});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandKilled;
             },
             .stopped => |sig| {
                 logger.err("[execute] command stopped by signal {d}", .{@intFromEnum(sig)});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandStopped;
             },
             .unknown => |unknown_status| {
                 logger.err("[execute] command exited with unknown status {d}", .{unknown_status});
+                base.recordCommandFailureOutput(term, stdout, stderr);
                 return error.CommandFailed;
             },
         }
@@ -774,4 +840,56 @@ pub fn zigAddResource(
     }) catch return mruby.mrb_nil_value();
 
     return mruby.mrb_nil_value();
+}
+
+test "LineSplitter emits complete and trailing partial lines" {
+    const allocator = std.testing.allocator;
+    var channel = output_channel.LineChannel.init(allocator);
+    defer channel.deinit();
+    var splitter = LineSplitter.init(allocator, .stdout, &channel);
+    defer splitter.deinit();
+
+    try splitter.feed("a\nb");
+    const first = try channel.take();
+    defer allocator.free(first.bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'a', '\n' }, first.bytes);
+
+    splitter.flush();
+    const second = try channel.take();
+    defer allocator.free(second.bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'b', '\n' }, second.bytes);
+}
+
+test "execute failure records exit status and normalized stderr" {
+    base.clearProvisionErrorDetail();
+    defer base.clearProvisionErrorDetail();
+
+    var common = base.CommonProps.init(std.testing.allocator);
+    defer common.deinit(std.testing.allocator);
+    const resource = Resource{
+        .name = "diagnostic failure",
+        .command = "printf 'first line\\nsecond line\\n' >&2; exit 7",
+        .cwd = null,
+        .user = null,
+        .group = null,
+        .environment = null,
+        .live_stream = false,
+        .creates = null,
+        .timeout_s = DEFAULT_TIMEOUT_S,
+        .action = .run,
+        .common = common,
+    };
+
+    try std.testing.expectError(error.CommandFailed, resource.apply());
+    try std.testing.expectEqualStrings(
+        "command exited with status 7; stderr: first line second line",
+        base.getProvisionErrorDetail().?,
+    );
+    const diagnostic = base.getCommandDiagnostic() orelse return error.TestExpectedCommandDiagnostic;
+    switch (diagnostic.term.?) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 7), code),
+        else => return error.TestExpectedExitStatus,
+    }
+    try std.testing.expect(diagnostic.stdout == null);
+    try std.testing.expectEqualStrings("first line\nsecond line", diagnostic.stderr.?);
 }

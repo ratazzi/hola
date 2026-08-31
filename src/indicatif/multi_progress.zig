@@ -8,6 +8,9 @@ pub const MultiProgress = struct {
     bars: std.ArrayList(*ProgressBar) = .empty,
     mutex: std.Io.Mutex = .init,
     draw_enabled: bool = true,
+    /// Finished leading bars that have already been written permanently to the
+    /// terminal. Only the remaining suffix participates in cursor-based redraws.
+    committed_bars: usize = 0,
     last_total_lines: usize = 0,
 
     const Self = @This();
@@ -44,6 +47,9 @@ pub const MultiProgress = struct {
         for (self.bars.items, 0..) |b, i| {
             if (b == bar) {
                 _ = self.bars.orderedRemove(i);
+                if (i < self.committed_bars) {
+                    self.committed_bars -= 1;
+                }
                 bar.draw_enabled = true;
                 break;
             }
@@ -58,6 +64,9 @@ pub const MultiProgress = struct {
         // Find and remove the bar from its current position
         for (self.bars.items, 0..) |b, i| {
             if (b == bar) {
+                // A committed bar is already part of terminal history and can
+                // no longer be reordered visually.
+                if (i < self.committed_bars) return;
                 _ = self.bars.orderedRemove(i);
                 // Add it back at the end
                 self.bars.append(self.allocator, bar) catch return;
@@ -88,7 +97,7 @@ pub const MultiProgress = struct {
 
         // Draw each progress bar
         var total_lines: usize = 0;
-        for (self.bars.items) |bar| {
+        for (self.bars.items[self.committed_bars..]) |bar| {
             bar_aw.clearRetainingCapacity();
 
             try bar.style.format(bar.state, bar.width, &bar_aw.writer);
@@ -103,7 +112,7 @@ pub const MultiProgress = struct {
             total_lines += 1;
         }
 
-        self.last_total_lines = self.bars.items.len;
+        self.last_total_lines = self.bars.items.len - self.committed_bars;
 
         // Single atomic write to terminal
         std.debug.print("{s}", .{output_aw.written()});
@@ -153,10 +162,17 @@ pub const MultiProgress = struct {
         try self.clearInternal();
     }
 
-    /// Print a message above all progress bars
+    /// Print a message between terminal history and the live progress area.
+    /// Finished leading bars are committed before the message so later redraws
+    /// cannot move task headings or completed resource rows below live output.
     pub fn println(self: *Self, msg: []const u8) !void {
         self.mutex.lockUncancelable(global_io.io());
         defer self.mutex.unlock(global_io.io());
+
+        if (!self.draw_enabled) {
+            std.debug.print("{s}\n", .{msg});
+            return;
+        }
 
         // Build the entire sequence (clear + message + redraw) in a single buffer
         var output_aw: std.Io.Writer.Allocating = .init(self.allocator);
@@ -174,32 +190,34 @@ pub const MultiProgress = struct {
             try writer.print("\x1b[{d}F", .{self.last_total_lines});
         }
 
-        // 2. Print message
-        try writer.print("{s}\n", .{msg});
-
-        // 3. Redraw all bars
-        if (self.last_total_lines > 0) {
-            try writer.print("\x1b[{d}F", .{self.last_total_lines});
-        }
-
         var bar_aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer bar_aw.deinit();
         try bar_aw.ensureTotalCapacity(512);
 
+        var commit_end = self.committed_bars;
+        while (commit_end < self.bars.items.len and self.bars.items[commit_end].isFinished()) {
+            commit_end += 1;
+        }
+
+        // 2. Permanently write the finished prefix, followed by the message.
+        for (self.bars.items[self.committed_bars..commit_end]) |bar| {
+            bar_aw.clearRetainingCapacity();
+            try bar.style.format(bar.state, bar.width, &bar_aw.writer);
+            try writer.print("\x1b[K{s}\n", .{bar_aw.written()});
+        }
+        try writer.print("{s}\n", .{msg});
+
+        // 3. Redraw only bars that are still part of the live area.
         var total_lines: usize = 0;
-        for (self.bars.items) |bar| {
+        for (self.bars.items[commit_end..]) |bar| {
             bar_aw.clearRetainingCapacity();
             try bar.style.format(bar.state, bar.width, &bar_aw.writer);
             try writer.print("\x1b[K{s}\n", .{bar_aw.written()});
             total_lines += 1;
         }
 
-        while (total_lines < self.last_total_lines) {
-            try writer.writeAll("\x1b[K\n");
-            total_lines += 1;
-        }
-
-        self.last_total_lines = self.bars.items.len;
+        self.committed_bars = commit_end;
+        self.last_total_lines = total_lines;
 
         // Single atomic write
         std.debug.print("{s}", .{output_aw.written()});

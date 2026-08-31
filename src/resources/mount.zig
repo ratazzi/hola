@@ -423,10 +423,14 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u
                 if (stderr.len > 0) {
                     logger.err("  stderr: {s}\n", .{stderr});
                 }
+                base.recordCommandFailure(result.term, stderr);
                 return error.CommandFailed;
             }
         },
-        else => return error.CommandFailed,
+        else => {
+            base.recordCommandFailure(result.term, stderr);
+            return error.CommandFailed;
+        },
     }
 
     return stdout;

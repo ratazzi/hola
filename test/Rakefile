@@ -1,0 +1,99 @@
+require_relative "rake_helpers"
+
+ROOT = "/tmp/hola_rake_test"
+CONFIG = "#{ROOT}/config.txt"
+OUTPUT = "#{ROOT}/out.txt"
+
+desc "Prepare the fixture directory"
+task :prepare do
+  resources do
+    directory ROOT
+    file CONFIG do
+      content "configured\n"
+    end
+    file "#{ROOT}/generated.in" do
+      content "rule input\n"
+    end
+  end
+  raise "resources were not applied immediately" unless File.exist?(CONFIG)
+end
+
+desc "Build the fixture"
+task :build => :prepare do
+  sh "echo compiling"
+  sh "echo built > #{OUTPUT}"
+end
+
+desc "Build an output only when its input is newer"
+file OUTPUT => [CONFIG] do
+  sh "cp #{CONFIG} #{OUTPUT}"
+end
+
+rule ".out" => ".in" do |task|
+  sh "cp #{task.source} #{task.name}"
+end
+
+desc "Build a target using a suffix rule"
+task :rule_demo => [:prepare, "#{ROOT}/generated.out"]
+
+desc "Expand files with Dir.glob and FileList"
+task :glob_demo do
+  files = FileList["*.rb"]
+  raise "glob did not find Ruby fixtures" if files.empty?
+  puts files.join(",")
+end
+
+desc "Load a helper with require_relative"
+task :helper_demo do
+  puts rake_helper_message
+end
+
+namespace :db do
+  desc "Run a database migration"
+  task :migrate, [:env] do |task, args|
+    args.with_defaults :env => "development"
+    puts "migrating #{args.env}"
+  end
+end
+
+desc "Demonstrate task enhancement"
+task :enhanced do
+  puts "first action"
+end
+
+task :enhanced do
+  puts "second action"
+end
+
+desc "Use command-line environment assignments"
+task :env_demo do
+  raise "missing task environment" unless ENV["HOLA_TASK_ENV"] == "assigned"
+  sh 'test "$HOLA_TASK_ENV" = assigned'
+end
+
+desc "Fail with a non-zero shell exit"
+task :fails do
+  sh "exit 3"
+  puts "never"
+end
+
+desc "Stream stdout and stderr while a command runs"
+task :stream do
+  sh "for i in 1 2 3; do echo out-$i; echo err-$i >&2; sleep 1; done"
+end
+
+desc "Rescue a failed resource and continue"
+task :rescued do
+  begin
+    sh "exit 3"
+  rescue Hola::ResourceError
+    puts "rescued"
+  end
+end
+
+desc "Remove fixture output"
+task :clean do
+  rm_rf ROOT
+end
+
+task :default => :build

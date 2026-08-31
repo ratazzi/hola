@@ -58,11 +58,36 @@ pub extern fn mrb_yield_argv(mrb: *mrb_state, b: mrb_value, argc: mrb_int, argv:
 
 // Function call
 pub extern fn mrb_funcall_argv(mrb: *mrb_state, val: mrb_value, name: mrb_sym, argc: mrb_int, argv: [*c]const mrb_value) mrb_value;
+extern fn zig_mrb_funcall_protected(mrb: *mrb_state, val: mrb_value, name: mrb_sym, argc: mrb_int, argv: [*c]const mrb_value, raised: *mrb_bool) mrb_value;
+extern fn zig_mrb_load_nstring_protected(mrb: *mrb_state, source: [*c]const u8, length: usize, filename: [*c]const u8, raised: *mrb_bool) mrb_value;
+
+pub const CallResult = union(enum) {
+    ok: mrb_value,
+    raised: mrb_value,
+};
+
+pub fn callProtected(mrb: *mrb_state, receiver: mrb_value, method: [*:0]const u8, args: []const mrb_value) CallResult {
+    const method_sym = mrb_intern_cstr(mrb, method);
+    var raised: mrb_bool = 0;
+    const argv: [*c]const mrb_value = if (args.len == 0) null else args.ptr;
+    const result = zig_mrb_funcall_protected(mrb, receiver, method_sym, @intCast(args.len), argv, &raised);
+    return if (raised != 0) .{ .raised = result } else .{ .ok = result };
+}
+
+pub fn loadStringProtected(mrb: *mrb_state, source: []const u8, filename: [*:0]const u8) CallResult {
+    var raised: mrb_bool = 0;
+    const result = zig_mrb_load_nstring_protected(mrb, source.ptr, source.len, filename, &raised);
+    return if (raised != 0) .{ .raised = result } else .{ .ok = result };
+}
 
 // GC protection
 pub extern fn mrb_gc_register(mrb: *mrb_state, obj: mrb_value) void;
 pub extern fn mrb_gc_unregister(mrb: *mrb_state, obj: mrb_value) void;
 pub extern fn mrb_gc_protect(mrb: *mrb_state, obj: mrb_value) void;
+pub extern fn zig_mrb_gc_arena_save(mrb: *mrb_state) c_int;
+pub extern fn zig_mrb_gc_arena_restore(mrb: *mrb_state, arena_index: c_int) void;
+pub extern fn zig_mrb_print_exc(mrb: *mrb_state, exc: mrb_value) void;
+pub extern fn zig_mrb_has_exception(mrb: *mrb_state) c_int;
 
 // Global variables
 pub extern fn mrb_gv_get(mrb: *mrb_state, sym: mrb_sym) mrb_value;
@@ -73,6 +98,7 @@ pub extern fn mrb_intern_cstr(mrb: *mrb_state, str: [*c]const u8) mrb_sym;
 pub extern fn zig_mrb_type(val: mrb_value) u32;
 pub const mrb_type = zig_mrb_type;
 pub extern fn zig_mrb_string_p(val: mrb_value) c_int;
+pub extern fn zig_mrb_array_p(val: mrb_value) c_int;
 
 // Array handling (using C helpers)
 pub extern fn zig_mrb_ary_len(mrb: *mrb_state, arr: mrb_value) mrb_int;
@@ -82,6 +108,8 @@ pub extern fn zig_mrb_float(mrb: *mrb_state, val: mrb_value) f64;
 
 // Value constructors
 pub extern fn zig_mrb_int_value(mrb: *mrb_state, i: mrb_int) mrb_value;
+pub extern fn zig_mrb_true_value() mrb_value;
+pub extern fn zig_mrb_false_value() mrb_value;
 
 // Array creation and manipulation
 pub extern fn mrb_ary_new_capa(mrb: *mrb_state, capa: mrb_int) mrb_value;
@@ -207,5 +235,15 @@ pub const State = struct {
             mrb_print_error(mrb);
             return error.MRubyException;
         }
+    }
+
+    pub fn setGlobal(self: *State, name: [*:0]const u8, value: mrb_value) void {
+        const state = self.mrb orelse return;
+        mrb_gv_set(state, mrb_intern_cstr(state, name), value);
+    }
+
+    pub fn getGlobal(self: *State, name: [*:0]const u8) mrb_value {
+        const state = self.mrb orelse return mrb_nil_value();
+        return mrb_gv_get(state, mrb_intern_cstr(state, name));
     }
 };

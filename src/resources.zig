@@ -87,12 +87,33 @@ pub const ResourceId = notification.ResourceId;
 pub const NotificationTiming = notification.Timing;
 pub const ApplyResult = base.ApplyResult;
 
+/// A virtual parent shown by the normal execution formatter for resources
+/// implemented as a composition of other resources (for example apt_update
+/// wrapping execute). Consecutive children sharing a path render the parent
+/// once and remain indented beneath it.
+pub const DisplayScope = struct {
+    type_name: []const u8,
+    name: []const u8,
+    action: []const u8,
+
+    pub fn deinit(self: DisplayScope, allocator: std.mem.Allocator) void {
+        allocator.free(self.type_name);
+        allocator.free(self.name);
+        allocator.free(self.action);
+    }
+};
+
 /// Wrapper for a resource with metadata
 pub const ResourceWithMetadata = struct {
     resource: Resource,
     id: ResourceId,
     notifications: std.ArrayList(Notification),
+    phase: ?[]const u8 = null,
+    converged: bool = false,
+    subscriptions_resolved: bool = false,
     was_updated: bool = false, // Track if resource was changed
+    display_depth: usize = 0,
+    display_path: []DisplayScope = &.{},
 
     pub fn deinit(self: *ResourceWithMetadata, allocator: std.mem.Allocator) void {
         self.resource.deinit(allocator);
@@ -101,6 +122,9 @@ pub const ResourceWithMetadata = struct {
             notif.deinit(allocator);
         }
         self.notifications.deinit(allocator);
+        if (self.phase) |phase| allocator.free(phase);
+        for (self.display_path) |scope| scope.deinit(allocator);
+        if (self.display_path.len > 0) allocator.free(self.display_path);
     }
 };
 
@@ -185,6 +209,31 @@ fn payloadShouldIgnoreFailure(payload: anytype) bool {
     @compileError("Unsupported resource payload for shouldIgnoreFailure");
 }
 
+fn payloadActionName(payload: anytype) []const u8 {
+    const Payload = @TypeOf(payload);
+
+    if (Payload == package.Resource) {
+        if (builtin.os.tag == .macos) {
+            return switch (payload.backend) {
+                .homebrew => |backend| @tagName(backend.action),
+            };
+        } else if (builtin.os.tag == .linux) {
+            return switch (payload.backend) {
+                .apt => |backend| @tagName(backend.action),
+            };
+        }
+        return "apply";
+    }
+    if (@hasField(Payload, "action")) return @tagName(payload.action);
+    return "apply";
+}
+
+fn payloadCommand(payload: anytype) ?[]const u8 {
+    const Payload = @TypeOf(payload);
+    if (Payload == execute.Resource) return payload.command;
+    return null;
+}
+
 fn resourceName(resource: anytype) []const u8 {
     return switch (resource) {
         inline else => |res| payloadName(res),
@@ -200,6 +249,18 @@ fn resourceCommonProps(resource: anytype) *base.CommonProps {
 fn resourceShouldIgnoreFailure(resource: anytype) bool {
     return switch (resource) {
         inline else => |res| payloadShouldIgnoreFailure(res),
+    };
+}
+
+fn resourceActionName(resource: anytype) []const u8 {
+    return switch (resource) {
+        inline else => |res| payloadActionName(res),
+    };
+}
+
+fn resourceCommand(resource: anytype) ?[]const u8 {
+    return switch (resource) {
+        inline else => |res| payloadCommand(res),
     };
 }
 
@@ -242,6 +303,14 @@ const ResourceMacOs = union(enum) {
     pub fn shouldIgnoreFailure(self: ResourceMacOs) bool {
         return resourceShouldIgnoreFailure(self);
     }
+
+    pub fn getActionName(self: ResourceMacOs) []const u8 {
+        return resourceActionName(self);
+    }
+
+    pub fn getCommand(self: ResourceMacOs) ?[]const u8 {
+        return resourceCommand(self);
+    }
 };
 
 const ResourceGeneric = union(enum) {
@@ -283,5 +352,13 @@ const ResourceGeneric = union(enum) {
 
     pub fn shouldIgnoreFailure(self: ResourceGeneric) bool {
         return resourceShouldIgnoreFailure(self);
+    }
+
+    pub fn getActionName(self: ResourceGeneric) []const u8 {
+        return resourceActionName(self);
+    }
+
+    pub fn getCommand(self: ResourceGeneric) ?[]const u8 {
+        return resourceCommand(self);
     }
 };
