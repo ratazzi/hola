@@ -6,7 +6,7 @@ class GitResource
     @destination = destination
     @repository = ""
     @revision = "HEAD"
-    @checkout_branch = "deploy"
+    @checkout_branch = nil
     @remote = "origin"
     @depth = nil
     @enable_checkout = true
@@ -29,6 +29,15 @@ class GitResource
       raise "git resource requires 'repository' property"
     end
 
+    # Chef parity: deploying remote refs is not supported. The revision names a
+    # branch/tag/SHA; the remote comes from the 'remote' property.
+    if @revision[0, 7] == "origin/"
+      local_name = @revision[7, @revision.length - 7]
+      raise "Deploying remote branches is not supported. " \
+            "Specify the remote branch as a local branch for the git repository " \
+            "you're deploying from (ie: '#{local_name}' rather than '#{@revision}')."
+    end
+
     # Call Zig function with all parameters
     only_if_arg = @only_if_proc || nil
     not_if_arg = @not_if_proc || nil
@@ -44,7 +53,7 @@ class GitResource
         @repository,
         @destination,
         @revision,
-        @checkout_branch,
+        @checkout_branch || "",
         @remote,
         @depth || 0,
         @enable_checkout,
