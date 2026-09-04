@@ -156,11 +156,20 @@ macos_defaults 'show all file extensions' do
   key 'AppleShowAllExtensions'
   value true
 end
+
+# Per-host keys (`defaults -currentHost write ...`)
+macos_defaults 'menu bar item spacing' do
+  global true
+  current_host true
+  key 'NSStatusItemSpacing'
+  value 6
+end
 ```
 
 **Features:**
 - ✅ **Type-safe**: Boolean, Integer, Float, String - automatically handled
 - ✅ **Idempotent**: Only updates when values differ
+- ✅ **Per-host domain**: `current_host true` targets `defaults -currentHost`
 - ✅ **Auto-restart**: Automatically restarts Finder/Dock/SystemUIServer when needed
 - ✅ **No manual `defaults` commands**: Just declare what you want
 

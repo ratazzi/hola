@@ -3,19 +3,48 @@
 #include <string.h>
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+// Map the `defaults` global domain name to CFPreferences' any-application
+// domain (.GlobalPreferences). Without this, "NSGlobalDomain" would be treated
+// as a literal application id and end up in ~/Library/Preferences/NSGlobalDomain.plist.
+static CFStringRef domain_ref(const char *domain) {
+    if (strcmp(domain, "NSGlobalDomain") == 0 || strcmp(domain, "-g") == 0) {
+        return (CFStringRef)CFRetain(kCFPreferencesAnyApplication);
+    }
+    return CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+}
+
+// current_host != 0 selects the per-host domain (`defaults -currentHost`),
+// otherwise the any-host domain that `defaults` uses by default.
+static CFStringRef host_ref(int current_host) {
+    return current_host ? kCFPreferencesCurrentHost : kCFPreferencesAnyHost;
+}
+
+static CFPropertyListRef copy_value(CFStringRef key, CFStringRef domain, int current_host) {
+    return CFPreferencesCopyValue(key, domain, kCFPreferencesCurrentUser, host_ref(current_host));
+}
+
+// Returns 1 on success, 0 on failure
+static int set_value(CFStringRef key, CFPropertyListRef value, CFStringRef domain, int current_host) {
+    CFPreferencesSetValue(key, value, domain, kCFPreferencesCurrentUser, host_ref(current_host));
+    return CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, host_ref(current_host)) ? 1 : 0;
+}
+
+// ============================================================================
 // Write operations
 // ============================================================================
 
 // Write boolean value
 // Returns 1 on success, 0 on failure
-int cfpreferences_write_boolean(const char *domain, const char *key, int value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_write_boolean(const char *domain, const char *key, int value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
     CFBooleanRef bool_val = value ? kCFBooleanTrue : kCFBooleanFalse;
 
-    CFPreferencesSetAppValue(key_cf, bool_val, domain_cf);
-    Boolean sync_result = CFPreferencesAppSynchronize(domain_cf);
+    Boolean sync_result = set_value(key_cf, bool_val, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -25,8 +54,8 @@ int cfpreferences_write_boolean(const char *domain, const char *key, int value) 
 
 // Write integer value
 // Returns 1 on success, 0 on failure
-int cfpreferences_write_integer(const char *domain, const char *key, long long value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_write_integer(const char *domain, const char *key, long long value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
     CFNumberRef num = CFNumberCreate(NULL, kCFNumberLongLongType, &value);
@@ -36,8 +65,7 @@ int cfpreferences_write_integer(const char *domain, const char *key, long long v
         return 0;
     }
 
-    CFPreferencesSetAppValue(key_cf, num, domain_cf);
-    Boolean sync_result = CFPreferencesAppSynchronize(domain_cf);
+    Boolean sync_result = set_value(key_cf, num, domain_cf, current_host);
 
     CFRelease(num);
     CFRelease(key_cf);
@@ -48,8 +76,8 @@ int cfpreferences_write_integer(const char *domain, const char *key, long long v
 
 // Write float value
 // Returns 1 on success, 0 on failure
-int cfpreferences_write_float(const char *domain, const char *key, double value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_write_float(const char *domain, const char *key, double value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
     CFNumberRef num = CFNumberCreate(NULL, kCFNumberDoubleType, &value);
@@ -59,8 +87,7 @@ int cfpreferences_write_float(const char *domain, const char *key, double value)
         return 0;
     }
 
-    CFPreferencesSetAppValue(key_cf, num, domain_cf);
-    Boolean sync_result = CFPreferencesAppSynchronize(domain_cf);
+    Boolean sync_result = set_value(key_cf, num, domain_cf, current_host);
 
     CFRelease(num);
     CFRelease(key_cf);
@@ -71,8 +98,8 @@ int cfpreferences_write_float(const char *domain, const char *key, double value)
 
 // Write string value
 // Returns 1 on success, 0 on failure
-int cfpreferences_write_string(const char *domain, const char *key, const char *value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_write_string(const char *domain, const char *key, const char *value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
     CFStringRef value_cf = CFStringCreateWithCString(NULL, value, kCFStringEncodingUTF8);
 
@@ -82,8 +109,7 @@ int cfpreferences_write_string(const char *domain, const char *key, const char *
         return 0;
     }
 
-    CFPreferencesSetAppValue(key_cf, value_cf, domain_cf);
-    Boolean sync_result = CFPreferencesAppSynchronize(domain_cf);
+    Boolean sync_result = set_value(key_cf, value_cf, domain_cf, current_host);
 
     CFRelease(value_cf);
     CFRelease(key_cf);
@@ -99,11 +125,11 @@ int cfpreferences_write_string(const char *domain, const char *key, const char *
 // Read boolean value
 // Returns: 1 if value exists and is boolean, 0 otherwise
 // out_value: pointer to store the boolean value (0 or 1)
-int cfpreferences_read_boolean(const char *domain, const char *key, int *out_value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_read_boolean(const char *domain, const char *key, int *out_value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFTypeRef value = CFPreferencesCopyAppValue(key_cf, domain_cf);
+    CFTypeRef value = copy_value(key_cf, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -125,11 +151,11 @@ int cfpreferences_read_boolean(const char *domain, const char *key, int *out_val
 // Read integer value
 // Returns: 1 if value exists and is number, 0 otherwise
 // out_value: pointer to store the integer value
-int cfpreferences_read_integer(const char *domain, const char *key, long long *out_value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_read_integer(const char *domain, const char *key, long long *out_value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFTypeRef value = CFPreferencesCopyAppValue(key_cf, domain_cf);
+    CFTypeRef value = copy_value(key_cf, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -151,11 +177,11 @@ int cfpreferences_read_integer(const char *domain, const char *key, long long *o
 // Read float value
 // Returns: 1 if value exists and is number, 0 otherwise
 // out_value: pointer to store the float value
-int cfpreferences_read_float(const char *domain, const char *key, double *out_value) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_read_float(const char *domain, const char *key, double *out_value, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFTypeRef value = CFPreferencesCopyAppValue(key_cf, domain_cf);
+    CFTypeRef value = copy_value(key_cf, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -178,11 +204,11 @@ int cfpreferences_read_float(const char *domain, const char *key, double *out_va
 // Returns: 1 if value exists and is string, 0 otherwise
 // buffer: buffer to store the string (must be pre-allocated)
 // buffer_size: size of the buffer
-int cfpreferences_read_string(const char *domain, const char *key, char *buffer, int buffer_size) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_read_string(const char *domain, const char *key, char *buffer, int buffer_size, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFTypeRef value = CFPreferencesCopyAppValue(key_cf, domain_cf);
+    CFTypeRef value = copy_value(key_cf, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -207,11 +233,11 @@ int cfpreferences_read_string(const char *domain, const char *key, char *buffer,
 
 // Check if a key exists
 // Returns: 1 if exists, 0 if not
-int cfpreferences_key_exists(const char *domain, const char *key) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_key_exists(const char *domain, const char *key, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFTypeRef value = CFPreferencesCopyAppValue(key_cf, domain_cf);
+    CFTypeRef value = copy_value(key_cf, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
@@ -225,12 +251,11 @@ int cfpreferences_key_exists(const char *domain, const char *key) {
 
 // Delete a key
 // Returns: 1 on success, 0 on failure
-int cfpreferences_delete_key(const char *domain, const char *key) {
-    CFStringRef domain_cf = CFStringCreateWithCString(NULL, domain, kCFStringEncodingUTF8);
+int cfpreferences_delete_key(const char *domain, const char *key, int current_host) {
+    CFStringRef domain_cf = domain_ref(domain);
     CFStringRef key_cf = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
 
-    CFPreferencesSetAppValue(key_cf, NULL, domain_cf);
-    Boolean sync_result = CFPreferencesAppSynchronize(domain_cf);
+    Boolean sync_result = set_value(key_cf, NULL, domain_cf, current_host);
 
     CFRelease(key_cf);
     CFRelease(domain_cf);
