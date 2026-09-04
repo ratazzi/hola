@@ -226,12 +226,26 @@ const Planner = struct {
         };
         const link_result = link_buf[0..link_len];
 
-        if (std.mem.eql(u8, link_result, source_abs)) {
+        if (try self.linkTargetMatches(target_abs, link_result, source_abs)) {
             return .{ .status = .already_linked };
         }
 
         const existing = try self.allocator.dupe(u8, link_result);
         return .{ .status = .different_link, .existing_target = existing };
+    }
+
+    fn linkTargetMatches(self: *Planner, link_path: []const u8, actual_target: []const u8, expected_target: []const u8) !bool {
+        const link_parent = std.fs.path.dirname(link_path) orelse "/";
+        const actual = try std.fs.path.resolve(self.allocator, if (std.fs.path.isAbsolute(actual_target))
+            &.{actual_target}
+        else
+            &.{ link_parent, actual_target });
+        defer self.allocator.free(actual);
+
+        const expected = try std.fs.path.resolve(self.allocator, &.{expected_target});
+        defer self.allocator.free(expected);
+
+        return std.mem.eql(u8, actual, expected);
     }
 
     fn statKind(path: []const u8) !std.Io.File.Kind {
@@ -526,22 +540,23 @@ fn sortEntries(entries: []Planner.PlanEntry) void {
 
 test "classify statuses" {
     const alloc = std.testing.allocator;
+    const io = global_io.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const root_path = try std.fs.path.join(alloc, &.{ tmp.path, "dotfiles" });
+    try tmp.dir.createDir(io, "dotfiles", .default_dir);
+    const root_path = try tmp.dir.realPathFileAlloc(io, "dotfiles", alloc);
     defer alloc.free(root_path);
-    try std.fs.makeDirAbsolute(root_path);
 
-    const home_path = try std.fs.path.join(alloc, &.{ tmp.path, "home" });
+    try tmp.dir.createDir(io, "home", .default_dir);
+    const home_path = try tmp.dir.realPathFileAlloc(io, "home", alloc);
     defer alloc.free(home_path);
-    try std.fs.makeDirAbsolute(home_path);
 
     const source_abs = try std.fs.path.join(alloc, &.{ root_path, ".zshrc" });
     defer alloc.free(source_abs);
-    try std.fs.writeFileAbsolute(source_abs, "echo hi\n");
+    try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles/.zshrc", .data = "echo hi\n" });
 
-    var planner = try Planner.init(alloc, root_path, home_path);
+    var planner = try Planner.init(alloc, root_path, home_path, .{ .text = "" }, null);
     defer planner.deinit();
 
     const rel = ".zshrc";
@@ -551,23 +566,53 @@ test "classify statuses" {
 
     const target_abs = try std.fs.path.join(alloc, &.{ home_path, rel });
     defer alloc.free(target_abs);
-    try std.fs.symLinkAbsolute(source_abs, target_abs, .{});
+    try std.Io.Dir.symLinkAbsolute(io, source_abs, target_abs, .{});
 
     classification = try planner.classify(source_abs, rel);
     try std.testing.expectEqual(Planner.Status.already_linked, classification.status);
 
-    try std.fs.deleteFileAbsolute(target_abs);
-    const other = try std.fs.path.join(alloc, &.{ tmp.path, "other" });
+    try std.Io.Dir.deleteFileAbsolute(io, target_abs);
+    try tmp.dir.writeFile(io, .{ .sub_path = "other", .data = "alt\n" });
+    const other = try tmp.dir.realPathFileAlloc(io, "other", alloc);
     defer alloc.free(other);
-    try std.fs.writeFileAbsolute(other, "alt\n");
-    try std.fs.symLinkAbsolute(other, target_abs, .{});
+    try std.Io.Dir.symLinkAbsolute(io, other, target_abs, .{});
 
     classification = try planner.classify(source_abs, rel);
     try std.testing.expectEqual(Planner.Status.different_link, classification.status);
-    try std.testing.expect(classification.existing_target != null);
+    const existing_target = classification.existing_target orelse return error.TestExpectedDifferentLinkTarget;
+    defer alloc.free(existing_target);
 
-    try std.fs.deleteFileAbsolute(target_abs);
-    try std.fs.writeFileAbsolute(target_abs, "plain file\n");
+    try std.Io.Dir.deleteFileAbsolute(io, target_abs);
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.zshrc", .data = "plain file\n" });
     classification = try planner.classify(source_abs, rel);
     try std.testing.expectEqual(Planner.Status.existing_file, classification.status);
+}
+
+test "classify relative symlink target as already linked" {
+    const alloc = std.testing.allocator;
+    const io = global_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const home_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(home_path);
+
+    const root_path = try std.fs.path.join(alloc, &.{ home_path, ".dotfiles" });
+    defer alloc.free(root_path);
+    try tmp.dir.createDir(io, ".dotfiles", .default_dir);
+
+    const source_abs = try std.fs.path.join(alloc, &.{ root_path, ".zshrc" });
+    defer alloc.free(source_abs);
+    try tmp.dir.writeFile(io, .{ .sub_path = ".dotfiles/.zshrc", .data = "echo hi\n" });
+
+    const target_abs = try std.fs.path.join(alloc, &.{ home_path, ".zshrc" });
+    defer alloc.free(target_abs);
+    try std.Io.Dir.cwd().symLink(io, ".dotfiles/.zshrc", target_abs, .{});
+
+    var planner = try Planner.init(alloc, root_path, home_path, .{ .text = "" }, null);
+    defer planner.deinit();
+
+    const classification = try planner.classify(source_abs, ".zshrc");
+    defer if (classification.existing_target) |target| alloc.free(target);
+    try std.testing.expectEqual(Planner.Status.already_linked, classification.status);
 }
