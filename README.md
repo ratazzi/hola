@@ -305,6 +305,92 @@ the existing flat provisioning behavior and the Chef-compatible top-level resour
 style. Agent tasks may provide an optional `"phase"` field; resource callback
 results include their phase name.
 
+#### macOS release resources
+
+`hola run` can replace repeated macOS release shell in CI workflows. Each release
+step remains independently composable instead of being hidden inside one
+project-specific command:
+
+```ruby
+APP = "CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+DMG = "build/Coulson.dmg"
+KEYCHAIN = File.join(ENV.fetch("RUNNER_TEMP", "/tmp"), "build.keychain")
+
+task :certificate do
+  resources.macos_signing_certificate ENV.fetch("DEVELOPER_ID_IDENTITY") do
+    certificate_base64 ENV.fetch("DEVELOPER_ID_CERTIFICATE_P12")
+    password ENV.fetch("DEVELOPER_ID_CERTIFICATE_PASSWORD")
+    keychain KEYCHAIN
+  end
+end
+
+task :build do
+  resources.xcode_build "Coulson" do
+    workspace "CoulsonApp/Coulson.xcworkspace"
+    scheme "CoulsonApp"
+    configuration "Release"
+    derived_data_path "CoulsonApp/build/DerivedData"
+    settings(
+      "MARKETING_VERSION" => ENV.fetch("VERSION"),
+      "CURRENT_PROJECT_VERSION" => ENV.fetch("BUILD_NUMBER")
+    )
+    creates APP
+  end
+end
+
+task :sign => [:certificate, :build] do
+  resources.macos_codesign APP do
+    identity ENV.fetch("DEVELOPER_ID_IDENTITY")
+    keychain KEYCHAIN
+    nested true       # Sign Mach-O files and nested bundles inside-out.
+  end
+end
+
+task :package => :sign do
+  resources.macos_dmg DMG do
+    source APP
+    volume_name "Coulson"
+    window_bounds [120, 120, 780, 540]
+    icon_position "Coulson.app", [180, 235]
+    icon_position "Applications", [480, 235]
+  end
+end
+
+task :sign_dmg => :package do
+  resources.macos_codesign DMG do
+    identity ENV.fetch("DEVELOPER_ID_IDENTITY")
+    keychain KEYCHAIN
+  end
+end
+
+task :release => :sign_dmg do
+  resources.macos_notarize DMG do
+    keychain_profile ENV.fetch("NOTARY_PROFILE")
+  end
+end
+```
+
+The five resources cover the reusable release boundary:
+
+- `xcode_build` constructs `xcodebuild` invocations without shell quoting and
+  uses `creates` as its convergence marker.
+- `macos_signing_certificate` creates or unlocks a CI keychain, imports a P12
+  only when the identity is absent, and configures key access for `codesign`.
+- `macos_codesign` signs individual binaries or whole bundles. It can discover
+  nested Mach-O files, frameworks, apps, extensions, and XPCs and sign them
+  inside-out. Verification may be deep; signing never relies on `codesign --deep`.
+- `macos_dmg` stages an app with `ditto`, adds the Applications link and optional
+  Finder layout or background, creates the image atomically, and verifies it. A
+  valid image newer than all source files is left untouched.
+- `macos_notarize` supports a notarytool keychain profile, Apple ID credentials,
+  or an App Store Connect API key. It waits for acceptance, reports rejection
+  logs, staples and validates the ticket, and runs the Gatekeeper assessment.
+
+Apps with differently entitled embedded executables should declare multiple
+`macos_codesign` resources: sign each special helper with its own identifier and
+entitlements first, then sign the outer app with `nested false`. Apps whose
+embedded code shares one signing policy can use `nested true`.
+
 This is an mruby runtime, not system Ruby. Regular expressions, native gems,
 backticks, `exit`, and the block form of `sh` are unavailable. Use `raise` or
 `abort` to stop a task. Delayed notifications are flushed after all requested

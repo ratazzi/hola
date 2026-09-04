@@ -35,6 +35,14 @@ else
         pub const ruby_prelude = @embedFile("resources/macos_defaults_resource.rb");
     };
 
+/// macOS application build, signing, packaging, and notarization resources.
+pub const macos_release = if (builtin.os.tag == .macos)
+    @import("resources/macos_release.zig")
+else
+    struct {
+        pub const ruby_prelude = @embedFile("resources/macos_release_resources.rb");
+    };
+
 // Linux-only resources
 pub const apt_repository = if (builtin.os.tag == .linux)
     @import("resources/apt_repository.zig")
@@ -149,6 +157,7 @@ fn payloadName(payload: anytype) []const u8 {
     const Payload = @TypeOf(payload);
 
     if (Payload == macos_dock.Resource) return "Dock";
+    if (Payload == macos_release.SigningCertificate) return payload.identity;
     if (Payload == aws_kms.Resource) return payload.name;
     if (Payload == package.Resource or Payload == homebrew_package.Resource or Payload == apt_package.Resource) {
         return payload.displayName();
@@ -293,6 +302,11 @@ const ResourceMacOs = union(enum) {
     template: template.Resource,
     macos_dock: macos_dock.Resource,
     macos_defaults: macos_defaults.Resource,
+    xcode_build: macos_release.XcodeBuild,
+    macos_signing_certificate: macos_release.SigningCertificate,
+    macos_codesign: macos_release.Codesign,
+    macos_dmg: macos_release.Dmg,
+    macos_notarize: macos_release.Notarize,
     directory: directory.Resource,
     link: link.Resource,
     route: route.Resource,
