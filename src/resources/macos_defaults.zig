@@ -715,19 +715,18 @@ pub fn zigAddResource(
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
 
-    // Format: SS|Aoo|oooAA
+    // Format: SS|oooooAA
     // S: required string (domain)
     // S: required string (key)
     // |: optional args start
-    // A: optional array (value: [type, value])
+    // o: optional object (value: [type, value] array, or nil for delete)
     // o: optional object (action)
-    // |: optional args start
     // o: optional object (only_if)
     // o: optional object (not_if)
     // o: optional object (ignore_failure)
     // A: optional array (notifications)
     // A: optional array (subscriptions)
-    _ = mruby.mrb_get_args(mrb, "SS|Aoo|oooAA", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    _ = mruby.mrb_get_args(mrb, "SS|oooooAA", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
 
     // Extract domain and key
     const domain_cstr = mruby.mrb_str_to_cstr(mrb, domain_val);

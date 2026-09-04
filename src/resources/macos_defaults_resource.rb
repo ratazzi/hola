@@ -30,6 +30,11 @@ class MacOSDefaultsResource
       @domain = "NSGlobalDomain"
     end
 
+    # The write action needs something to write; only delete may omit value
+    if @action == :write && @value.nil?
+      raise "macos_defaults: 'value' is required for write action"
+    end
+
     # If the Zig backend for macos_defaults is not available (non-macOS build),
     # act as a no-op so DSL usage like `macos_defaults` does not crash.
     return unless ZigBackend.respond_to?(:add_macos_defaults)
