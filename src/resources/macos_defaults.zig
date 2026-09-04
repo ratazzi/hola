@@ -20,21 +20,24 @@ const global_io = @import("../global_io.zig");
 // These functions bypass Zig's @cImport issues with CFPreferences API
 // ============================================================================
 
+// All wrappers take a trailing `current_host` flag: non-zero targets the
+// per-host domain (`defaults -currentHost`), zero the any-host domain.
+
 // Write operations
-extern "c" fn cfpreferences_write_boolean(domain: [*:0]const u8, key: [*:0]const u8, value: c_int) c_int;
-extern "c" fn cfpreferences_write_integer(domain: [*:0]const u8, key: [*:0]const u8, value: c_longlong) c_int;
-extern "c" fn cfpreferences_write_float(domain: [*:0]const u8, key: [*:0]const u8, value: f64) c_int;
-extern "c" fn cfpreferences_write_string(domain: [*:0]const u8, key: [*:0]const u8, value: [*:0]const u8) c_int;
+extern "c" fn cfpreferences_write_boolean(domain: [*:0]const u8, key: [*:0]const u8, value: c_int, current_host: c_int) c_int;
+extern "c" fn cfpreferences_write_integer(domain: [*:0]const u8, key: [*:0]const u8, value: c_longlong, current_host: c_int) c_int;
+extern "c" fn cfpreferences_write_float(domain: [*:0]const u8, key: [*:0]const u8, value: f64, current_host: c_int) c_int;
+extern "c" fn cfpreferences_write_string(domain: [*:0]const u8, key: [*:0]const u8, value: [*:0]const u8, current_host: c_int) c_int;
 
 // Read operations
-extern "c" fn cfpreferences_read_boolean(domain: [*:0]const u8, key: [*:0]const u8, out_value: *c_int) c_int;
-extern "c" fn cfpreferences_read_integer(domain: [*:0]const u8, key: [*:0]const u8, out_value: *c_longlong) c_int;
-extern "c" fn cfpreferences_read_float(domain: [*:0]const u8, key: [*:0]const u8, out_value: *f64) c_int;
-extern "c" fn cfpreferences_read_string(domain: [*:0]const u8, key: [*:0]const u8, buffer: [*]u8, buffer_size: c_int) c_int;
+extern "c" fn cfpreferences_read_boolean(domain: [*:0]const u8, key: [*:0]const u8, out_value: *c_int, current_host: c_int) c_int;
+extern "c" fn cfpreferences_read_integer(domain: [*:0]const u8, key: [*:0]const u8, out_value: *c_longlong, current_host: c_int) c_int;
+extern "c" fn cfpreferences_read_float(domain: [*:0]const u8, key: [*:0]const u8, out_value: *f64, current_host: c_int) c_int;
+extern "c" fn cfpreferences_read_string(domain: [*:0]const u8, key: [*:0]const u8, buffer: [*]u8, buffer_size: c_int, current_host: c_int) c_int;
 
 // Utility operations
-extern "c" fn cfpreferences_key_exists(domain: [*:0]const u8, key: [*:0]const u8) c_int;
-extern "c" fn cfpreferences_delete_key(domain: [*:0]const u8, key: [*:0]const u8) c_int;
+extern "c" fn cfpreferences_key_exists(domain: [*:0]const u8, key: [*:0]const u8, current_host: c_int) c_int;
+extern "c" fn cfpreferences_delete_key(domain: [*:0]const u8, key: [*:0]const u8, current_host: c_int) c_int;
 
 /// macOS defaults resource data structure
 pub const Resource = struct {
@@ -42,6 +45,8 @@ pub const Resource = struct {
     key: []const u8,
     value: Value,
     action: Action,
+    /// Target the per-host domain (`defaults -currentHost`) instead of the any-host domain
+    current_host: bool = false,
 
     // Common properties (guards, notifications, etc.)
     common: base.CommonProps,
@@ -93,7 +98,7 @@ pub const Resource = struct {
     }
 
     pub fn apply(self: Resource) !base.ApplyResult {
-        logger.debug("macos_defaults apply: domain={s}, key={s}, action={}", .{ self.domain, self.key, self.action });
+        logger.debug("macos_defaults apply: domain={s}, key={s}, action={}, current_host={}", .{ self.domain, self.key, self.action, self.current_host });
 
         // Log the desired value stored in the resource
         switch (self.value) {
@@ -134,11 +139,11 @@ pub const Resource = struct {
                 };
             },
             .delete => {
-                try applyDelete(self);
+                const was_updated = try applyDelete(self);
                 return base.ApplyResult{
-                    .was_updated = false,
+                    .was_updated = was_updated,
                     .action = action_name,
-                    .skip_reason = "up to date",
+                    .skip_reason = if (was_updated) null else "up to date",
                 };
             },
         }
@@ -151,7 +156,7 @@ pub const Resource = struct {
 
         // Step 1: Read current value
         const value_type = std.meta.activeTag(self.value);
-        const current_value = try readDefaultWithCWrapper(allocator, self.domain, self.key, value_type);
+        const current_value = try readDefaultWithCWrapper(allocator, self.domain, self.key, value_type, self.current_host);
         defer if (current_value) |val| {
             if (val == .string) allocator.free(val.string);
         };
@@ -173,7 +178,7 @@ pub const Resource = struct {
         }
 
         // Step 3: Write new value
-        try writeDefault(allocator, self.domain, self.key, self.value);
+        try writeDefault(allocator, self.domain, self.key, self.value, self.current_host);
 
         // Step 4: Restart application if needed
         try restartApplicationIfNeeded(allocator, self.domain);
@@ -234,21 +239,22 @@ pub const Resource = struct {
         io.sleep(.fromNanoseconds(500_000_000), .awake) catch {}; // 0.5 seconds
     }
 
-    fn applyDelete(self: Resource) !void {
-        var gpa = std.heap.DebugAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
+    /// Returns true when the key existed and was deleted
+    fn applyDelete(self: Resource) !bool {
+        var domain_buf: [256]u8 = undefined;
+        var key_buf: [256]u8 = undefined;
+        const domain_z = try std.fmt.bufPrintZ(&domain_buf, "{s}", .{self.domain});
+        const key_z = try std.fmt.bufPrintZ(&key_buf, "{s}", .{self.key});
+        const host: c_int = @intFromBool(self.current_host);
 
-        // Check if key exists
-        var current_value = readDefault(allocator, self.domain, self.key) catch null;
-        defer if (current_value) |*val| val.deinit(allocator);
-
-        if (current_value == null) {
-            return; // Already deleted
+        if (cfpreferences_key_exists(domain_z.ptr, key_z.ptr, host) == 0) {
+            return false; // Already deleted
         }
 
-        // Delete the key
-        try deleteDefault(allocator, self.domain, self.key);
+        if (cfpreferences_delete_key(domain_z.ptr, key_z.ptr, host) == 0) {
+            return error.PreferencesSyncFailed;
+        }
+        return true;
     }
 
     fn valuesEqual(allocator: std.mem.Allocator, a: *const Value, b: Value) bool {
@@ -399,36 +405,37 @@ pub const Resource = struct {
     }
 
     /// Read a preference value using C wrapper (bypasses Zig @cImport issues)
-    fn readDefaultWithCWrapper(allocator: std.mem.Allocator, domain: []const u8, key: []const u8, expected_type: std.meta.Tag(Value)) !?Value {
+    fn readDefaultWithCWrapper(allocator: std.mem.Allocator, domain: []const u8, key: []const u8, expected_type: std.meta.Tag(Value), current_host: bool) !?Value {
         // Create null-terminated strings for C
         var domain_buf: [256]u8 = undefined;
         var key_buf: [256]u8 = undefined;
         const domain_z = try std.fmt.bufPrintZ(&domain_buf, "{s}", .{domain});
         const key_z = try std.fmt.bufPrintZ(&key_buf, "{s}", .{key});
+        const host: c_int = @intFromBool(current_host);
 
         // Try to read based on expected type
         switch (expected_type) {
             .boolean => {
                 var out_value: c_int = 0;
-                const result = cfpreferences_read_boolean(domain_z.ptr, key_z.ptr, &out_value);
+                const result = cfpreferences_read_boolean(domain_z.ptr, key_z.ptr, &out_value, host);
                 if (result == 0) return null; // Key doesn't exist or wrong type
                 return Value{ .boolean = out_value != 0 };
             },
             .integer => {
                 var out_value: c_longlong = 0;
-                const result = cfpreferences_read_integer(domain_z.ptr, key_z.ptr, &out_value);
+                const result = cfpreferences_read_integer(domain_z.ptr, key_z.ptr, &out_value, host);
                 if (result == 0) return null;
                 return Value{ .integer = @intCast(out_value) };
             },
             .float => {
                 var out_value: f64 = 0;
-                const result = cfpreferences_read_float(domain_z.ptr, key_z.ptr, &out_value);
+                const result = cfpreferences_read_float(domain_z.ptr, key_z.ptr, &out_value, host);
                 if (result == 0) return null;
                 return Value{ .float = out_value };
             },
             .string => {
                 var buffer: [1024]u8 = undefined;
-                const result = cfpreferences_read_string(domain_z.ptr, key_z.ptr, &buffer, buffer.len);
+                const result = cfpreferences_read_string(domain_z.ptr, key_z.ptr, &buffer, buffer.len, host);
                 if (result == 0) return null;
                 const len = std.mem.indexOfScalar(u8, &buffer, 0) orelse buffer.len;
                 const str = try allocator.dupe(u8, buffer[0..len]);
@@ -438,22 +445,23 @@ pub const Resource = struct {
         }
     }
 
-    fn writeDefault(_: std.mem.Allocator, domain: []const u8, key: []const u8, value: Value) !void {
+    fn writeDefault(_: std.mem.Allocator, domain: []const u8, key: []const u8, value: Value, current_host: bool) !void {
         // Create null-terminated strings for C
         var domain_buf: [256]u8 = undefined;
         var key_buf: [256]u8 = undefined;
         const domain_z = try std.fmt.bufPrintZ(&domain_buf, "{s}", .{domain});
         const key_z = try std.fmt.bufPrintZ(&key_buf, "{s}", .{key});
+        const host: c_int = @intFromBool(current_host);
 
         // Call appropriate C wrapper based on value type
         const result = switch (value) {
-            .boolean => |b| cfpreferences_write_boolean(domain_z.ptr, key_z.ptr, if (b) 1 else 0),
-            .integer => |i| cfpreferences_write_integer(domain_z.ptr, key_z.ptr, @intCast(i)),
-            .float => |f| cfpreferences_write_float(domain_z.ptr, key_z.ptr, f),
+            .boolean => |b| cfpreferences_write_boolean(domain_z.ptr, key_z.ptr, if (b) 1 else 0, host),
+            .integer => |i| cfpreferences_write_integer(domain_z.ptr, key_z.ptr, @intCast(i), host),
+            .float => |f| cfpreferences_write_float(domain_z.ptr, key_z.ptr, f, host),
             .string => |s| blk: {
                 var value_buf: [1024]u8 = undefined;
                 const value_z = try std.fmt.bufPrintZ(&value_buf, "{s}", .{s});
-                break :blk cfpreferences_write_string(domain_z.ptr, key_z.ptr, value_z.ptr);
+                break :blk cfpreferences_write_string(domain_z.ptr, key_z.ptr, value_z.ptr, host);
             },
             else => return error.UnsupportedValueType,
         };
@@ -714,8 +722,9 @@ pub fn zigAddResource(
     var ignore_failure_val: mruby.mrb_value = undefined;
     var notifications_val: mruby.mrb_value = undefined;
     var subscriptions_val: mruby.mrb_value = undefined;
+    var current_host_val: mruby.mrb_value = mruby.mrb_nil_value();
 
-    // Format: SS|oooooAA
+    // Format: SS|oooooAAo
     // S: required string (domain)
     // S: required string (key)
     // |: optional args start
@@ -726,7 +735,9 @@ pub fn zigAddResource(
     // o: optional object (ignore_failure)
     // A: optional array (notifications)
     // A: optional array (subscriptions)
-    _ = mruby.mrb_get_args(mrb, "SS|oooooAA", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val);
+    // o: optional object (current_host)
+    _ = mruby.mrb_get_args(mrb, "SS|oooooAAo", &domain_val, &key_val, &value_val, &action_val, &only_if_val, &not_if_val, &ignore_failure_val, &notifications_val, &subscriptions_val, &current_host_val);
+    const current_host = mruby.mrb_test(current_host_val);
 
     // Extract domain and key
     const domain_cstr = mruby.mrb_str_to_cstr(mrb, domain_val);
@@ -785,6 +796,7 @@ pub fn zigAddResource(
         .key = key,
         .value = value,
         .action = action,
+        .current_host = current_host,
         .common = common,
     }) catch {
         allocator.free(domain);

@@ -9,6 +9,7 @@ class MacOSDefaultsResource
     @value = nil
     @type = nil
     @global = false
+    @current_host = false
     @action = :write
     @only_if_proc = nil
     @not_if_proc = nil
@@ -72,7 +73,7 @@ class MacOSDefaultsResource
 
     action_arg = @action.to_s
 
-    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg)
+    ZigBackend.add_macos_defaults(@domain, @key, value_arg, action_arg, only_if_arg, not_if_arg, @ignore_failure, notifications_arg, subscriptions_arg, @current_host)
   end
 
   def domain(val)
@@ -81,6 +82,12 @@ class MacOSDefaultsResource
 
   def global(val)
     @global = val
+  end
+
+  # Write to the per-host domain (`defaults -currentHost`). Some keys, such as
+  # NSStatusItemSpacing on macOS 14+, are only honoured from there.
+  def current_host(val)
+    @current_host = val
   end
 
   def key(val)
