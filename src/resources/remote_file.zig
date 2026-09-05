@@ -4,7 +4,6 @@ const base = @import("../base_resource.zig");
 const http = @import("../http.zig");
 const logger = @import("../logger.zig");
 const json_helpers = @import("../json.zig");
-const xdg_mod = @import("../xdg.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const global_io = @import("../global_io.zig");
 
@@ -203,12 +202,17 @@ pub const Resource = struct {
         const predownloaded_path = if (self.use_etag)
             null
         else
-            findPreDownloadedFile(self.path, allocator) catch |err| switch (err) {
+            self.findPreDownloadedFile(allocator) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => return err,
             };
 
         if (predownloaded_path) |temp_path| {
+            defer allocator.free(temp_path);
+            // A cache entry is not proof that the requested content is valid.
+            if (self.checksum) |expected_checksum| {
+                try http.download.downloader.verifyChecksum(allocator, temp_path, expected_checksum);
+            }
             // Use pre-downloaded file
             // Create backup if specified
             if (self.backup) |backup_ext| {
@@ -226,9 +230,6 @@ pub const Resource = struct {
             base.applyFileAttributes(self.path, self.attrs) catch |err| {
                 logger.warn("Failed to apply file attributes for {s}: {}", .{ self.path, err });
             };
-
-            // Clean up the temp path string
-            allocator.free(temp_path);
         } else {
             // File not pre-downloaded (likely has conditions)
             // Download directly (conditional downloads are not batched)
@@ -324,20 +325,15 @@ pub const Resource = struct {
         return true; // File was downloaded/updated
     }
 
-    /// Find a pre-downloaded file by matching the slugified final path
-    fn findPreDownloadedFile(final_path: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    /// Only consume completed downloads belonging to this provisioning run.
+    fn findPreDownloadedFile(self: Resource, allocator: std.mem.Allocator) !?[]const u8 {
         const io = global_io.io();
-        // Get the download temp directory
-        const xdg_instance = xdg_mod.XDG.init(allocator);
-        const temp_dir = try xdg_instance.getDownloadsDir();
-        defer allocator.free(temp_dir);
-
-        // Slugify the final path to match the naming scheme in provision.zig
-        const path_slug = try http.slugifyPath(allocator, final_path);
-        defer allocator.free(path_slug);
-
-        // Expected filename is just the slugified path (no prefix needed)
-        const file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ temp_dir, path_slug });
+        const manager = http.download.Manager.getCurrent() orelse return null;
+        const resource_id = try std.fmt.allocPrint(allocator, "remote_file[{s}]", .{self.path});
+        defer allocator.free(resource_id);
+        const task = manager.getTask(resource_id) orelse return null;
+        if (task.status.load(.acquire) != .completed or !std.mem.eql(u8, task.url, self.source)) return null;
+        const file_path = try allocator.dupe(u8, task.temp_path);
 
         // Check if file exists
         std.Io.Dir.cwd().access(io, file_path, .{}) catch |err| switch (err) {

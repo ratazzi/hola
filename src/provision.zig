@@ -261,6 +261,10 @@ pub const ProvisionRunner = struct {
             base.recordProvisionErrorDetailSlice(msg);
             return error.DownloadFailed;
         }
+        if (task.status.load(.acquire) != .completed) {
+            base.recordProvisionErrorDetail("Download timed out for {s}", .{resource_id});
+            return error.DownloadTimeout;
+        }
     }
 
     fn applyOne(self: *ProvisionRunner, index: usize, immediate: *std.ArrayList(PendingNotification)) !void {
@@ -1774,6 +1778,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     };
     var download_mgr = try http.download.Manager.init(allocator, download_config);
     defer download_mgr.deinit();
+    download_mgr.setCurrent();
+    defer http.download.Manager.clearCurrent();
 
     // Set up progress callback for display
     const ProgressContext = struct {
@@ -1862,6 +1868,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
             const xdg_instance = @import("xdg.zig").XDG.init(allocator);
             const temp_dir = try xdg_instance.getDownloadsDir();
             defer allocator.free(temp_dir);
+            try std.Io.Dir.cwd().createDirPath(global_io.io(), temp_dir);
 
             // Generate temporary file path with slugified path
             const temp_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ temp_dir, path_slug });
