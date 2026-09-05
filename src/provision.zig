@@ -102,6 +102,7 @@ pub const ProvisionRunner = struct {
     download_mgr: ?*http.download.Manager = null,
     resource_results: std.ArrayList(ResourceResult) = .empty,
     delayed_notifications: std.ArrayList(PendingNotification) = .empty,
+    notification_stack: std.ArrayList(usize) = .empty,
     converged_index: usize = 0,
     converging: bool = false,
     last_failed_index: ?usize = null,
@@ -126,6 +127,7 @@ pub const ProvisionRunner = struct {
             self.allocator.free(pending.source_id);
         }
         self.delayed_notifications.deinit(self.allocator);
+        self.notification_stack.deinit(self.allocator);
         for (self.declaration_display_path.items) |scope| scope.deinit(self.allocator);
         self.declaration_display_path.deinit(self.allocator);
         if (self.current_declaration_phase) |phase| self.allocator.free(phase);
@@ -267,16 +269,21 @@ pub const ProvisionRunner = struct {
         }
     }
 
-    fn applyOne(self: *ProvisionRunner, index: usize, immediate: *std.ArrayList(PendingNotification)) !void {
+    fn applyOne(self: *ProvisionRunner, index: usize, immediate: *std.ArrayList(PendingNotification), action: ?[]const u8) !void {
         const display = self.display orelse return error.DisplayNotAttached;
         base.clearProvisionErrorDetail();
         self.last_failed_index = null;
 
         const starting_resource = &self.resources.items[index];
+        // A notification overrides this invocation, not the declared action.
+        const resource = if (action) |name|
+            try starting_resource.resource.withAction(name)
+        else
+            starting_resource.resource;
         try display.startResource(
             starting_resource.id.type_name,
             starting_resource.id.name,
-            starting_resource.resource.getActionName(),
+            resource.getActionName(),
             starting_resource.display_depth,
             starting_resource.display_path,
         );
@@ -320,9 +327,10 @@ pub const ProvisionRunner = struct {
         try self.setDeclarationPhase(starting_resource.phase);
         defer self.setDeclarationPhase(previous_phase) catch {};
 
+        const previous_resource_index = self.current_resource_index;
         self.current_resource_index = index;
-        defer self.current_resource_index = null;
-        const result = self.resources.items[index].resource.apply() catch |err| {
+        defer self.current_resource_index = previous_resource_index;
+        const result = resource.apply() catch |err| {
             const res = &self.resources.items[index];
             const detail_msg = base.getProvisionErrorDetail();
             const error_display = detail_msg orelse base.userFacingError(err);
@@ -331,7 +339,7 @@ pub const ProvisionRunner = struct {
             try display.resourceError(.{
                 .resource_type = res.id.type_name,
                 .resource_name = res.id.name,
-                .action = res.resource.getActionName(),
+                .action = resource.getActionName(),
                 .depth = res.display_depth,
                 .error_name = base.userFacingError(err),
                 .message = error_display,
@@ -383,6 +391,16 @@ pub const ProvisionRunner = struct {
                             return err;
                         };
                     } else {
+                        // Delayed actions run once per target/action, even if
+                        // several resources (or a notification chain) request it.
+                        const duplicate = for (self.delayed_notifications.items) |queued| {
+                            if (std.mem.eql(u8, queued.notification.target_resource_id, notification.target_resource_id) and
+                                std.mem.eql(u8, queued.notification.action.action_name, notification.action.action_name)) break true;
+                        } else false;
+                        if (duplicate) {
+                            self.allocator.free(source_id);
+                            continue;
+                        }
                         self.delayed_notifications.append(self.allocator, pending) catch |err| {
                             self.allocator.free(source_id);
                             return err;
@@ -422,7 +440,7 @@ pub const ProvisionRunner = struct {
                         self.allocator.free(subscriber_id);
                         return err;
                     };
-                    source_res.resource.getCommonProps().notifications.append(self.allocator, .{
+                    source_res.notifications.append(self.allocator, .{
                         .target_resource_id = subscriber_id,
                         .action = .{ .action_name = action_name },
                         .timing = subscription.timing,
@@ -459,14 +477,12 @@ pub const ProvisionRunner = struct {
             // Mark before apply so a failed resource is never retried by a
             // later incremental or phase-specific converge call.
             self.resources.items[index].converged = true;
-            try self.applyOne(index, &immediate_notifications);
-        }
-
-        if (immediate_notifications.items.len > 0) {
-            try display.showNotificationSection("Immediate notifications");
+            try self.applyOne(index, &immediate_notifications, null);
             for (immediate_notifications.items) |pending| {
                 try processNotification(self.allocator, pending, display);
             }
+            for (immediate_notifications.items) |pending| self.allocator.free(pending.source_id);
+            immediate_notifications.clearRetainingCapacity();
         }
     }
 
@@ -487,7 +503,11 @@ pub const ProvisionRunner = struct {
         if (self.delayed_notifications.items.len == 0) return;
         const display = self.display orelse return error.DisplayNotAttached;
         try display.showNotificationSection("Delayed notifications");
-        for (self.delayed_notifications.items) |pending| {
+        // Notification targets may enqueue more delayed actions or reallocate
+        // the queue. Keep processed entries until the end for deduplication.
+        var index: usize = 0;
+        while (index < self.delayed_notifications.items.len) : (index += 1) {
+            const pending = self.delayed_notifications.items[index];
             try processNotification(self.allocator, pending, display);
         }
         for (self.delayed_notifications.items) |pending| {
@@ -1025,35 +1045,39 @@ fn processNotification(allocator: std.mem.Allocator, pending: PendingNotificatio
 
     // Parse target resource ID
     const target_id = resources.ResourceId.parse(allocator, notif.target_resource_id) catch |err| {
-        const error_msg = try std.fmt.allocPrint(allocator, "Invalid target resource ID '{s}': {}", .{ notif.target_resource_id, err });
-        defer allocator.free(error_msg);
-        try display.showInfo(error_msg);
-        return;
+        base.recordProvisionErrorDetail("Invalid notification target '{s}': {s}", .{ notif.target_resource_id, @errorName(err) });
+        return err;
     };
     defer target_id.deinit(allocator);
 
     // Find target resource
-    var found = false;
-    for (runner.resources.items) |*target_res| {
+    for (runner.resources.items, 0..) |*target_res, index| {
         if (std.mem.eql(u8, target_res.id.type_name, target_id.type_name) and
             std.mem.eql(u8, target_res.id.name, target_id.name))
         {
-            found = true;
-            const target_desc = try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ target_res.id.type_name, target_res.id.name });
-            defer allocator.free(target_desc);
-            try display.showNotification(pending.source_id, target_desc, notif.action.action_name);
+            for (runner.notification_stack.items) |active_index| {
+                if (active_index == index) {
+                    base.recordProvisionErrorDetail("Notification cycle at {s}", .{notif.target_resource_id});
+                    return error.NotificationCycle;
+                }
+            }
+            try runner.notification_stack.append(allocator, index);
+            defer _ = runner.notification_stack.pop();
+            try display.showNotification(pending.source_id, notif.target_resource_id, notif.action.action_name);
 
-            // TODO: For now, just log. In the future, resources will have an "actions" map
-            // that allows triggering specific actions like "restart", "reload", etc.
-            break;
+            var immediate = std.ArrayList(PendingNotification).empty;
+            defer {
+                for (immediate.items) |nested| allocator.free(nested.source_id);
+                immediate.deinit(allocator);
+            }
+            try runner.applyOne(index, &immediate, notif.action.action_name);
+            for (immediate.items) |nested| try processNotification(allocator, nested, display);
+            return;
         }
     }
 
-    if (!found) {
-        const error_msg = try std.fmt.allocPrint(allocator, "Target resource '{s}' not found", .{notif.target_resource_id});
-        defer allocator.free(error_msg);
-        try display.showInfo(error_msg);
-    }
+    base.recordProvisionErrorDetail("Notification target '{s}' not found", .{notif.target_resource_id});
+    return error.NotificationTargetNotFound;
 }
 
 // Zig callback for execute resource
@@ -2343,6 +2367,46 @@ test "notifies accepts both spellings of the immediate timing" {
         try std.testing.expectEqual(@as(usize, 1), notifications.items.len);
         try std.testing.expectEqual(expected, notifications.items[0].timing);
     }
+}
+
+test "immediate notification survives resources appended by its target" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    try session.evalString(
+        \\$notification_events = []
+        \\ruby_block 'source' do
+        \\  block { $notification_events << 'source' }
+        \\  notifies :run, 'ruby_block[target]', :immediate
+        \\end
+        \\ruby_block 'target' do
+        \\  action :nothing
+        \\  block do
+        \\    $notification_events << 'target'
+        \\    32.times do |i|
+        \\      Hola::Resources.execute "child-#{i}" do
+        \\        command 'exit 99'
+        \\        action :nothing
+        \\      end
+        \\    end
+        \\  end
+        \\end
+        \\ruby_block 'observer' do
+        \\  block do
+        \\    raise 'notification order' unless $notification_events == ['source', 'target']
+        \\  end
+        \\end
+    );
+
+    var display = try modern_display.ModernProvisionDisplay.init(allocator, .normal);
+    defer display.deinit();
+    session.runner.attachDisplay(&display);
+    defer session.runner.detachDisplay();
+    try session.runner.convergeFrom(0);
+    try std.testing.expectEqual(@as(usize, 35), session.runner.resources.items.len);
+    try std.testing.expectEqual(resources.ruby_block.Resource.Action.nothing, session.runner.resources.items[1].resource.ruby_block.action);
+    try std.testing.expectEqual(@as(usize, 0), session.runner.notification_stack.items.len);
 }
 
 test "task prelude supports common Rake task semantics" {

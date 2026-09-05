@@ -264,6 +264,28 @@ fn resourceCommand(resource: anytype) ?[]const u8 {
     };
 }
 
+fn setPayloadAction(payload: anytype, action: []const u8) !void {
+    if (@TypeOf(payload.*) == package.Resource) {
+        switch (payload.backend) {
+            inline else => |*backend| try setPayloadAction(backend, action),
+        }
+    } else if (@hasField(@TypeOf(payload.*), "action")) {
+        payload.action = std.meta.stringToEnum(@TypeOf(payload.action), action) orelse
+            return error.InvalidNotificationAction;
+    } else {
+        const expected = if (@TypeOf(payload.*) == file_edit.Resource) "edit" else "apply";
+        if (!std.mem.eql(u8, expected, action)) return error.InvalidNotificationAction;
+    }
+}
+
+fn resourceWithAction(resource: anytype, action: []const u8) !@TypeOf(resource) {
+    var copy = resource;
+    switch (copy) {
+        inline else => |*payload| try setPayloadAction(payload, action),
+    }
+    return copy;
+}
+
 const ResourceMacOs = union(enum) {
     file: file.Resource,
     execute: execute.Resource,
@@ -290,6 +312,10 @@ const ResourceMacOs = union(enum) {
 
     pub fn apply(self: ResourceMacOs) !ApplyResult {
         return applyResourceUnion(self);
+    }
+
+    pub fn withAction(self: ResourceMacOs, action: []const u8) !ResourceMacOs {
+        return resourceWithAction(self, action);
     }
 
     pub fn getName(self: ResourceMacOs) []const u8 {
@@ -340,6 +366,10 @@ const ResourceGeneric = union(enum) {
 
     pub fn apply(self: ResourceGeneric) !ApplyResult {
         return applyResourceUnion(self);
+    }
+
+    pub fn withAction(self: ResourceGeneric, action: []const u8) !ResourceGeneric {
+        return resourceWithAction(self, action);
     }
 
     pub fn getName(self: ResourceGeneric) []const u8 {
