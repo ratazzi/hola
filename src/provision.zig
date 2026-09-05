@@ -2309,6 +2309,35 @@ test "convergeFrom applies and records results once" {
     try std.testing.expectEqual(@as(usize, 1), session.runner.resource_results.items.len);
 }
 
+test "notifies accepts both spellings of the immediate timing" {
+    const allocator = std.testing.allocator;
+    json.setAllocator(allocator);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    try session.evalString(
+        \\ruby_block 'immediately' do
+        \\  block {}
+        \\  notifies :run, 'ruby_block[target]', :immediately
+        \\end
+        \\ruby_block 'immediate' do
+        \\  block {}
+        \\  notifies :run, 'ruby_block[target]', :immediate
+        \\end
+        \\ruby_block 'default' do
+        \\  block {}
+        \\  notifies :run, 'ruby_block[target]'
+        \\end
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), session.runner.resources.items.len);
+    const timings = [_]resources.NotificationTiming{ .immediate, .immediate, .delayed };
+    for (timings, 0..) |expected, index| {
+        const notifications = session.runner.resources.items[index].notifications;
+        try std.testing.expectEqual(@as(usize, 1), notifications.items.len);
+        try std.testing.expectEqual(expected, notifications.items[0].timing);
+    }
+}
+
 test "task prelude supports common Rake task semantics" {
     var mrb_state = try mruby.State.init();
     defer mrb_state.deinit();
