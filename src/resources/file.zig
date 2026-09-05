@@ -125,10 +125,8 @@ pub const Resource = struct {
             var existing_reader = existing_file.reader(io, &read_buf);
             existing_content = try existing_reader.interface.allocRemaining(std.heap.c_allocator, .unlimited);
 
-            if (self.attrs.mode) |_| {
-                const stat = try existing_file.stat(io);
-                current_mode = @intCast(stat.permissions.toMode() & 0o777);
-            }
+            const stat = try existing_file.stat(io);
+            current_mode = @intCast(stat.permissions.toMode() & 0o7777);
 
             if (std.mem.eql(u8, existing_content.?, self.content)) {
                 // Content matches, check attributes if specified
@@ -184,10 +182,11 @@ pub const Resource = struct {
         else
             temp_name;
 
+        const permissions: std.Io.File.Permissions = .fromMode(@intCast(self.attrs.mode orelse current_mode orelse 0o666));
         var temp_file = if (is_abs)
-            try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true, .exclusive = true })
+            try std.Io.Dir.createFileAbsolute(io, temp_path, .{ .truncate = true, .exclusive = true, .permissions = permissions })
         else
-            try std.Io.Dir.cwd().createFile(io, temp_path, .{ .truncate = true, .exclusive = true });
+            try std.Io.Dir.cwd().createFile(io, temp_path, .{ .truncate = true, .exclusive = true, .permissions = permissions });
 
         var temp_cleanup = true;
         var temp_file_closed = false;
@@ -204,6 +203,10 @@ pub const Resource = struct {
         var temp_writer = temp_file.writer(io, &write_buf);
         try temp_writer.interface.writeAll(self.content);
         try temp_writer.interface.flush();
+        // Preserve existing permissions across replacement, before publishing.
+        if (self.attrs.mode != null or current_mode != null) {
+            try temp_file.setPermissions(io, permissions);
+        }
         try temp_file.sync(io);
         temp_file.close(io);
         temp_file_closed = true;
