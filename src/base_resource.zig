@@ -669,7 +669,7 @@ pub fn fillCommonFromRuby(
             };
             const timing_str = std.mem.span(timing_cstr);
 
-            const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
+            const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate") or std.mem.eql(u8, timing_str, "immediately"))
                 .immediate
             else
                 .delayed;
@@ -715,7 +715,7 @@ pub fn fillCommonFromRuby(
             };
             const timing_str = std.mem.span(timing_cstr);
 
-            const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate"))
+            const timing: notification.Timing = if (std.mem.eql(u8, timing_str, "immediate") or std.mem.eql(u8, timing_str, "immediately"))
                 .immediate
             else
                 .delayed;
