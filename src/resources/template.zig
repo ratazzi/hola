@@ -77,11 +77,11 @@ pub const Resource = struct {
                 };
             },
             .delete => {
-                try applyDelete(self);
+                const was_deleted = try applyDelete(self);
                 return base.ApplyResult{
-                    .was_updated = false,
+                    .was_updated = was_deleted,
                     .action = action_name,
-                    .skip_reason = "up to date",
+                    .skip_reason = if (was_deleted) null else "up to date",
                 };
             },
         }
@@ -172,20 +172,21 @@ pub const Resource = struct {
         return true; // File was created or updated
     }
 
-    fn applyDelete(self: Resource) !void {
+    fn applyDelete(self: Resource) !bool {
         const io = global_io.io();
         const is_abs = std.fs.path.isAbsolute(self.path);
         if (is_abs) {
             std.Io.Dir.deleteFileAbsolute(io, self.path) catch |err| switch (err) {
-                error.FileNotFound => return,
+                error.FileNotFound => return false,
                 else => return err,
             };
         } else {
             std.Io.Dir.cwd().deleteFile(io, self.path) catch |err| switch (err) {
-                error.FileNotFound => return,
+                error.FileNotFound => return false,
                 else => return err,
             };
         }
+        return true;
     }
 
     fn readTemplateFile(source: []const u8) ![]u8 {
