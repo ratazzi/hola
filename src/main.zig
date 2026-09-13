@@ -252,6 +252,7 @@ comptime {
     }
     // Force test discovery for files only reached via indirect imports.
     _ = @import("provision.zig");
+    _ = @import("command_runner.zig");
 }
 
 test "simple test" {
