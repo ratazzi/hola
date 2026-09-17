@@ -81,7 +81,11 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
     installProgressCallbacks(&clone_opts, &progress_ctx);
 
     var repo_ptr: ?*c.git_repository = null;
-    const code = c.git_clone(&repo_ptr, url_c.ptr, destination_c.ptr, &clone_opts);
+    const code = while (true) {
+        const attempt = c.git_clone(&repo_ptr, url_c.ptr, destination_c.ptr, &clone_opts);
+        if (attempt != 0 and retryAfterKeyFailure(&progress_ctx.credentials)) continue;
+        break attempt;
+    };
     if (code != 0) {
         const err_ptr = c.git_error_last();
         if (err_ptr != null and err_ptr.*.message != null) {
@@ -100,6 +104,16 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
 
     var url_buf: [512]u8 = undefined;
     logger.info("Cloned {s} -> {s}", .{ url_utils.maskUrlPassword(url, &url_buf), destination });
+}
+
+/// A key file libssh2 rejected ends the operation with a hard error; run it again with the next candidate.
+fn retryAfterKeyFailure(credentials: *const git_credentials.Credentials) bool {
+    const err = c.git_error_last();
+    if (err == null or err.*.message == null) return false;
+    const message = std.mem.span(@as([*:0]const u8, @ptrCast(err.*.message)));
+    if (!credentials.retryAfterKeyFailure(err.*.klass == c.GIT_ERROR_SSH, message)) return false;
+    logger.warn("SSH key rejected by libssh2 ({s}); trying the next candidate", .{message});
+    return true;
 }
 
 fn check(code: c_int, err: Error) Error!void {

@@ -22,11 +22,31 @@ pub const Credentials = struct {
     /// Directory holding `.ssh/` for the default key names.
     home: ?[]const u8 = null,
     attempt: usize = 0,
+    /// What the previous `next` call handed out, for `retryAfterKeyFailure`.
+    last: ?std.meta.Tag(Candidate) = null,
 
     /// The next credential to offer, or null when none remain. `buf` backs a returned key path.
-    /// Key files libssh2 could not load are skipped here: libgit2 turns a load failure
-    /// into a hard error instead of GIT_EAUTH, which would end the attempts early.
+    /// Obviously unusable key files (missing or encrypted) are skipped up front; anything
+    /// libssh2 still rejects is handled by `retryAfterKeyFailure`.
     pub fn next(self: *Credentials, buf: *[std.fs.max_path_bytes:0]u8) ?Candidate {
+        const candidate = self.pick(buf);
+        self.last = if (candidate) |value| value else null;
+        return candidate;
+    }
+
+    /// libgit2 reports a key libssh2 could not load as a hard error rather than GIT_EAUTH,
+    /// so the callback is never asked again. Given libgit2's last error, this says whether
+    /// the operation should simply be run again: the key just offered was at fault and
+    /// another candidate remains. The iterator's position already points past that key.
+    pub fn retryAfterKeyFailure(self: *const Credentials, ssh_error: bool, message: []const u8) bool {
+        if (!ssh_error or self.last != .key) return false;
+        if (std.mem.indexOf(u8, message, "private key") == null) return false;
+        var probe = self.*;
+        var buf: [std.fs.max_path_bytes:0]u8 = undefined;
+        return probe.pick(&buf) != null;
+    }
+
+    fn pick(self: *Credentials, buf: *[std.fs.max_path_bytes:0]u8) ?Candidate {
         while (true) {
             const index = self.attempt;
             self.attempt += 1;
@@ -176,4 +196,36 @@ test "Credentials hands out each candidate once, skipping missing and unloadable
     var homeless = Credentials{};
     try testing.expectEqual(Candidate.agent, homeless.next(&buf).?);
     try testing.expect(homeless.next(&buf) == null);
+}
+
+test "retryAfterKeyFailure asks for a retry only after a rejected key file with candidates left" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(home);
+    const plain = try opensshKeyText(testing.allocator, "none");
+    defer testing.allocator.free(plain);
+    try tmp.dir.createDirPath(testing.io, ".ssh");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".ssh/id_ed25519", .data = plain });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".ssh/id_rsa", .data = plain });
+    var buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const message = "Unable to extract public key from private key file: Wrong passphrase or invalid/unrecognized private key file format";
+
+    var credentials = Credentials{ .home = home };
+    try testing.expect(!credentials.retryAfterKeyFailure(true, message));
+    try testing.expectEqual(Candidate.agent, credentials.next(&buf).?);
+    // The agent is not a key file; a failure here is not retried.
+    try testing.expect(!credentials.retryAfterKeyFailure(true, message));
+    try testing.expect(std.mem.endsWith(u8, credentials.next(&buf).?.key, "id_ed25519"));
+    try testing.expect(credentials.retryAfterKeyFailure(true, message));
+    try testing.expect(!credentials.retryAfterKeyFailure(false, message));
+    try testing.expect(!credentials.retryAfterKeyFailure(true, "failed to connect to host"));
+    // Probing for a further candidate must not consume it.
+    try testing.expect(std.mem.endsWith(u8, credentials.next(&buf).?.key, "id_rsa"));
+    // The last key file has no successor, so its failure is final.
+    try testing.expect(!credentials.retryAfterKeyFailure(true, message));
+
+    var explicit = Credentials{ .home = home, .explicit_key = "/explicit.pem" };
+    _ = explicit.next(&buf);
+    try testing.expect(!explicit.retryAfterKeyFailure(true, message));
 }

@@ -258,6 +258,16 @@ pub const Resource = struct {
         return .{ .explicit_key = self.ssh_key, .home = global_io.getEnv("HOME") };
     }
 
+    /// A key file libssh2 rejected ends the operation with a hard error; run it again with the next candidate.
+    fn retryAfterKeyFailure(credentials: *const git_credentials.Credentials) bool {
+        const err = c.git_error_last();
+        if (err == null or err.*.message == null) return false;
+        const message = std.mem.span(@as([*:0]const u8, @ptrCast(err.*.message)));
+        if (!credentials.retryAfterKeyFailure(err.*.klass == c.GIT_ERROR_SSH, message)) return false;
+        logger.warn("[git] SSH key rejected by libssh2 ({s}); trying the next candidate", .{message});
+        return true;
+    }
+
     /// Custom credentials callback that supports SSH key files
     fn credentialsCallback(
         out: ?*?*c.git_credential,
@@ -653,7 +663,11 @@ pub const Resource = struct {
 
         // Perform clone
         var repo_ptr: ?*c.git_repository = null;
-        const code = c.git_clone(&repo_ptr, url_c.ptr, dest_c.ptr, &clone_opts);
+        const code = while (true) {
+            const attempt = c.git_clone(&repo_ptr, url_c.ptr, dest_c.ptr, &clone_opts);
+            if (attempt != 0 and retryAfterKeyFailure(&ssh_ctx.credentials)) continue;
+            break attempt;
+        };
 
         // Restore root before ownership fixup (chown requires root)
         restoreEffectiveUser(user_ctx);
@@ -781,7 +795,11 @@ pub const Resource = struct {
         fetch_opts.callbacks.certificate_check = certificateCheckCallback;
         fetch_opts.callbacks.payload = &ssh_ctx;
 
-        code = c.git_remote_fetch(remote, null, &fetch_opts, null);
+        code = while (true) {
+            const attempt = c.git_remote_fetch(remote, null, &fetch_opts, null);
+            if (attempt != 0 and retryAfterKeyFailure(&ssh_ctx.credentials)) continue;
+            break attempt;
+        };
         if (code != 0) {
             const err = c.git_error_last();
             if (err != null) {
