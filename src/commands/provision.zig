@@ -20,8 +20,8 @@ const params = clap.parseParamsComptime(
     \\    --client-cert <PATH>     Client certificate for mTLS
     \\    --client-key <PATH>      Client private key for mTLS
     \\    --host <HOST>            Provision over SSH ([user@]hostname)
-    \\    --port <PORT>            SSH port (default: 22)
-    \\    --identity <PATH>        SSH private key (default: SSH agent)
+    \\    --port <PORT>            SSH port (default: ~/.ssh/config, then 22)
+    \\    --identity <PATH>        SSH private key (default: agent, then ~/.ssh/config IdentityFile)
     \\    --known-hosts <PATH>     OpenSSH known_hosts file
     \\    --remote-binary <PATH>   Local Hola build to upload instead of the GitHub release
     \\    --bundle <PATH>          Upload this directory with the script
@@ -178,7 +178,7 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
     defer bags.deinit();
 
     if (res.args.host) |host| {
-        const port = if (res.args.port) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidSshPort else 22;
+        const port: ?u16 = if (res.args.port) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidSshPort else null;
         remote.run(allocator, .{
             .host = host,
             .port = port,
@@ -291,8 +291,8 @@ fn printHelp(reason: ?[]const u8) !void {
         \\      --client-cert PATH     Client certificate for mTLS (PEM)
         \\      --client-key PATH      Client private key for mTLS (PEM)
         \\      --host HOST            Execute on [user@]hostname over SSH
-        \\      --port PORT            SSH port (default: 22)
-        \\      --identity PATH        Private key; otherwise use SSH agent
+        \\      --port PORT            SSH port (default: ~/.ssh/config, then 22)
+        \\      --identity PATH        Private key; otherwise agent, then ~/.ssh/config keys
         \\      --known-hosts PATH     Defaults to ~/.ssh/known_hosts; strict checking
         \\      --remote-binary PATH   Upload this local build instead of the GitHub release
         \\      --bundle DIR           Upload DIR; script must be inside it

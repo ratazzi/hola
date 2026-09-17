@@ -66,8 +66,9 @@ for attempt in {1..30}; do
   sleep 0.1
 done
 common=(--host "$(id -un)@127.0.0.1" --port "$port" --known-hosts "$fixture/known_hosts")
+# HOME is isolated so the developer's own ~/.ssh/config never leaks into a run.
 run() {
-  "$binary" provision "$@" > "$fixture/output.log" 2>&1
+  HOME="$fixture/home" "$binary" provision "$@" > "$fixture/output.log" 2>&1
 }
 fail() { cat "$fixture/output.log"; cat "$fixture/sshd.log"; exit 1; }
 cat > "$fixture/bundle/nested/main's.rb" <<'RUBY'
@@ -104,6 +105,46 @@ run "$fixture/single.rb" "${common[@]}" || fail
 [ "$(cat "$fixture/agent-result")" = agent ] || fail
 [ ! -d "$(cat "$fixture/workspace")" ] || fail
 echo 'PASS SSH agent authentication and single script'
+
+# ~/.ssh/config: aliases, Include with a quoted path, IdentityFile and a per-host IdentityAgent.
+mkdir -p "$fixture/home/.ssh" "$fixture/home/Application Support"
+cat > "$fixture/home/.ssh/config" <<EOF
+Include "~/Application Support/generated.conf"
+Host loop
+    HostName 127.0.0.1
+    Port $port
+    User $(id -un)
+    IdentityFile none
+    IdentityFile ~/missing-key
+    IdentityFile $fixture/client
+    UserKnownHostsFile $fixture/known_hosts
+Host jump
+    HostName 127.0.0.1
+    ProxyJump bastion.example
+Host *
+    UserKnownHostsFile $fixture/known_hosts
+    Port $port
+EOF
+cat > "$fixture/home/Application Support/generated.conf" <<EOF
+Host agent-*
+    HostName 127.0.0.1
+    User "$(id -un)"
+    IdentityAgent "$SSH_AUTH_SOCK"
+    IdentityFile none
+EOF
+rm -f "$fixture/agent-result"
+# No agent reachable, so the IdentityFile list must carry the login.
+SSH_AUTH_SOCK= run "$fixture/single.rb" --host loop || fail
+[ "$(cat "$fixture/agent-result")" = agent ] || fail
+grep -q 'Applying .*/.ssh/config for loop' "$fixture/output.log" || fail
+rm -f "$fixture/agent-result"
+SSH_AUTH_SOCK= run "$fixture/single.rb" --host agent-loop || fail
+[ "$(cat "$fixture/agent-result")" = agent ] || fail
+if run "$fixture/single.rb" --host jump; then fail; fi
+grep -q 'ProxyJumpUnsupported' "$fixture/output.log" || fail
+if run "$fixture/single.rb" --host loop --port 1; then fail; fi
+grep -q 'Cannot connect to 127.0.0.1:1' "$fixture/output.log" || fail
+echo 'PASS ssh_config aliases, Include, IdentityAgent, ProxyJump refusal and CLI precedence'
 
 for known in empty_known_hosts wrong_known_hosts; do
   if run "$fixture/single.rb" --host "$(id -un)@127.0.0.1" --port "$port" \

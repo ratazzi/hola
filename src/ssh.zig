@@ -22,7 +22,13 @@ pub const Options = struct {
     host: []const u8,
     user: []const u8,
     port: u16 = 22,
+    /// An explicit key: used alone, nothing else is tried.
     identity: ?[]const u8 = null,
+    /// Keys from ssh_config, tried after the agent; missing files are skipped.
+    identity_files: []const []const u8 = &.{},
+    /// Agent socket from ssh_config IdentityAgent; null means SSH_AUTH_SOCK.
+    identity_agent: ?[]const u8 = null,
+    agent_disabled: bool = false,
     known_hosts: []const u8,
 };
 
@@ -112,23 +118,54 @@ pub const Client = struct {
     fn authenticate(self: *Client, opts: Options) !void {
         const user = try self.allocator.dupeZ(u8, opts.user);
         defer self.allocator.free(user);
+        // Each method records why it failed; the notes are shown only if none succeeds.
+        var notes: std.ArrayList(u8) = .empty;
+        defer notes.deinit(self.allocator);
+        var last_error: anyerror = error.SshAgentDisabled;
         if (opts.identity) |identity| {
-            const path = try self.allocator.dupeZ(u8, identity);
-            defer self.allocator.free(path);
-            if (c.libssh2_userauth_publickey_fromfile_ex(self.session, user, @intCast(user.len), null, path, null) != 0) {
-                std.debug.print("[ssh] Key {s} was rejected for {s}@{s}; encrypted keys must be loaded into ssh-agent instead\n", .{ identity, opts.user, opts.host });
-                return self.fail(error.SshKeyAuthenticationFailed);
+            if (self.authenticateWithKey(user, identity, opts, &notes)) |_| return else |err| last_error = err;
+        } else {
+            // OpenSSH order: agent identities first, then configured key files.
+            if (!opts.agent_disabled) {
+                if (self.authenticateWithAgent(user, opts, &notes)) |_| return else |err| last_error = err;
             }
-            return;
+            var tried_file = false;
+            for (opts.identity_files) |file| {
+                std.Io.Dir.cwd().access(global_io.io(), file, .{}) catch continue;
+                tried_file = true;
+                if (self.authenticateWithKey(user, file, opts, &notes)) |_| return else |err| last_error = err;
+            }
+            if (opts.agent_disabled and !tried_file)
+                try notes.appendSlice(self.allocator, "[ssh] ssh_config disables the agent and names no usable IdentityFile; pass --identity <key>\n");
         }
+        std.debug.print("{s}", .{notes.items});
+        return last_error;
+    }
+
+    fn authenticateWithKey(self: *Client, user: [:0]const u8, identity: []const u8, opts: Options, notes: *std.ArrayList(u8)) !void {
+        const path = try self.allocator.dupeZ(u8, identity);
+        defer self.allocator.free(path);
+        if (c.libssh2_userauth_publickey_fromfile_ex(self.session, user, @intCast(user.len), null, path, null) != 0) {
+            try notes.print(self.allocator, "[ssh] Key {s} was rejected for {s}@{s}: {s}; encrypted keys must be loaded into ssh-agent instead\n", .{ identity, opts.user, opts.host, self.lastErrorMessage() });
+            return error.SshKeyAuthenticationFailed;
+        }
+    }
+
+    fn authenticateWithAgent(self: *Client, user: [:0]const u8, opts: Options, notes: *std.ArrayList(u8)) !void {
         const agent = c.libssh2_agent_init(self.session) orelse return error.OutOfMemory;
         defer c.libssh2_agent_free(agent);
+        const socket_path: ?[:0]u8 = if (opts.identity_agent) |path| try self.allocator.dupeZ(u8, path) else null;
+        defer if (socket_path) |path| self.allocator.free(path);
+        if (socket_path) |path| c.libssh2_agent_set_identity_path(agent, path);
         if (c.libssh2_agent_connect(agent) != 0) {
-            std.debug.print("[ssh] Cannot reach ssh-agent (SSH_AUTH_SOCK={s}); pass --identity <key> or start an agent\n", .{global_io.getEnv("SSH_AUTH_SOCK") orelse "unset"});
-            return self.fail(error.SshAgentUnavailable);
+            try notes.print(self.allocator, "[ssh] Cannot reach ssh-agent at {s}: {s}; pass --identity <key> or start an agent\n", .{ opts.identity_agent orelse global_io.getEnv("SSH_AUTH_SOCK") orelse "unset SSH_AUTH_SOCK", self.lastErrorMessage() });
+            return error.SshAgentUnavailable;
         }
         defer _ = c.libssh2_agent_disconnect(agent);
-        if (c.libssh2_agent_list_identities(agent) != 0) return self.fail(error.SshAgentUnavailable);
+        if (c.libssh2_agent_list_identities(agent) != 0) {
+            try notes.print(self.allocator, "[ssh] ssh-agent refused to list identities: {s}\n", .{self.lastErrorMessage()});
+            return error.SshAgentUnavailable;
+        }
         var tried: std.ArrayList(u8) = .empty;
         defer tried.deinit(self.allocator);
         var previous: ?*c.struct_libssh2_agent_publickey = null;
@@ -136,16 +173,19 @@ pub const Client = struct {
             var identity: ?*c.struct_libssh2_agent_publickey = null;
             const rc = c.libssh2_agent_get_identity(agent, &identity, previous);
             if (rc == 1) break;
-            if (rc != 0) return self.fail(error.SshAgentUnavailable);
+            if (rc != 0) {
+                try notes.print(self.allocator, "[ssh] ssh-agent failed while listing identities: {s}\n", .{self.lastErrorMessage()});
+                return error.SshAgentUnavailable;
+            }
             if (c.libssh2_agent_userauth(agent, user, identity) == 0) return;
             const comment: [*c]const u8 = identity.?.comment;
             try tried.print(self.allocator, "{s}{s}", .{ if (tried.items.len == 0) "" else ", ", if (comment != null) std.mem.span(comment) else "(no comment)" });
             previous = identity;
         }
         if (tried.items.len == 0) {
-            std.debug.print("[ssh] ssh-agent holds no identities; run ssh-add <key> or pass --identity <key>\n", .{});
+            try notes.appendSlice(self.allocator, "[ssh] ssh-agent holds no identities; run ssh-add <key> or pass --identity <key>\n");
         } else {
-            std.debug.print("[ssh] {s}@{s} rejected every ssh-agent identity ({s}); check the user name or pass --identity <key>\n", .{ opts.user, opts.host, tried.items });
+            try notes.print(self.allocator, "[ssh] {s}@{s} rejected every ssh-agent identity ({s}); check the user name or pass --identity <key>\n", .{ opts.user, opts.host, tried.items });
         }
         return error.SshAgentAuthenticationFailed;
     }
@@ -227,12 +267,18 @@ pub const Client = struct {
         // HUP may have buffered data; let libssh2 drain it and report EOF/error.
     }
 
-    /// Report libssh2's own description of the last failure before returning a coarse error.
-    fn fail(self: *Client, comptime err: anyerror) anyerror {
+    /// libssh2's description of the most recent failure on this session.
+    fn lastErrorMessage(self: *Client) []const u8 {
         var message: [*c]u8 = null;
         var length: c_int = 0;
         _ = c.libssh2_session_last_error(self.session, &message, &length, 0);
-        if (message != null and length > 0) std.debug.print("[ssh] {s}: {s}\n", .{ @errorName(err), message[0..@intCast(length)] });
+        if (message == null or length <= 0) return "no detail from libssh2";
+        return message[0..@intCast(length)];
+    }
+
+    /// Report libssh2's own description of the last failure before returning a coarse error.
+    fn fail(self: *Client, comptime err: anyerror) anyerror {
+        std.debug.print("[ssh] {s}: {s}\n", .{ @errorName(err), self.lastErrorMessage() });
         return err;
     }
 

@@ -7,6 +7,7 @@ const protocol = @import("remote_protocol.zig");
 const display = @import("modern_provision_display.zig");
 const http = @import("http.zig");
 const xdg = @import("xdg.zig");
+const ssh_config = @import("ssh_config.zig");
 const build_options = @import("build_options");
 
 /// Release assets are published as hola-{os}-{arch} under a v{version} tag.
@@ -14,7 +15,8 @@ pub const RELEASE_BASE_URL = "https://github.com/ratazzi/hola/releases/download"
 
 pub const Options = struct {
     host: []const u8,
-    port: u16 = 22,
+    /// Null means the ssh_config value, then 22.
+    port: ?u16 = null,
     identity: ?[]const u8 = null,
     known_hosts: ?[]const u8 = null,
     binary: ?[]const u8 = null,
@@ -27,19 +29,58 @@ pub const Options = struct {
     secrets_json: ?[]const u8 = null,
 };
 
+/// The `[user@]host` argument as typed; `host` is the alias looked up in ssh_config.
 const Target = struct {
-    user: []const u8,
+    user: ?[]const u8,
     host: []const u8,
 
-    fn parse(value: []const u8, default_user: ?[]const u8) !Target {
+    fn parse(value: []const u8) !Target {
         const at = std.mem.indexOfScalar(u8, value, '@');
-        const user = if (at) |index| value[0..index] else default_user orelse return error.SshUserRequired;
+        const user: ?[]const u8 = if (at) |index| value[0..index] else null;
         var host = if (at) |index| value[index + 1 ..] else value;
         if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
-        if (user.len == 0 or host.len == 0 or host[0] == '-' or
-            std.mem.indexOfAny(u8, user, "\x00\r\n\t @/") != null or
-            std.mem.indexOfAny(u8, host, "\x00\r\n\t @/[]") != null) return error.InvalidSshTarget;
+        if (user) |name| if (name.len == 0 or std.mem.indexOfAny(u8, name, "\x00\r\n\t @/") != null) return error.InvalidSshTarget;
+        if (host.len == 0 or host[0] == '-' or std.mem.indexOfAny(u8, host, "\x00\r\n\t @/[]") != null) return error.InvalidSshTarget;
         return .{ .user = user, .host = host };
+    }
+};
+
+/// Everything needed to open the connection, after ssh_config and the command line are merged.
+const Connection = struct {
+    user: []const u8,
+    host: []const u8,
+    port: u16,
+    known_hosts: []const u8,
+    config: ssh_config.HostConfig,
+
+    /// Command-line values win over ~/.ssh/config, which wins over the defaults.
+    fn resolve(allocator: std.mem.Allocator, io: std.Io, opts: Options) !Connection {
+        const target = try Target.parse(opts.host);
+        if (opts.port) |port| if (port == 0) return error.InvalidSshPort;
+        const home = global_io.getEnv("HOME") orelse return error.HomeNotFound;
+        const local_user = global_io.getEnv("USER") orelse global_io.getEnv("LOGNAME");
+        const config_path = try std.fs.path.join(allocator, &.{ home, ".ssh", "config" });
+        const config = ssh_config.load(allocator, io, config_path, target.host, .{ .home = home, .local_user = local_user orelse "" }) catch |err| {
+            std.debug.print("[ssh] Cannot read {s}: {s}\n", .{ config_path, @errorName(err) });
+            return err;
+        };
+        if (config.proxy_jump) |jump| {
+            std.debug.print("[ssh] {s} sets ProxyJump {s} for {s}; Hola cannot hop through jump hosts, connect to the target directly\n", .{ config_path, jump, target.host });
+            return error.ProxyJumpUnsupported;
+        }
+        const connection = Connection{
+            .user = target.user orelse config.user orelse local_user orelse return error.SshUserRequired,
+            .host = config.host_name orelse target.host,
+            .port = opts.port orelse config.port orelse 22,
+            .known_hosts = opts.known_hosts orelse config.user_known_hosts_file orelse try std.fs.path.join(allocator, &.{ home, ".ssh", "known_hosts" }),
+            .config = config,
+        };
+        const applied = config.host_name != null or config.user != null or config.port != null or config.identity_agent != null or config.identity_files.len > 0;
+        if (applied) {
+            const agent = config.identity_agent orelse (if (config.agent_disabled) "disabled" else "default");
+            std.debug.print("[ssh] Applying {s} for {s}: {s}@{s}:{d}, {d} identity file(s), agent {s}\n", .{ config_path, target.host, connection.user, connection.host, connection.port, config.identity_files.len, agent });
+        }
+        return connection;
     }
 };
 
@@ -76,23 +117,24 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !void {
     defer arena.deinit();
     const aa = arena.allocator();
     const io = global_io.io();
-    const target = try Target.parse(opts.host, global_io.getEnv("USER"));
-    if (opts.port == 0) return error.InvalidSshPort;
+    const connection = try Connection.resolve(aa, io, opts);
     if (std.mem.startsWith(u8, opts.script, "http://") or std.mem.startsWith(u8, opts.script, "https://"))
         return error.RemoteProvisionRequiresLocalScript;
     const script = try std.Io.Dir.cwd().realPathFileAlloc(io, opts.script, aa);
     const bundle = if (opts.bundle) |path| try std.Io.Dir.cwd().realPathFileAlloc(io, path, aa) else null;
     const entry = if (bundle) |root| try bundleEntry(root, script) else std.fs.path.basename(script);
     if (bundle) |root| try validateBundle(aa, root);
-    const known_hosts = opts.known_hosts orelse try std.fs.path.join(aa, &.{ global_io.getEnv("HOME") orelse return error.HomeNotFound, ".ssh", "known_hosts" });
 
-    std.debug.print("[ssh] Connecting to {s}@{s}:{d}\n", .{ target.user, target.host, opts.port });
+    std.debug.print("[ssh] Connecting to {s}@{s}:{d}\n", .{ connection.user, connection.host, connection.port });
     var client = try ssh.Client.connect(allocator, .{
-        .host = target.host,
-        .user = target.user,
-        .port = opts.port,
+        .host = connection.host,
+        .user = connection.user,
+        .port = connection.port,
         .identity = opts.identity,
-        .known_hosts = known_hosts,
+        .identity_files = connection.config.identity_files,
+        .identity_agent = connection.config.identity_agent,
+        .agent_disabled = connection.config.agent_disabled,
+        .known_hosts = connection.known_hosts,
     });
     defer client.deinit();
     const platform_output = try checkedExec(&client, "uname -s && uname -m");
@@ -347,14 +389,14 @@ fn uploadBundle(allocator: std.mem.Allocator, client: *ssh.Client, local: []cons
 }
 
 test "SSH targets support explicit users and bracketed IPv6" {
-    const target = try Target.parse("deploy@[::1]", null);
-    try std.testing.expectEqualStrings("deploy", target.user);
+    const target = try Target.parse("deploy@[::1]");
+    try std.testing.expectEqualStrings("deploy", target.user.?);
     try std.testing.expectEqualStrings("::1", target.host);
-    try std.testing.expectEqualStrings("me", (try Target.parse("example.com", "me")).user);
-    try std.testing.expectError(error.InvalidSshTarget, Target.parse("a@b@c", null));
-    try std.testing.expectError(error.InvalidSshTarget, Target.parse("@host", null));
-    try std.testing.expectError(error.InvalidSshTarget, Target.parse("-host", "me"));
-    try std.testing.expectError(error.SshUserRequired, Target.parse("host", null));
+    try std.testing.expect((try Target.parse("example.com")).user == null);
+    try std.testing.expectError(error.InvalidSshTarget, Target.parse("a@b@c"));
+    try std.testing.expectError(error.InvalidSshTarget, Target.parse("@host"));
+    try std.testing.expectError(error.InvalidSshTarget, Target.parse("-host"));
+    try std.testing.expectError(error.InvalidSshTarget, Target.parse("host/path"));
 }
 
 test "bundle entry enforces directory boundaries" {

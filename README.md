@@ -333,8 +333,17 @@ hola provision provision.rb --host deploy@example.com --port 2222 \
 Hola connects using embedded libssh2, verifies the server against `known_hosts`,
 and authenticates using your SSH agent or the explicit private key. Unknown or
 changed host keys are rejected. Encrypted private keys should be loaded into your
-agent first. This initial implementation uses explicit host/port/key options;
-it does not read `~/.ssh/config` or support ProxyJump, passwords, or inventories.
+agent first.
+
+`--host` is looked up in `~/.ssh/config` the way OpenSSH does: `Host` patterns
+with `*`, `?` and `!`, `Match` on `host`, `originalhost`, `user`, `localuser` and
+`all`, `Include` (relative to `~/.ssh`, with globs), and the first obtained value
+wins. Hola honours `HostName`, `User`, `Port`, `IdentityFile` (accumulated, `none`
+skipped), `IdentityAgent` (including per-host agent sockets), `UserKnownHostsFile`
+and `%h`/`%r`/`%p`/`%u`/`%d`/`%n` tokens. Command-line options override the file.
+Authentication tries the agent first, then each existing `IdentityFile` in order;
+`--identity` uses that key alone. `ProxyJump` is refused with a clear error, and
+`ProxyCommand`, `Match exec`, passwords and inventories are not supported.
 
 The target needs SSH/SFTP and a POSIX shell with standard Unix utilities; Hola
 and Ruby do not need to be installed. On a matching OS/architecture, Hola uploads
