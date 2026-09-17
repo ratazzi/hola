@@ -6,6 +6,7 @@ const git_client = @import("../git.zig");
 const http = @import("../http.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const global_io = @import("../global_io.zig");
+const git_credentials = @import("../git_credentials.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -247,8 +248,25 @@ pub const Resource = struct {
     const SshContext = struct {
         ssh_key_path: ?[:0]const u8,
         enable_strict_host_key_checking: bool,
+        /// SSH candidates handed out one per call: the explicit key alone, or the agent then key files.
+        credentials: git_credentials.Credentials,
+        /// Cap for credential types that have a single candidate (HTTPS defaults, username).
         retries: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     };
+
+    fn credentialsFor(self: Resource) git_credentials.Credentials {
+        return .{ .explicit_key = self.ssh_key, .home = global_io.getEnv("HOME") };
+    }
+
+    /// A key file libssh2 rejected ends the operation with a hard error; run it again with the next candidate.
+    fn retryAfterKeyFailure(credentials: *const git_credentials.Credentials) bool {
+        const err = c.git_error_last();
+        if (err == null or err.*.message == null) return false;
+        const message = std.mem.span(@as([*:0]const u8, @ptrCast(err.*.message)));
+        if (!credentials.retryAfterKeyFailure(err.*.klass == c.GIT_ERROR_SSH, message)) return false;
+        logger.warn("[git] SSH key rejected by libssh2 ({s}); trying the next candidate", .{message});
+        return true;
+    }
 
     /// Custom credentials callback that supports SSH key files
     fn credentialsCallback(
@@ -262,16 +280,8 @@ pub const Resource = struct {
 
         // Get context if provided
         const ctx: ?*SshContext = if (payload) |p| @ptrCast(@alignCast(p)) else null;
-
-        // Limit retries to avoid infinite loops
-        if (ctx) |c_ctx| {
-            const retry_count = c_ctx.retries.fetchAdd(1, .monotonic);
-            if (retry_count >= 3) {
-                var url_buf: [512]u8 = undefined;
-                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{http.maskUrlPassword(url_str, &url_buf)});
-                return c.GIT_EAUTH;
-            }
-        }
+        var url_buf: [512]u8 = undefined;
+        const masked_url = http.maskUrlPassword(url_str, &url_buf);
 
         const types: c_uint = allowed_types;
 
@@ -282,44 +292,30 @@ pub const Resource = struct {
         else
             null;
 
-        // SSH key-based authentication
+        // SSH key-based authentication. libgit2 calls back again after every credential
+        // the server rejects, with no limit of its own, so each call offers the next
+        // candidate and reports GIT_EAUTH once none remain.
         if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-            // Priority 1: If custom SSH key is explicitly provided, use it first
-            if (ctx) |c_ctx| {
-                if (c_ctx.ssh_key_path) |key_path| {
-                    const public_key: [*c]const u8 = null; // libgit2 will derive from private key
-                    const passphrase: [*c]const u8 = null; // No passphrase support yet
-                    return c.git_credential_ssh_key_new(out, user, public_key, key_path.ptr, passphrase);
+            var fallback = git_credentials.Credentials{ .home = global_io.getEnv("HOME") };
+            const credentials: *git_credentials.Credentials = if (ctx) |c_ctx| &c_ctx.credentials else &fallback;
+            var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+            while (credentials.next(&key_path_buf)) |candidate| {
+                switch (candidate) {
+                    .agent => if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0,
+                    // libgit2 derives the public key from the private key file.
+                    .key => |path| return c.git_credential_ssh_key_new(out, user, null, path.ptr, null),
                 }
             }
-
-            // Priority 2: Try SSH agent (keys actively added by user)
-            const agent_result = c.git_credential_ssh_key_from_agent(out, user);
-            if (agent_result == 0) {
-                return 0;
-            }
-
-            // Priority 3: Fall back to default SSH key files (automatic discovery)
-            const home = global_io.getEnv("HOME") orelse "/tmp";
-            const key_names = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
-
-            for (key_names) |key_name| {
-                var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-                const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, key_name }) catch continue;
-
-                // Check if key file exists
-                std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
-
-                // Try this key
-                const key_path_c: [*c]const u8 = @ptrCast(key_path.ptr);
-                const result = c.git_credential_ssh_key_new(out, user, null, key_path_c, null);
-                if (result == 0) {
-                    return 0;
-                }
-            }
-
-            // No authentication method worked
+            logger.warn("[git] SSH authentication failed for {s}: every candidate credential was rejected", .{masked_url});
             return c.GIT_EAUTH;
+        }
+
+        // The remaining types have a single candidate each; stop after a few rejections.
+        if (ctx) |c_ctx| {
+            if (c_ctx.retries.fetchAdd(1, .monotonic) >= 3) {
+                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{masked_url});
+                return c.GIT_EAUTH;
+            }
         }
 
         // HTTPS with platform credentials
@@ -654,6 +650,7 @@ pub const Resource = struct {
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
+            .credentials = self.credentialsFor(),
         };
         clone_opts.fetch_opts.callbacks.credentials = credentialsCallback;
         clone_opts.fetch_opts.callbacks.certificate_check = certificateCheckCallback;
@@ -666,7 +663,11 @@ pub const Resource = struct {
 
         // Perform clone
         var repo_ptr: ?*c.git_repository = null;
-        const code = c.git_clone(&repo_ptr, url_c.ptr, dest_c.ptr, &clone_opts);
+        const code = while (true) {
+            const attempt = c.git_clone(&repo_ptr, url_c.ptr, dest_c.ptr, &clone_opts);
+            if (attempt != 0 and retryAfterKeyFailure(&ssh_ctx.credentials)) continue;
+            break attempt;
+        };
 
         // Restore root before ownership fixup (chown requires root)
         restoreEffectiveUser(user_ctx);
@@ -788,12 +789,17 @@ pub const Resource = struct {
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
+            .credentials = self.credentialsFor(),
         };
         fetch_opts.callbacks.credentials = credentialsCallback;
         fetch_opts.callbacks.certificate_check = certificateCheckCallback;
         fetch_opts.callbacks.payload = &ssh_ctx;
 
-        code = c.git_remote_fetch(remote, null, &fetch_opts, null);
+        code = while (true) {
+            const attempt = c.git_remote_fetch(remote, null, &fetch_opts, null);
+            if (attempt != 0 and retryAfterKeyFailure(&ssh_ctx.credentials)) continue;
+            break attempt;
+        };
         if (code != 0) {
             const err = c.git_error_last();
             if (err != null) {

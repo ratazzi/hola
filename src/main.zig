@@ -256,6 +256,7 @@ comptime {
     _ = @import("ssh_config.zig");
     _ = @import("remote_protocol.zig");
     _ = @import("remote_provision.zig");
+    _ = @import("git_credentials.zig");
 }
 
 test "simple test" {
