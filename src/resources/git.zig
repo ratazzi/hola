@@ -247,8 +247,14 @@ pub const Resource = struct {
     const SshContext = struct {
         ssh_key_path: ?[:0]const u8,
         enable_strict_host_key_checking: bool,
+        /// Next SSH candidate to offer: the explicit key alone, or the agent then default key files.
+        auth_attempt: usize = 0,
+        /// Cap for credential types that have a single candidate (HTTPS defaults, username).
         retries: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     };
+
+    /// Key files tried after the agent, in OpenSSH's default order.
+    const DEFAULT_KEY_NAMES = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
 
     /// Custom credentials callback that supports SSH key files
     fn credentialsCallback(
@@ -262,16 +268,8 @@ pub const Resource = struct {
 
         // Get context if provided
         const ctx: ?*SshContext = if (payload) |p| @ptrCast(@alignCast(p)) else null;
-
-        // Limit retries to avoid infinite loops
-        if (ctx) |c_ctx| {
-            const retry_count = c_ctx.retries.fetchAdd(1, .monotonic);
-            if (retry_count >= 3) {
-                var url_buf: [512]u8 = undefined;
-                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{http.maskUrlPassword(url_str, &url_buf)});
-                return c.GIT_EAUTH;
-            }
-        }
+        var url_buf: [512]u8 = undefined;
+        const masked_url = http.maskUrlPassword(url_str, &url_buf);
 
         const types: c_uint = allowed_types;
 
@@ -282,44 +280,40 @@ pub const Resource = struct {
         else
             null;
 
-        // SSH key-based authentication
+        // SSH key-based authentication. libgit2 calls back again after every credential
+        // the server rejects, with no limit of its own, so each call offers the next
+        // candidate and reports GIT_EAUTH once none remain.
         if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-            // Priority 1: If custom SSH key is explicitly provided, use it first
-            if (ctx) |c_ctx| {
-                if (c_ctx.ssh_key_path) |key_path| {
-                    const public_key: [*c]const u8 = null; // libgit2 will derive from private key
-                    const passphrase: [*c]const u8 = null; // No passphrase support yet
-                    return c.git_credential_ssh_key_new(out, user, public_key, key_path.ptr, passphrase);
+            var index: usize = if (ctx) |c_ctx| c_ctx.auth_attempt else 0;
+            defer if (ctx) |c_ctx| {
+                c_ctx.auth_attempt = index + 1;
+            };
+            const explicit_key: ?[:0]const u8 = if (ctx) |c_ctx| c_ctx.ssh_key_path else null;
+            if (explicit_key) |key_path| {
+                // An explicit key is used alone; libgit2 derives the public key from it.
+                if (index == 0) return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
+            } else while (true) : (index += 1) {
+                if (index == 0) {
+                    if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0;
+                    continue;
                 }
-            }
-
-            // Priority 2: Try SSH agent (keys actively added by user)
-            const agent_result = c.git_credential_ssh_key_from_agent(out, user);
-            if (agent_result == 0) {
-                return 0;
-            }
-
-            // Priority 3: Fall back to default SSH key files (automatic discovery)
-            const home = global_io.getEnv("HOME") orelse "/tmp";
-            const key_names = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
-
-            for (key_names) |key_name| {
+                if (index - 1 >= DEFAULT_KEY_NAMES.len) break;
+                const home = global_io.getEnv("HOME") orelse break;
                 var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-                const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, key_name }) catch continue;
-
-                // Check if key file exists
+                const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, DEFAULT_KEY_NAMES[index - 1] }) catch continue;
                 std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
-
-                // Try this key
-                const key_path_c: [*c]const u8 = @ptrCast(key_path.ptr);
-                const result = c.git_credential_ssh_key_new(out, user, null, key_path_c, null);
-                if (result == 0) {
-                    return 0;
-                }
+                return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
             }
-
-            // No authentication method worked
+            logger.warn("[git] SSH authentication failed for {s}: every candidate credential was rejected", .{masked_url});
             return c.GIT_EAUTH;
+        }
+
+        // The remaining types have a single candidate each; stop after a few rejections.
+        if (ctx) |c_ctx| {
+            if (c_ctx.retries.fetchAdd(1, .monotonic) >= 3) {
+                logger.warn("[git] authentication failed after 3 attempts for: {s}", .{masked_url});
+                return c.GIT_EAUTH;
+            }
         }
 
         // HTTPS with platform credentials

@@ -1,6 +1,10 @@
 const std = @import("std");
 const logger = @import("logger.zig");
 const url_utils = @import("http/utils.zig");
+const global_io = @import("global_io.zig");
+
+/// Key files tried after the agent, in OpenSSH's default order.
+const DEFAULT_KEY_NAMES = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -73,8 +77,10 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
     }
     defer if (branch_storage) |buf| allocator.free(buf);
 
+    // Always installed: the credentials callback rides on the same payload and
+    // must exist even when progress is hidden, or SSH remotes cannot authenticate.
     var progress_ctx = ProgressContext{ .show = options.show_progress };
-    if (options.show_progress) installProgressCallbacks(&clone_opts, &progress_ctx);
+    installProgressCallbacks(&clone_opts, &progress_ctx);
 
     var repo_ptr: ?*c.git_repository = null;
     const code = c.git_clone(&repo_ptr, url_c.ptr, destination_c.ptr, &clone_opts);
@@ -120,9 +126,9 @@ fn logLibGit2Error(code: c_int) void {
 
 /// Credential callback used by libgit2 for both SSH and HTTPS.
 ///
-/// We intentionally rely on libgit2's built-in discovery mechanisms
-/// (SSH agent, default platform creds) instead of implementing our
-/// own key loading logic.
+/// libgit2 calls this again after every credential the server rejects, with no
+/// limit of its own, so each call hands out the next candidate and the callback
+/// reports GIT_EAUTH once they are exhausted.
 fn credentialsCallback(
     out: ?*?*c.git_credential,
     url: [*c]const u8,
@@ -130,8 +136,7 @@ fn credentialsCallback(
     allowed_types: c_uint,
     payload: ?*anyopaque,
 ) callconv(.c) c_int {
-    _ = url;
-    _ = payload;
+    const ctx: ?*ProgressContext = if (payload) |p| @ptrCast(@alignCast(p)) else null;
 
     const types: c_uint = allowed_types;
 
@@ -145,10 +150,27 @@ fn credentialsCallback(
         break :blk username_from_url;
     };
 
-    // Prefer SSH key-based auth when allowed. libgit2 will talk to
-    // the SSH agent and discover keys; we do not touch ~/.ssh ourselves.
+    // SSH: the agent first, then the default key files that exist.
     if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-        return c.git_credential_ssh_key_from_agent(out, user);
+        var index: usize = if (ctx) |state| state.auth_attempt else 0;
+        defer if (ctx) |state| {
+            state.auth_attempt = index + 1;
+        };
+        while (true) : (index += 1) {
+            if (index == 0) {
+                if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0;
+                continue;
+            }
+            if (index - 1 >= DEFAULT_KEY_NAMES.len) break;
+            const home = global_io.getEnv("HOME") orelse break;
+            var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+            const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, DEFAULT_KEY_NAMES[index - 1] }) catch continue;
+            std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
+            return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
+        }
+        var url_buf: [512]u8 = undefined;
+        logger.err("SSH authentication failed for {s}: the agent and default keys were all rejected", .{url_utils.maskUrlPassword(std.mem.span(url), &url_buf)});
+        return c.GIT_EAUTH;
     }
 
     // For HTTPS, try platform default credentials (Keychain, etc.).
@@ -193,7 +215,7 @@ fn installProgressCallbacks(opts: *c.git_clone_options, ctx: *ProgressContext) v
 
 fn transferProgressCb(stats: ?*const c.git_transfer_progress, payload: ?*anyopaque) callconv(.c) c_int {
     if (stats == null or payload == null) return 0;
-    const ctx: *ProgressContext = @ptrCast(payload.?);
+    const ctx: *ProgressContext = @ptrCast(@alignCast(payload.?));
     if (!ctx.show) return 0;
 
     const data = stats.?;
@@ -213,7 +235,7 @@ fn transferProgressCb(stats: ?*const c.git_transfer_progress, payload: ?*anyopaq
 fn checkoutProgressCb(path: [*c]const u8, completed: usize, total: usize, payload: ?*anyopaque) callconv(.c) void {
     _ = path;
     if (payload == null or total == 0) return;
-    const ctx: *ProgressContext = @ptrCast(payload.?);
+    const ctx: *ProgressContext = @ptrCast(@alignCast(payload.?));
     if (!ctx.show) return;
 
     const percent: u8 = @intCast((completed * 100) / total);
@@ -225,7 +247,10 @@ fn checkoutProgressCb(path: [*c]const u8, completed: usize, total: usize, payloa
 }
 
 fn sidebandProgressCb(str: [*c]const u8, len: c_int, payload: ?*anyopaque) callconv(.c) c_int {
-    _ = payload;
+    if (payload) |p| {
+        const ctx: *ProgressContext = @ptrCast(@alignCast(p));
+        if (!ctx.show) return 0;
+    }
     if (len <= 0 or str == null) return 0;
     const message = str[0..@intCast(len)];
     std.debug.print("{s}", .{message});
@@ -236,6 +261,8 @@ const ProgressContext = struct {
     show: bool = true,
     last_fetch_percent: u8 = 101,
     last_checkout_percent: u8 = 101,
+    /// Next SSH credential candidate to offer; see credentialsCallback.
+    auth_attempt: usize = 0,
 };
 
 /// Generate unified diff between two strings
