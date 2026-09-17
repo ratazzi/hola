@@ -36,6 +36,9 @@ jobs:
           echo "Building to verify compilation"
           zig build
 
+      - name: Remote provision integration tests
+        run: bash test/remote_provision.bash "$PWD"/zig-out/bin/hola-*
+
   build-check:
     name: Build Check (${{ matrix.target.name }})
     runs-on: macos-latest

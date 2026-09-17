@@ -654,6 +654,7 @@ pub const Session = struct {
 
         try self.mrb.evalString(@embedFile("ruby_prelude/data_bag.rb"));
         try self.mrb.evalString(@embedFile("ruby_prelude/secrets_bag.rb"));
+        try self.mrb.evalString(@embedFile("ruby_prelude/loader.rb"));
 
         if (opts.params_json) |params_json| try injectParams(mrb_ptr, params_json);
         if (opts.secrets_json) |secrets_json| try injectSecrets(mrb_ptr, secrets_json);
@@ -675,9 +676,10 @@ pub const Session = struct {
     }
 
     pub fn evalScript(self: *Session, path: []const u8) !void {
+        const mrb_ptr = self.mrb.mrb orelse return error.MRubyNotInitialized;
+        self.mrb.setGlobal("$hola_scriptfile", mruby.mrb_str_new(mrb_ptr, path.ptr, @intCast(path.len)));
         self.mrb.evalFile(path) catch |err| {
             if (err == error.MRubyException) {
-                const mrb_ptr = self.mrb.mrb orelse return error.MRubyNotInitialized;
                 const exc = mruby.mrb_get_exception(mrb_ptr);
                 if (mruby.mrb_test(exc)) {
                     base.recordProvisionException(mrb_ptr, exc, "script raised");
@@ -2020,6 +2022,41 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !ProvisionResult {
     };
 }
 
+test "provision require_relative resolves nested files once and restores the load stack after errors" {
+    const allocator = std.testing.allocator;
+    const io = global_io.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "nested");
+    try tmp.dir.writeFile(io, .{ .sub_path = "helper.rb", .data = "$loads = ($loads || 0) + 1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "nested/child.rb", .data = "require_relative '../helper'\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "broken.rb", .data = "raise 'broken helper'\n" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.rb",
+        .data =
+        \\require_relative 'nested/child'
+        \\require_relative 'helper'
+        \\raise 'loaded twice' unless $loads == 1
+        \\begin
+        \\  require_relative 'missing'
+        \\rescue Hola::LoadError
+        \\  $missing_caught = true
+        \\end
+        \\begin
+        \\  require_relative 'broken'
+        \\rescue Hola::LoadError
+        \\  $broken_caught = true
+        \\end
+        \\raise 'loader failed' unless $missing_caught && $broken_caught && $hola_load_stack.empty?
+        ,
+    });
+    const script = try tmp.dir.realPathFileAlloc(io, "main.rb", allocator);
+    defer allocator.free(script);
+    const session = try Session.open(allocator, .{});
+    defer session.close();
+    try session.evalScript(script);
+}
+
 test "Session.open exposes every resource through Hola::Resources" {
     const allocator = std.testing.allocator;
     json.setAllocator(allocator);
@@ -2433,6 +2470,7 @@ test "task prelude supports common Rake task semantics" {
         \\  end
         \\end
     );
+    try mrb_state.evalString(@embedFile("ruby_prelude/loader.rb"));
     try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
     try mrb_state.evalString(
         \\$events = []
@@ -2534,6 +2572,7 @@ test "task prelude immediate wrapper converges resource declarations" {
         \\def execute(name, &block); name; end
     );
     try mrb_state.evalString(@embedFile("ruby_prelude/resources.rb"));
+    try mrb_state.evalString(@embedFile("ruby_prelude/loader.rb"));
     try mrb_state.evalString(@embedFile("ruby_prelude/tasks.rb"));
     try mrb_state.evalString("$hola_run_immediate = true; resources.execute('command'); $immediate_result = ($converge_calls == 1)");
     const result = mruby.mrb_gv_get(mrb_ptr, mruby.mrb_intern_cstr(mrb_ptr, "$immediate_result"));
