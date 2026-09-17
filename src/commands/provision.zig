@@ -6,6 +6,8 @@ const http = @import("../http.zig");
 const global_io = @import("../global_io.zig");
 const common = @import("common.zig");
 const base_resource = @import("../base_resource.zig");
+const remote = @import("../remote_provision.zig");
+const remote_protocol = @import("../remote_protocol.zig");
 
 const params = clap.parseParamsComptime(
     \\-h, --help            Show help for provision
@@ -17,6 +19,14 @@ const params = clap.parseParamsComptime(
     \\    --secrets-bag-url <URL>  Fetch secrets_bag JSON from URL
     \\    --client-cert <PATH>     Client certificate for mTLS
     \\    --client-key <PATH>      Client private key for mTLS
+    \\    --host <HOST>            Provision over SSH ([user@]hostname)
+    \\    --port <PORT>            SSH port (default: 22)
+    \\    --identity <PATH>        SSH private key (default: SSH agent)
+    \\    --known-hosts <PATH>     OpenSSH known_hosts file
+    \\    --remote-binary <PATH>   Local Hola build to upload instead of the GitHub release
+    \\    --bundle <PATH>          Upload this directory with the script
+    \\    --sudo                   Run remote provision using sudo -n
+    \\    --request-stdin          Internal remote worker protocol
     \\<path>                Path to provision file (.rb)
     \\
 );
@@ -28,6 +38,8 @@ const parsers = .{
     .JSON = clap.parsers.string,
     .PATH = clap.parsers.string,
     .URL = clap.parsers.string,
+    .HOST = clap.parsers.string,
+    .PORT = clap.parsers.string,
 };
 
 /// Download a remote script to a temp file, run provision, then clean up.
@@ -141,6 +153,16 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
 
     if (res.args.help != 0) return printHelp(null);
 
+    if (res.args.@"request-stdin" != 0) return runRemoteWorker(allocator);
+
+    if (res.args.host == null and (res.args.port != null or res.args.identity != null or
+        res.args.@"known-hosts" != null or res.args.@"remote-binary" != null or
+        res.args.bundle != null or res.args.sudo != 0))
+    {
+        std.debug.print("SSH options require --host.\n", .{});
+        return error.InvalidArguments;
+    }
+
     const script_path_or_url = res.positionals[0] orelse return printHelp("Missing provision file path or URL.");
 
     const output_mode = try common.parseOutputMode(res.args.output);
@@ -154,6 +176,30 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
         .client_key = res.args.@"client-key",
     });
     defer bags.deinit();
+
+    if (res.args.host) |host| {
+        const port = if (res.args.port) |value| std.fmt.parseInt(u16, value, 10) catch return error.InvalidSshPort else 22;
+        remote.run(allocator, .{
+            .host = host,
+            .port = port,
+            .identity = res.args.identity,
+            .known_hosts = res.args.@"known-hosts",
+            .binary = res.args.@"remote-binary",
+            .bundle = res.args.bundle,
+            .sudo = res.args.sudo != 0,
+            .script = script_path_or_url,
+            .phase = res.args.phase,
+            .output_mode = output_mode,
+            .params_json = bags.data_bag,
+            .secrets_json = bags.secrets_bag,
+        }) catch |err| {
+            std.debug.print("Remote provision failed: {s}\n", .{@errorName(err)});
+            if (err == error.UnknownHostKey or err == error.HostKeyMismatch or err == error.KnownHostsUnreadable)
+                std.debug.print("Verify the server's host key and add it to known_hosts before retrying.\n", .{});
+            std.process.exit(1);
+        };
+        return;
+    }
 
     var result = runScript(allocator, script_path_or_url, output_mode, bags.data_bag, bags.secrets_bag, bags.tls_auth, res.args.phase) catch |err| {
         if (err == error.UnknownPhase) std.process.exit(1);
@@ -170,6 +216,55 @@ pub fn run(allocator: std.mem.Allocator, iter: *std.process.Args.Iterator) !void
         std.process.exit(1);
     };
     defer result.deinit(allocator);
+}
+
+fn runRemoteWorker(allocator: std.mem.Allocator) !void {
+    const io = global_io.io();
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const count = std.Io.File.stdin().readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (count == 0) break;
+        if (input.items.len + count > remote_protocol.MAX_REQUEST_BYTES) return error.RemoteRequestTooLarge;
+        try input.appendSlice(allocator, buffer[0..count]);
+    }
+    const parsed = try std.json.parseFromSlice(remote_protocol.Request, allocator, input.items, .{});
+    defer parsed.deinit();
+    const request = parsed.value;
+    if (request.version != remote_protocol.VERSION) return error.RemoteProtocolMismatch;
+    // Open the controller-created file without replacing its owner or permissions.
+    const result_file = try std.Io.Dir.cwd().openFile(io, request.result_path, .{ .mode = .write_only });
+    defer result_file.close(io);
+    var result = provision.run(allocator, .{
+        .script_path = request.script_path,
+        .phase = request.phase,
+        .output_mode = request.output_mode,
+        .params_json = request.params_json,
+        .secrets_json = request.secrets_json,
+    }) catch |err| {
+        try writeCompletion(allocator, result_file, .{ .success = false, .error_name = @errorName(err) });
+        return error.RemoteProvisionFailed;
+    };
+    defer result.deinit(allocator);
+    try writeCompletion(allocator, result_file, .{
+        .success = true,
+        .executed_count = result.executed_count,
+        .updated_count = result.updated_count,
+        .skipped_count = result.skipped_count,
+        .failed_count = result.failed_count,
+        .duration_ms = result.duration_ms,
+        .resource_results = result.resource_results.items,
+    });
+}
+
+fn writeCompletion(allocator: std.mem.Allocator, file: std.Io.File, completion: remote_protocol.Completion) !void {
+    const json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(completion, .{})});
+    defer allocator.free(json);
+    try file.writeStreamingAll(global_io.io(), json);
 }
 
 fn printHelp(reason: ?[]const u8) !void {
@@ -195,6 +290,13 @@ fn printHelp(reason: ?[]const u8) !void {
         \\      --secrets-bag-url URL  Fetch secrets_bag JSON from URL
         \\      --client-cert PATH     Client certificate for mTLS (PEM)
         \\      --client-key PATH      Client private key for mTLS (PEM)
+        \\      --host HOST            Execute on [user@]hostname over SSH
+        \\      --port PORT            SSH port (default: 22)
+        \\      --identity PATH        Private key; otherwise use SSH agent
+        \\      --known-hosts PATH     Defaults to ~/.ssh/known_hosts; strict checking
+        \\      --remote-binary PATH   Upload this local build instead of the GitHub release
+        \\      --bundle DIR           Upload DIR; script must be inside it
+        \\      --sudo                 Non-interactive remote sudo -n
         \\
         \\Examples
         \\  # Local file
@@ -217,6 +319,11 @@ fn printHelp(reason: ?[]const u8) !void {
         \\  # With output mode
         \\  hola provision --output compact provision.rb
         \\  hola provision --phase deploy scripts/deploy.rb
+        \\
+        \\  # Remote provision (uploads this binary, or downloads the matching release)
+        \\  hola provision provision.rb --host deploy@example.com
+        \\  hola provision deploy/provision.rb --host deploy@example.com --bundle deploy --sudo
+        \\  hola provision provision.rb --host deploy@example.com --remote-binary ./hola-linux-x86_64
         \\
         \\Ruby DSL:
         \\  file \"/tmp/config\" do

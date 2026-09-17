@@ -313,6 +313,66 @@ task.
 
 ---
 
+### Remote provisioning over SSH
+
+Run a local provision script on a single remote macOS or Linux host:
+
+```bash
+hola provision provision.rb --host deploy@example.com
+
+# From macOS to Linux: the matching release is downloaded automatically.
+hola provision deploy/provision.rb --host deploy@example.com --bundle deploy --sudo
+
+# Or upload a local build instead of the release.
+hola provision provision.rb --host deploy@example.com --remote-binary ./hola-linux-x86_64
+
+hola provision provision.rb --host deploy@example.com --port 2222 \
+  --identity ~/.ssh/deploy --known-hosts ./known_hosts --phase deploy
+```
+
+Hola connects using embedded libssh2, verifies the server against `known_hosts`,
+and authenticates using your SSH agent or the explicit private key. Unknown or
+changed host keys are rejected. Encrypted private keys should be loaded into your
+agent first. This initial implementation uses explicit host/port/key options;
+it does not read `~/.ssh/config` or support ProxyJump, passwords, or inventories.
+
+The target needs SSH/SFTP and a POSIX shell with standard Unix utilities; Hola
+and Ruby do not need to be installed. On a matching OS/architecture, Hola uploads
+its own executable. Otherwise it downloads the same version for the remote
+platform from GitHub Releases into the local `~/.cache/hola/remote/` and uploads
+that; the controller needs internet access, the target does not. A version with
+no release asset (a development build) falls back to the nightly build, which is
+revalidated by ETag on every run. Pass `--remote-binary` to upload a specific
+local build instead; it must support the same remote protocol. OS and CPU checks do not establish
+libc or minimum OS compatibility. Binaries are cached by SHA-256 under the remote
+user's `~/.cache/hola/remote/`.
+
+Without `--bundle`, only the local script is uploaded. With `--bundle DIR`, the
+entire directory is uploaded, including hidden files, and the script must be
+inside it. Symlinks and special files are rejected; regular files retain their
+executable bit. Use a dedicated deployment directory containing only files you
+intend to send. The remote working directory is the bundle root (or the temporary
+script directory for a single script). `require_relative` resolves against the
+containing Ruby file in both local and remote provision scripts.
+
+`--phase`, output mode, data bags and secrets bags apply remotely. Bag URLs are
+resolved on the controller; the resulting JSON travels over SSH stdin without
+being added to the remote command line. Remote scripts must currently be local
+files. `--sudo` uses `sudo -n`, so non-interactive permission must already be
+configured. Output is streamed back and provisioning failures return a nonzero
+exit status. The worker writes a separate structured completion record, avoiding
+any need to parse resource output as a protocol.
+
+Temporary workspaces are cleaned after completed runs. If the execution connection
+is interrupted, Hola reports an unknown outcome, does not retry, and retains the
+workspace path for inspection because the remote process may still be running.
+
+The isolated SSH integration suite can be run with OpenSSH installed:
+
+```bash
+bash test/remote_provision.bash /absolute/path/to/hola
+```
+
 ## Performance
 
 ### Built with Zig. Stupid Fast.

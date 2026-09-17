@@ -252,6 +252,9 @@ comptime {
     }
     // Force test discovery for files only reached via indirect imports.
     _ = @import("provision.zig");
+    _ = @import("ssh.zig");
+    _ = @import("remote_protocol.zig");
+    _ = @import("remote_provision.zig");
 }
 
 test "simple test" {
