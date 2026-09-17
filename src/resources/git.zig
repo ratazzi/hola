@@ -6,6 +6,7 @@ const git_client = @import("../git.zig");
 const http = @import("../http.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const global_io = @import("../global_io.zig");
+const git_credentials = @import("../git_credentials.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -247,14 +248,15 @@ pub const Resource = struct {
     const SshContext = struct {
         ssh_key_path: ?[:0]const u8,
         enable_strict_host_key_checking: bool,
-        /// Next SSH candidate to offer: the explicit key alone, or the agent then default key files.
-        auth_attempt: usize = 0,
+        /// SSH candidates handed out one per call: the explicit key alone, or the agent then key files.
+        credentials: git_credentials.Credentials,
         /// Cap for credential types that have a single candidate (HTTPS defaults, username).
         retries: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     };
 
-    /// Key files tried after the agent, in OpenSSH's default order.
-    const DEFAULT_KEY_NAMES = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
+    fn credentialsFor(self: Resource) git_credentials.Credentials {
+        return .{ .explicit_key = self.ssh_key, .home = global_io.getEnv("HOME") };
+    }
 
     /// Custom credentials callback that supports SSH key files
     fn credentialsCallback(
@@ -284,25 +286,15 @@ pub const Resource = struct {
         // the server rejects, with no limit of its own, so each call offers the next
         // candidate and reports GIT_EAUTH once none remain.
         if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-            var index: usize = if (ctx) |c_ctx| c_ctx.auth_attempt else 0;
-            defer if (ctx) |c_ctx| {
-                c_ctx.auth_attempt = index + 1;
-            };
-            const explicit_key: ?[:0]const u8 = if (ctx) |c_ctx| c_ctx.ssh_key_path else null;
-            if (explicit_key) |key_path| {
-                // An explicit key is used alone; libgit2 derives the public key from it.
-                if (index == 0) return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
-            } else while (true) : (index += 1) {
-                if (index == 0) {
-                    if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0;
-                    continue;
+            var fallback = git_credentials.Credentials{ .home = global_io.getEnv("HOME") };
+            const credentials: *git_credentials.Credentials = if (ctx) |c_ctx| &c_ctx.credentials else &fallback;
+            var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+            while (credentials.next(&key_path_buf)) |candidate| {
+                switch (candidate) {
+                    .agent => if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0,
+                    // libgit2 derives the public key from the private key file.
+                    .key => |path| return c.git_credential_ssh_key_new(out, user, null, path.ptr, null),
                 }
-                if (index - 1 >= DEFAULT_KEY_NAMES.len) break;
-                const home = global_io.getEnv("HOME") orelse break;
-                var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-                const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, DEFAULT_KEY_NAMES[index - 1] }) catch continue;
-                std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
-                return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
             }
             logger.warn("[git] SSH authentication failed for {s}: every candidate credential was rejected", .{masked_url});
             return c.GIT_EAUTH;
@@ -648,6 +640,7 @@ pub const Resource = struct {
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
+            .credentials = self.credentialsFor(),
         };
         clone_opts.fetch_opts.callbacks.credentials = credentialsCallback;
         clone_opts.fetch_opts.callbacks.certificate_check = certificateCheckCallback;
@@ -782,6 +775,7 @@ pub const Resource = struct {
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
+            .credentials = self.credentialsFor(),
         };
         fetch_opts.callbacks.credentials = credentialsCallback;
         fetch_opts.callbacks.certificate_check = certificateCheckCallback;

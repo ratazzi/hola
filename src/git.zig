@@ -2,9 +2,7 @@ const std = @import("std");
 const logger = @import("logger.zig");
 const url_utils = @import("http/utils.zig");
 const global_io = @import("global_io.zig");
-
-/// Key files tried after the agent, in OpenSSH's default order.
-const DEFAULT_KEY_NAMES = [_][]const u8{ "id_ed25519", "id_rsa", "id_ecdsa", "id_dsa" };
+const git_credentials = @import("git_credentials.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -79,7 +77,7 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
 
     // Always installed: the credentials callback rides on the same payload and
     // must exist even when progress is hidden, or SSH remotes cannot authenticate.
-    var progress_ctx = ProgressContext{ .show = options.show_progress };
+    var progress_ctx = ProgressContext{ .show = options.show_progress, .credentials = .{ .home = global_io.getEnv("HOME") } };
     installProgressCallbacks(&clone_opts, &progress_ctx);
 
     var repo_ptr: ?*c.git_repository = null;
@@ -152,21 +150,14 @@ fn credentialsCallback(
 
     // SSH: the agent first, then the default key files that exist.
     if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-        var index: usize = if (ctx) |state| state.auth_attempt else 0;
-        defer if (ctx) |state| {
-            state.auth_attempt = index + 1;
-        };
-        while (true) : (index += 1) {
-            if (index == 0) {
-                if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0;
-                continue;
+        var fallback = git_credentials.Credentials{ .home = global_io.getEnv("HOME") };
+        const credentials: *git_credentials.Credentials = if (ctx) |state| &state.credentials else &fallback;
+        var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+        while (credentials.next(&key_path_buf)) |candidate| {
+            switch (candidate) {
+                .agent => if (c.git_credential_ssh_key_from_agent(out, user) == 0) return 0,
+                .key => |path| return c.git_credential_ssh_key_new(out, user, null, path.ptr, null),
             }
-            if (index - 1 >= DEFAULT_KEY_NAMES.len) break;
-            const home = global_io.getEnv("HOME") orelse break;
-            var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-            const key_path = std.fmt.bufPrintZ(&key_path_buf, "{s}/.ssh/{s}", .{ home, DEFAULT_KEY_NAMES[index - 1] }) catch continue;
-            std.Io.Dir.accessAbsolute(global_io.io(), key_path, .{}) catch continue;
-            return c.git_credential_ssh_key_new(out, user, null, key_path.ptr, null);
         }
         var url_buf: [512]u8 = undefined;
         logger.err("SSH authentication failed for {s}: the agent and default keys were all rejected", .{url_utils.maskUrlPassword(std.mem.span(url), &url_buf)});
@@ -261,8 +252,8 @@ const ProgressContext = struct {
     show: bool = true,
     last_fetch_percent: u8 = 101,
     last_checkout_percent: u8 = 101,
-    /// Next SSH credential candidate to offer; see credentialsCallback.
-    auth_attempt: usize = 0,
+    /// SSH credential candidates handed out one per credentialsCallback call.
+    credentials: git_credentials.Credentials = .{},
 };
 
 /// Generate unified diff between two strings
