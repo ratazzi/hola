@@ -6,7 +6,7 @@ const git_client = @import("../git.zig");
 const http = @import("../http.zig");
 const AsyncExecutor = @import("../async_executor.zig").AsyncExecutor;
 const global_io = @import("../global_io.zig");
-const git_credentials = @import("../git_credentials.zig");
+const git_ssh = @import("../git_ssh.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -249,17 +249,29 @@ pub const Resource = struct {
         ssh_key_path: ?[:0]const u8,
         enable_strict_host_key_checking: bool,
         /// SSH candidates handed out one per call: the explicit key alone, or the agent then key files.
-        credentials: git_credentials.Credentials,
+        credentials: git_ssh.Credentials,
         /// Cap for credential types that have a single candidate (HTTPS defaults, username).
         retries: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     };
 
-    fn credentialsFor(self: Resource) git_credentials.Credentials {
+    /// Resolve the repository URL through ~/.ssh/config; the rewritten URL is what libgit2 connects to.
+    fn resolveRemote(self: Resource, allocator: std.mem.Allocator) !?git_ssh.Remote {
+        const resolved = try git_ssh.resolve(allocator, global_io.io(), self.repository);
+        if (resolved) |remote| if (!std.mem.eql(u8, remote.url, self.repository)) {
+            var from_buf: [512]u8 = undefined;
+            var to_buf: [512]u8 = undefined;
+            logger.info("[git] applying ~/.ssh/config: {s} -> {s}", .{ http.maskUrlPassword(self.repository, &from_buf), http.maskUrlPassword(remote.url, &to_buf) });
+        };
+        return resolved;
+    }
+
+    fn credentialsFor(self: Resource, resolved: ?git_ssh.Remote) git_ssh.Credentials {
+        if (resolved) |remote| return git_ssh.credentialsFromConfig(remote.config, self.ssh_key);
         return .{ .explicit_key = self.ssh_key, .home = global_io.getEnv("HOME") };
     }
 
     /// A key file libssh2 rejected ends the operation with a hard error; run it again with the next candidate.
-    fn retryAfterKeyFailure(credentials: *const git_credentials.Credentials) bool {
+    fn retryAfterKeyFailure(credentials: *const git_ssh.Credentials) bool {
         const err = c.git_error_last();
         if (err == null or err.*.message == null) return false;
         const message = std.mem.span(@as([*:0]const u8, @ptrCast(err.*.message)));
@@ -296,8 +308,8 @@ pub const Resource = struct {
         // the server rejects, with no limit of its own, so each call offers the next
         // candidate and reports GIT_EAUTH once none remain.
         if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-            var fallback = git_credentials.Credentials{ .home = global_io.getEnv("HOME") };
-            const credentials: *git_credentials.Credentials = if (ctx) |c_ctx| &c_ctx.credentials else &fallback;
+            var fallback = git_ssh.Credentials{ .home = global_io.getEnv("HOME") };
+            const credentials: *git_ssh.Credentials = if (ctx) |c_ctx| &c_ctx.credentials else &fallback;
             var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
             while (credentials.next(&key_path_buf)) |candidate| {
                 switch (candidate) {
@@ -627,7 +639,12 @@ pub const Resource = struct {
         var git = try git_client.Client.init();
         defer git.deinit();
 
-        const url_c = try dupZ(allocator, self.repository);
+        var resolved = try self.resolveRemote(allocator);
+        defer if (resolved) |*remote| remote.deinit(allocator);
+        var agent_override = if (resolved) |remote| try git_ssh.AgentOverride.apply(allocator, remote.config) else null;
+        defer if (agent_override) |*override| override.restore();
+
+        const url_c = try dupZ(allocator, if (resolved) |remote| remote.url else self.repository);
         defer allocator.free(url_c);
 
         const dest_c = try dupZ(allocator, self.destination);
@@ -650,7 +667,7 @@ pub const Resource = struct {
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
-            .credentials = self.credentialsFor(),
+            .credentials = self.credentialsFor(resolved),
         };
         clone_opts.fetch_opts.callbacks.credentials = credentialsCallback;
         clone_opts.fetch_opts.callbacks.certificate_check = certificateCheckCallback;
@@ -687,6 +704,14 @@ pub const Resource = struct {
 
         if (repo_ptr) |repo| {
             defer c.git_repository_free(repo);
+            // Keep the alias as the stored remote URL; sync compares it with `repository`.
+            if (!std.mem.eql(u8, std.mem.span(url_c.ptr), self.repository)) {
+                const remote_c = try dupZ(allocator, self.remote);
+                defer allocator.free(remote_c);
+                const original_c = try dupZ(allocator, self.repository);
+                defer allocator.free(original_c);
+                if (c.git_remote_set_url(repo, remote_c.ptr, original_c.ptr) != 0) return error.RemoteSetUrlFailed;
+            }
         }
 
         // Set file ownership if user or group is specified
@@ -785,11 +810,22 @@ pub const Resource = struct {
         fetch_opts.prune = c.GIT_FETCH_PRUNE;
         fetch_opts.download_tags = c.GIT_REMOTE_DOWNLOAD_TAGS_ALL;
 
+        // The stored URL stays the alias; only this fetch connects to the resolved address.
+        var resolved = try self.resolveRemote(allocator);
+        defer if (resolved) |*rewritten| rewritten.deinit(allocator);
+        if (resolved) |rewritten| if (!std.mem.eql(u8, rewritten.url, self.repository)) {
+            const rewritten_c = try dupZ(allocator, rewritten.url);
+            defer allocator.free(rewritten_c);
+            if (c.git_remote_set_instance_url(remote, rewritten_c.ptr) != 0) return error.RemoteSetUrlFailed;
+        };
+        var agent_override = if (resolved) |rewritten| try git_ssh.AgentOverride.apply(allocator, rewritten.config) else null;
+        defer if (agent_override) |*override| override.restore();
+
         // Setup credentials and certificate callbacks for fetch
         var ssh_ctx = SshContext{
             .ssh_key_path = self.ssh_key,
             .enable_strict_host_key_checking = self.enable_strict_host_key_checking,
-            .credentials = self.credentialsFor(),
+            .credentials = self.credentialsFor(resolved),
         };
         fetch_opts.callbacks.credentials = credentialsCallback;
         fetch_opts.callbacks.certificate_check = certificateCheckCallback;

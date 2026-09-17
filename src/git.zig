@@ -2,7 +2,7 @@ const std = @import("std");
 const logger = @import("logger.zig");
 const url_utils = @import("http/utils.zig");
 const global_io = @import("global_io.zig");
-const git_credentials = @import("git_credentials.zig");
+const git_ssh = @import("git_ssh.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
@@ -55,7 +55,15 @@ pub fn cloneOnce(allocator: std.mem.Allocator, url: []const u8, destination: []c
 }
 
 fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []const u8, options: CloneOptions) !void {
-    const url_c = try dupZ(allocator, url);
+    // SSH remotes go through ~/.ssh/config; libgit2 sees the rewritten URL only.
+    var remote = try git_ssh.resolve(allocator, global_io.io(), url);
+    defer if (remote) |*resolved| resolved.deinit(allocator);
+    const effective_url = if (remote) |resolved| resolved.url else url;
+    if (!std.mem.eql(u8, effective_url, url)) logger.info("Applying ~/.ssh/config: {s} -> {s}", .{ url, effective_url });
+    var agent_override = if (remote) |resolved| try git_ssh.AgentOverride.apply(allocator, resolved.config) else null;
+    defer if (agent_override) |*override| override.restore();
+
+    const url_c = try dupZ(allocator, effective_url);
     defer allocator.free(url_c);
 
     const destination_c = try dupZ(allocator, destination);
@@ -77,7 +85,10 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
 
     // Always installed: the credentials callback rides on the same payload and
     // must exist even when progress is hidden, or SSH remotes cannot authenticate.
-    var progress_ctx = ProgressContext{ .show = options.show_progress, .credentials = .{ .home = global_io.getEnv("HOME") } };
+    var progress_ctx = ProgressContext{
+        .show = options.show_progress,
+        .credentials = if (remote) |resolved| git_ssh.credentialsFromConfig(resolved.config, null) else .{ .home = global_io.getEnv("HOME") },
+    };
     installProgressCallbacks(&clone_opts, &progress_ctx);
 
     var repo_ptr: ?*c.git_repository = null;
@@ -100,6 +111,12 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
 
     if (repo_ptr) |repo| {
         defer c.git_repository_free(repo);
+        // Keep the alias as the stored remote URL so plain git keeps using ssh_config too.
+        if (!std.mem.eql(u8, effective_url, url)) {
+            const original_c = try dupZ(allocator, url);
+            defer allocator.free(original_c);
+            if (c.git_remote_set_url(repo, "origin", original_c.ptr) != 0) logLibGit2Error(-1);
+        }
     }
 
     var url_buf: [512]u8 = undefined;
@@ -107,7 +124,7 @@ fn cloneInternal(allocator: std.mem.Allocator, url: []const u8, destination: []c
 }
 
 /// A key file libssh2 rejected ends the operation with a hard error; run it again with the next candidate.
-fn retryAfterKeyFailure(credentials: *const git_credentials.Credentials) bool {
+fn retryAfterKeyFailure(credentials: *const git_ssh.Credentials) bool {
     const err = c.git_error_last();
     if (err == null or err.*.message == null) return false;
     const message = std.mem.span(@as([*:0]const u8, @ptrCast(err.*.message)));
@@ -162,10 +179,10 @@ fn credentialsCallback(
         break :blk username_from_url;
     };
 
-    // SSH: the agent first, then the default key files that exist.
+    // SSH: the agent first, then the configured or default key files that exist.
     if ((types & c.GIT_CREDTYPE_SSH_KEY) != 0) {
-        var fallback = git_credentials.Credentials{ .home = global_io.getEnv("HOME") };
-        const credentials: *git_credentials.Credentials = if (ctx) |state| &state.credentials else &fallback;
+        var fallback = git_ssh.Credentials{ .home = global_io.getEnv("HOME") };
+        const credentials: *git_ssh.Credentials = if (ctx) |state| &state.credentials else &fallback;
         var key_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
         while (credentials.next(&key_path_buf)) |candidate| {
             switch (candidate) {
@@ -174,7 +191,7 @@ fn credentialsCallback(
             }
         }
         var url_buf: [512]u8 = undefined;
-        logger.err("SSH authentication failed for {s}: the agent and default keys were all rejected", .{url_utils.maskUrlPassword(std.mem.span(url), &url_buf)});
+        logger.err("SSH authentication failed for {s}: every candidate credential was rejected", .{url_utils.maskUrlPassword(std.mem.span(url), &url_buf)});
         return c.GIT_EAUTH;
     }
 
@@ -267,7 +284,7 @@ const ProgressContext = struct {
     last_fetch_percent: u8 = 101,
     last_checkout_percent: u8 = 101,
     /// SSH credential candidates handed out one per credentialsCallback call.
-    credentials: git_credentials.Credentials = .{},
+    credentials: git_ssh.Credentials = .{},
 };
 
 /// Generate unified diff between two strings

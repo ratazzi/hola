@@ -345,6 +345,15 @@ Authentication tries the agent first, then each existing `IdentityFile` in order
 `--identity` uses that key alone. `ProxyJump` is refused with a clear error, and
 `ProxyCommand`, `Match exec`, passwords and inventories are not supported.
 
+The same lookup applies to SSH remotes of `hola git-clone` and the `git`
+resource, whose libgit2 transport does not read the file either. An alias such
+as `work:org/repo.git` is rewritten with the configured `HostName`, `User` and
+`Port` before libgit2 sees it (a port turns scp form into `ssh://host:port/~/path`),
+while the repository keeps the alias as its remote URL. The agent is tried
+first, honouring `IdentityAgent`, then each configured `IdentityFile`; without
+any, the default `~/.ssh/id_*` keys. The resource's `ssh_key` property still
+uses that key alone.
+
 The target needs SSH/SFTP and a POSIX shell with standard Unix utilities; Hola
 and Ruby do not need to be installed. On a matching OS/architecture, Hola uploads
 its own executable. Otherwise it downloads the same version for the remote

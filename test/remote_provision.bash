@@ -146,6 +146,60 @@ if run "$fixture/single.rb" --host loop --port 1; then fail; fi
 grep -q 'Cannot connect to 127.0.0.1:1' "$fixture/output.log" || fail
 echo 'PASS ssh_config aliases, Include, IdentityAgent, ProxyJump refusal and CLI precedence'
 
+# git over SSH resolves the same config: hola git-clone and the git resource.
+# libgit2 verifies host keys against ~/.ssh/known_hosts of the isolated HOME.
+cp "$fixture/known_hosts" "$fixture/home/.ssh/known_hosts"
+cat >> "$fixture/home/.ssh/config" <<EOF
+Host gitloop
+    HostName 127.0.0.1
+    User $(id -un)
+    IdentityFile $fixture/client
+EOF
+git init -q --bare "$fixture/repo.git"
+git -C "$fixture/repo.git" symbolic-ref HEAD refs/heads/main
+git init -q -b main "$fixture/src"
+git -C "$fixture/src" -c user.name=hola -c user.email=hola@example.com commit -q --allow-empty -m init
+git -C "$fixture/src" push -q "$fixture/repo.git" main
+mkdir -p "$fixture/home/repos"
+git clone -q --bare "$fixture/repo.git" "$fixture/home/repos/rel.git"
+run_clone() {
+  HOME="$fixture/home" "$binary" git-clone --quiet "$@" > "$fixture/output.log" 2>&1
+}
+SSH_AUTH_SOCK= run_clone "gitloop:$fixture/repo.git" "$fixture/clone-abs" || fail
+[ "$(git -C "$fixture/clone-abs" remote get-url origin)" = "gitloop:$fixture/repo.git" ] || fail
+[ "$(git -C "$fixture/clone-abs" rev-parse HEAD)" = "$(git -C "$fixture/src" rev-parse HEAD)" ] || fail
+SSH_AUTH_SOCK= run_clone gitloop:repos/rel.git "$fixture/clone-rel" || fail
+[ "$(git -C "$fixture/clone-rel" rev-parse HEAD)" = "$(git -C "$fixture/src" rev-parse HEAD)" ] || fail
+SSH_AUTH_SOCK= run_clone "agent-git:$fixture/repo.git" "$fixture/clone-agent" || fail
+if SSH_AUTH_SOCK= run_clone "$(id -un)@127.0.0.1:$fixture/repo.git" "$fixture/clone-plain"; then fail; fi
+# An encrypted default key cannot be loaded without a passphrase and must be skipped for the next one.
+ssh-keygen -q -t ed25519 -N 'passphrase' -f "$fixture/home/.ssh/id_ed25519"
+cp "$fixture/client" "$fixture/home/.ssh/id_rsa"
+SSH_AUTH_SOCK= run_clone "$(id -un)@127.0.0.1:$fixture/repo.git" "$fixture/clone-plain" || fail
+[ "$(git -C "$fixture/clone-plain" rev-parse HEAD)" = "$(git -C "$fixture/src" rev-parse HEAD)" ] || fail
+# A corrupted key passes the header check; libssh2's rejection must lead to a retry with the next key.
+awk 'NR == 3 { gsub(/./, "A") } { print }' "$fixture/client" > "$fixture/home/.ssh/id_ed25519"
+rm -rf "$fixture/clone-plain"
+SSH_AUTH_SOCK= run_clone "$(id -un)@127.0.0.1:$fixture/repo.git" "$fixture/clone-plain" || fail
+[ "$(git -C "$fixture/clone-plain" rev-parse HEAD)" = "$(git -C "$fixture/src" rev-parse HEAD)" ] || fail
+grep -q 'trying the next candidate' "$XDG_STATE_HOME"/hola/logs/*.log || fail
+echo 'PASS git-clone through ssh_config: IdentityFile, relative path, IdentityAgent, alias kept, encrypted and corrupted default keys skipped'
+
+cat > "$fixture/git.rb" <<RUBY
+git '$fixture/resource-clone' do
+  repository 'gitloop:$fixture/repo.git'
+  revision 'main'
+end
+RUBY
+SSH_AUTH_SOCK= run "$fixture/git.rb" || fail
+[ "$(git -C "$fixture/resource-clone" remote get-url origin)" = "gitloop:$fixture/repo.git" ] || fail
+git -C "$fixture/src" -c user.name=hola -c user.email=hola@example.com commit -q --allow-empty -m second
+git -C "$fixture/src" push -q "$fixture/repo.git" main
+SSH_AUTH_SOCK= run "$fixture/git.rb" || fail
+[ "$(git -C "$fixture/resource-clone" rev-parse HEAD)" = "$(git -C "$fixture/src" rev-parse HEAD)" ] || fail
+[ "$(git -C "$fixture/resource-clone" remote get-url origin)" = "gitloop:$fixture/repo.git" ] || fail
+echo 'PASS git resource clone and sync through ssh_config'
+
 for known in empty_known_hosts wrong_known_hosts; do
   if run "$fixture/single.rb" --host "$(id -un)@127.0.0.1" --port "$port" \
       --known-hosts "$fixture/$known" --identity "$fixture/client"; then fail; fi
