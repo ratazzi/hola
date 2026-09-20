@@ -97,3 +97,48 @@ task :clean do
 end
 
 task :default => :build
+
+desc "Parse every macOS release resource without invoking platform tools"
+task :macos_release_resources do
+  skip = proc { false }
+
+  resources do
+    xcode_build "fixture" do
+      workspace "Fixture.xcworkspace"
+      scheme "Fixture"
+      derived_data_path ".hola-rake-test/DerivedData"
+      settings "MARKETING_VERSION" => "1.0.0"
+      creates ".hola-rake-test/Fixture.app"
+      only_if(&skip)
+    end
+
+    macos_signing_certificate "Developer ID Application: Fixture" do
+      certificate_base64 "Zml4dHVyZQ=="
+      password "fixture"
+      keychain ".hola-rake-test/build.keychain"
+      only_if(&skip)
+    end
+
+    macos_codesign ".hola-rake-test/Fixture.app" do
+      identity "Developer ID Application: Fixture"
+      identifier "ac.hola.fixture"
+      entitlements "Fixture.entitlements"
+      nested true
+      only_if(&skip)
+    end
+
+    macos_dmg ".hola-rake-test/Fixture.dmg" do
+      source ".hola-rake-test/Fixture.app"
+      volume_name "Fixture"
+      window_bounds [100, 100, 640, 480]
+      icon_position "Fixture.app", [180, 220]
+      icon_position "Applications", [460, 220]
+      only_if(&skip)
+    end
+
+    macos_notarize ".hola-rake-test/Fixture.dmg" do
+      keychain_profile "fixture"
+      only_if(&skip)
+    end
+  end
+end

@@ -5,6 +5,7 @@ module Hola
       macos_dock macos_defaults apt_repository systemd_unit mount
       package homebrew_package apt_package ruby_block git user group
       aws_kms file_edit extract apt_update
+      xcode_build macos_signing_certificate macos_codesign macos_dmg macos_notarize
     ]
 
     DSL_METHODS = []

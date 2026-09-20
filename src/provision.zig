@@ -620,6 +620,7 @@ pub const Session = struct {
         try self.mrb.evalString(resources.template.ruby_prelude);
         try self.mrb.evalString(resources.macos_dock.ruby_prelude);
         try self.mrb.evalString(resources.macos_defaults.ruby_prelude);
+        try self.mrb.evalString(resources.macos_release.ruby_prelude);
         try self.mrb.evalString(resources.directory.ruby_prelude);
         try self.mrb.evalString(resources.link.ruby_prelude);
         try self.mrb.evalString(resources.route.ruby_prelude);
@@ -1207,6 +1208,86 @@ export fn zig_add_macos_defaults_resource(mrb: *mruby.mrb_state, self: mruby.mrb
     return addMacosDefaultsResourceWithMetadata(mrb, self);
 }
 
+export fn zig_add_xcode_build_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_macos) {
+        return mruby.mrb_nil_value();
+    }
+    return addSimpleResourceWithMetadata(
+        resources.macos_release.XcodeBuild,
+        "xcode_build",
+        "name",
+        "xcode_build",
+        "common",
+        mrb,
+        self,
+        resources.macos_release.zigAddXcodeBuild,
+    );
+}
+
+export fn zig_add_macos_signing_certificate_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_macos) {
+        return mruby.mrb_nil_value();
+    }
+    return addSimpleResourceWithMetadata(
+        resources.macos_release.SigningCertificate,
+        "macos_signing_certificate",
+        "identity",
+        "macos_signing_certificate",
+        "common",
+        mrb,
+        self,
+        resources.macos_release.zigAddSigningCertificate,
+    );
+}
+
+export fn zig_add_macos_codesign_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_macos) {
+        return mruby.mrb_nil_value();
+    }
+    return addSimpleResourceWithMetadata(
+        resources.macos_release.Codesign,
+        "macos_codesign",
+        "path",
+        "macos_codesign",
+        "common",
+        mrb,
+        self,
+        resources.macos_release.zigAddCodesign,
+    );
+}
+
+export fn zig_add_macos_dmg_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_macos) {
+        return mruby.mrb_nil_value();
+    }
+    return addSimpleResourceWithMetadata(
+        resources.macos_release.Dmg,
+        "macos_dmg",
+        "path",
+        "macos_dmg",
+        "common",
+        mrb,
+        self,
+        resources.macos_release.zigAddDmg,
+    );
+}
+
+export fn zig_add_macos_notarize_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
+    if (!is_macos) {
+        return mruby.mrb_nil_value();
+    }
+    return addSimpleResourceWithMetadata(
+        resources.macos_release.Notarize,
+        "macos_notarize",
+        "path",
+        "macos_notarize",
+        "common",
+        mrb,
+        self,
+        resources.macos_release.zigAddNotarize,
+    );
+}
+
 // Zig callback for apt_repository resource (Linux only)
 export fn zig_add_apt_repository_resource(mrb: *mruby.mrb_state, self: mruby.mrb_value) callconv(.c) mruby.mrb_value {
     if (!is_linux) {
@@ -1675,6 +1756,11 @@ fn registerResourceBindings(mrb_ptr: *mruby.mrb_state, zig_module: *mruby.RClass
         .{ .name = "add_link", .handler = zig_add_link_resource, .args_spec = mruby.MRB_ARGS_REQ(4) | mruby.MRB_ARGS_OPT(6) },
         .{ .name = "add_route", .handler = zig_add_route_resource, .args_spec = mruby.MRB_ARGS_REQ(5) | mruby.MRB_ARGS_OPT(5) },
         .{ .name = "add_macos_defaults", .handler = zig_add_macos_defaults_resource, .args_spec = mruby.MRB_ARGS_REQ(2) | mruby.MRB_ARGS_OPT(9), .platform = .macos },
+        .{ .name = "add_xcode_build", .handler = zig_add_xcode_build_resource, .args_spec = mruby.MRB_ARGS_REQ(1), .platform = .macos },
+        .{ .name = "add_macos_signing_certificate", .handler = zig_add_macos_signing_certificate_resource, .args_spec = mruby.MRB_ARGS_REQ(1), .platform = .macos },
+        .{ .name = "add_macos_codesign", .handler = zig_add_macos_codesign_resource, .args_spec = mruby.MRB_ARGS_REQ(1), .platform = .macos },
+        .{ .name = "add_macos_dmg", .handler = zig_add_macos_dmg_resource, .args_spec = mruby.MRB_ARGS_REQ(1), .platform = .macos },
+        .{ .name = "add_macos_notarize", .handler = zig_add_macos_notarize_resource, .args_spec = mruby.MRB_ARGS_REQ(1), .platform = .macos },
         .{ .name = "add_apt_repository", .handler = zig_add_apt_repository_resource, .args_spec = mruby.MRB_ARGS_REQ(10) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_systemd_unit", .handler = zig_add_systemd_unit_resource, .args_spec = mruby.MRB_ARGS_REQ(3) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
         .{ .name = "add_mount", .handler = zig_add_mount_resource, .args_spec = mruby.MRB_ARGS_REQ(9) | mruby.MRB_ARGS_OPT(5), .platform = .linux },
