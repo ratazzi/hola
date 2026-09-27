@@ -225,7 +225,9 @@ pub fn zigAddResource(
     var mode_val: mruby.mrb_value = undefined;
     var owner_val: mruby.mrb_value = undefined;
     var group_val: mruby.mrb_value = undefined;
-    var recursive_val: mruby.mrb_value = undefined;
+    // Format `b` writes a single mrb_bool (u8), not a full mrb_value; using a
+    // wider type here would leave the high bytes uninitialized.
+    var recursive_val: mruby.mrb_bool = undefined;
     var action_val: mruby.mrb_value = undefined;
     var only_if_val: mruby.mrb_value = undefined;
     var not_if_val: mruby.mrb_value = undefined;
@@ -264,7 +266,7 @@ pub fn zigAddResource(
         null;
 
     // Parse recursive (boolean)
-    const recursive = mruby.mrb_test(recursive_val);
+    const recursive = recursive_val != 0;
 
     // Parse action (string)
     const action_cstr = mruby.mrb_str_to_cstr(mrb, action_val);
