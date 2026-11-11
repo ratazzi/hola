@@ -1,15 +1,12 @@
 const std = @import("std");
 const global_io = @import("global_io.zig");
 const indicatif = @import("indicatif.zig");
-const ansi = @import("ansi_term");
 const ansi_constants = @import("ansi_constants.zig");
 const ANSI = ansi_constants.ANSI;
 const http = @import("http.zig");
 const output_channel = @import("output_channel.zig");
 const resources = @import("resources.zig");
 
-const AnsiStyle = ansi.style.Style;
-const AnsiColor = ansi.style.Color;
 const STATUS_PENDING = "[DL] pending";
 const STATUS_DOWNLOADING = "[DL] downloading";
 const STATUS_DONE = "[DL] done";
@@ -749,7 +746,7 @@ pub const ModernProvisionDisplay = struct {
             const base = try std.fmt.allocPrint(self.allocator, "[DL {s}] {s}", .{ status_text, label_text });
             defer self.allocator.free(base);
 
-            const msg = try self.makeColoredMessage(if (success) .Green else .Red, true, base);
+            const msg = try self.makeColoredMessage(if (success) ANSI.GREEN else ANSI.RED, true, base);
             try self.download_finished_messages.append(self.allocator, msg);
 
             // Release old label; spinner will now own colored string through download_finished_messages.
@@ -980,7 +977,7 @@ pub const ModernProvisionDisplay = struct {
             const base_with_icon = try std.fmt.allocPrint(self.allocator, "{s}✗ {s}", .{ INDENT_RESOURCE, base });
             defer self.allocator.free(base_with_icon);
 
-            const msg = try self.makeColoredMessage(.Red, true, base_with_icon);
+            const msg = try self.makeColoredMessage(ANSI.RED, true, base_with_icon);
             try self.download_finished_messages.append(self.allocator, msg);
 
             const finished_style = try indicatif.ProgressStyle.withTemplate(self.allocator, "{msg}");
@@ -1128,17 +1125,14 @@ pub const ModernProvisionDisplay = struct {
         try self.mp.draw();
     }
 
-    fn makeColoredMessage(self: *Self, color: AnsiColor, bold: bool, text: []const u8) ![]u8 {
+    fn makeColoredMessage(self: *Self, color: []const u8, bold: bool, text: []const u8) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer aw.deinit();
-        const style = AnsiStyle{
-            .foreground = color,
-            .font_style = if (bold) .{ .bold = true } else .{},
-        };
         const writer = &aw.writer;
-        try ansi.format.updateStyle(writer, style, null);
+        if (bold) try writer.writeAll(ANSI.BOLD);
+        try writer.writeAll(color);
         try writer.writeAll(text);
-        try ansi.format.resetStyle(writer);
+        try writer.writeAll(ANSI.RESET);
         return try aw.toOwnedSlice();
     }
 

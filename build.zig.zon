@@ -52,10 +52,6 @@
             .url = "git+https://github.com/rockorager/libvaxis#06c8b9db2d4b83c279e985603ffabfa828dcbd35",
             .hash = "vaxis-0.6.0-BWNV_N0GCgC-VGPXJ3sS8N2NBiUqUfkCLti-Mv7hXLNM",
         },
-        .ansi_term = .{
-            .url = "git+https://github.com/ziglibs/ansi_term?ref=master#47e27d707ac9569be9b0863cfa7b150600d977c9",
-            .hash = "ansi_term-0.1.0-_baAywpoAABEqsPmS5Jz_CddDCrG8qdIyRIESH8D2fzd",
-        },
         .toml = .{
             .url = "https://github.com/sam701/zig-toml/archive/00c5715edc45e0019cc0543ee699ee40382e5247.tar.gz",
             .hash = "toml-0.3.0-bV14BRmKAQAWR0FT0KUKFwVJTImaFhWjSe6HfSMtNZOH",

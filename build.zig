@@ -51,10 +51,6 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    const ansi_term_dep = b.dependency("ansi_term", .{
-        .target = target,
-        .optimize = optimize,
-    });
     const toml_dep = b.dependency("toml", .{
         .target = target,
         .optimize = optimize,
@@ -114,7 +110,6 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{
                 .{ .name = "clap", .module = clap_dep.module("clap") },
                 .{ .name = "vaxis", .module = vaxis_dep.module("vaxis") },
-                .{ .name = "ansi_term", .module = ansi_term_dep.module("ansi_term") },
                 .{ .name = "toml", .module = toml_dep.module("toml") },
                 .{ .name = "zeit", .module = zeit_dep.module("zeit") },
                 .{ .name = "build_options", .module = options.createModule() },
